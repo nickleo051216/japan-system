@@ -1,0 +1,16 @@
+{
+  "name": "heeehababy-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HEEEHABABY 代購自動化系統 — 後台 + 前端雛型 (Prototype)",
+  "type": "commonjs",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "start": "node server/index.js",
+    "reset": "node server/index.js --reset",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
