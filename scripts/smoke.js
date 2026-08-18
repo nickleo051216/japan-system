@@ -37,7 +37,23 @@ async function api(method, url, { token, body, idem } = {}) {
 }
 const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id } })).json.data.token;
 
+async function portIsFree(port) {
+  const net = require('node:net');
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.once('listening', () => s.close(() => resolve(true)));
+    s.listen(port, '127.0.0.1');
+  });
+}
+
 (async () => {
+  // A leftover server from a previous run would answer with ITS database and
+  // make these checks meaningless — refuse to run rather than report a lie.
+  if (!(await portIsFree(PORT))) {
+    console.error(`\n埠號 ${PORT} 已被佔用，可能是上一輪的伺服器還在。請先關閉再重跑，否則測試結果不可信。`);
+    process.exit(2);
+  }
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.on('data', (d) => { const s = d.toString(); if (!/Warning/.test(s)) process.stderr.write(s); });
   for (let i = 0; i < 50; i++) {
@@ -180,7 +196,10 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     failed++;
     console.error('\n測試中止：', e);
   } finally {
-    child.kill();
+    // Wait for the child to actually exit, so a following run does not talk to it.
+    const exited = new Promise((r) => child.once('exit', r));
+    child.kill('SIGKILL');
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
