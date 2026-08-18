@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server/index.js",
     "reset": "node server/index.js --reset",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "conformance": "node scripts/conformance.js"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
