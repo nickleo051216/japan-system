@@ -4,7 +4,9 @@
   "private": true,
   "description": "HEEEHABABY 代購自動化系統 — 後台 + 前端雛型 (Prototype)",
   "type": "commonjs",
-  "engines": { "node": ">=22.5.0" },
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "start": "node server/index.js",
     "reset": "node server/index.js --reset",
