@@ -283,6 +283,39 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('綁定成功', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-002', carrier: '黑貓' } })).json.ok);
     check('重複單號被擋下', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-004' } })).status === 409);
     check('一單多包裹可綁', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX124', order_id: 'HB2608-002' } })).json.ok);
+
+    section('上線健檢 /api/v1/health');
+    const hPublic = await api('GET', '/api/v1/health');
+    check('不帶 token 也答得出話', hPublic.status === 200 && hPublic.json.ok, hPublic.json);
+    check('資料庫探測為通', hPublic.json.data.db.up === true, hPublic.json.data.db);
+    check('連線模式已脫敏（只回模式與埠）', /^local:\d+$/.test(hPublic.json.data.db.mode), hPublic.json.data.db.mode);
+    check('有成員時，未登入看不到詳細內容',
+      hPublic.json.data.detail === null && !!hPublic.json.data.detail_hint, hPublic.json.data);
+
+    const hOwner = (await api('GET', '/api/v1/health', { token: owner })).json.data;
+    check('店主看得到詳細內容', !!hOwner.detail && hOwner.detail.open_reason === '店主 token');
+    check('資料表一張不缺', hOwner.detail.schema.missing.length === 0, hOwner.detail.schema);
+    check('必要環境變數全部就緒',
+      hOwner.detail.config.filter((c) => c.required && !c.set).length === 0,
+      hOwner.detail.config.filter((c) => c.required && !c.set).map((c) => c.key));
+    check('刻意不設的 NOTIFY_HOOK_URL 標為未設且非必要',
+      hOwner.detail.config.some((c) => c.key === 'NOTIFY_HOOK_URL' && c.set === false && c.required === false));
+    check('店家設定已填完，不再列為缺項', hOwner.detail.shop_settings_missing.length === 0, hOwner.detail.shop_settings_missing);
+    check('狀態為 ok 且無待辦', hOwner.status === 'ok' && hOwner.detail.blocking.length === 0, hOwner.detail.blocking);
+    check('筆數看得到而且合理', hOwner.detail.rows.order_status_rules > 0 && hOwner.detail.rows.price_table > 0, hOwner.detail.rows);
+
+    const hMachine = (await api('GET', '/api/v1/health', { headers: { 'X-Notify-Token': 'smoke-notify-secret' } })).json.data;
+    check('n8n 帶機器金鑰看得到詳細內容', !!hMachine.detail && /機器金鑰/.test(hMachine.detail.open_reason));
+    check('機器金鑰錯了就看不到',
+      (await api('GET', '/api/v1/health', { headers: { 'X-Notify-Token': 'wrong-secret-here' } })).json.data.detail === null);
+
+    // 健檢回的是「有沒有設」，不是「設成什麼」——這條守住金鑰與收款帳號。
+    const hDump = JSON.stringify(hOwner);
+    check('回應不含收款帳號', !hDump.includes(ACCT));
+    check('回應不含任何金鑰值',
+      !hDump.includes('smoke-notify-secret') && !hDump.includes('smoke-test-signing-key')
+      && !hDump.includes('smoke-test-session-key'));
+    check('回應不含連線字串', !hDump.includes('postgres://') && !hDump.includes('postgresql://'));
   } catch (e) {
     failed++;
     console.error('\n測試中止：', e);

@@ -28,9 +28,13 @@ const ON_VERCEL = !!process.env.VERCEL;
 // instances of one deployment, different for every deployment, and not a secret
 // committed to the repository. Setting the real env var overrides it, and any
 // deployment handling real orders MUST set it.
+const DERIVED_KEYS = [];
 function keyOrEphemeral(name) {
   const v = process.env[name];
   if (v && v.trim()) return v.trim();
+  // Remember the fallback so /api/v1/health can report the key as unset
+  // without ever reading — let alone returning — its value.
+  DERIVED_KEYS.push(name);
   if (ON_VERCEL) {
     const anchor = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || 'hb-demo';
     console.warn(`[config] ${name} 未設定，示範站以部署網址推導金鑰。正式環境必須設定真正的金鑰。`);
@@ -52,6 +56,8 @@ const defaultUploadDir = ON_VERCEL
 module.exports = {
   onVercel: ON_VERCEL,
   port: Number(process.env.PORT || 3000),
+  // 哪幾把簽章金鑰是推導出來的（＝環境變數沒設）。健檢用，只回報名稱不回報值。
+  derivedKeys: DERIVED_KEYS,
   // Supabase → Connect → Transaction pooler (port 6543). Read by lib/db.js
   // straight from the environment; exposed here only so startup can tell the
   // operator it is missing instead of failing on the first query.
