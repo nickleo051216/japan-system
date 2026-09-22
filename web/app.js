@@ -146,22 +146,64 @@ export function logout() {
   boot();
 }
 
-async function renderLogin() {
+async function renderLogin(err = null) {
   document.getElementById('app').style.display = 'none';
-  const personas = await (await fetch('/api/v1/auth/personas')).json();
+  document.querySelectorAll('.login').forEach((n) => n.remove());
+
+  // 後台共用密碼。人員名單本身就是個資，所以要先過密碼才拿得到。
+  // 只放在記憶體，不寫 localStorage —— 重新整理就要再輸入一次。
+  const input = h('input', {
+    id: 'admin-password', type: 'password', class: 'input',
+    placeholder: '後台密碼', autocomplete: 'current-password',
+  });
+
+  const enter = async () => {
+    const pw = input.value;
+    if (!pw) return renderLogin('請輸入後台密碼');
+    let list;
+    try {
+      const res = await fetch('/api/v1/auth/personas', { headers: { 'X-Admin-Password': pw } });
+      const json = await res.json();
+      if (!json.ok) return renderLogin(json.error.message);
+      list = json.data;
+    } catch { return renderLogin('連不上伺服器，請稍後再試'); }
+
+    if (!list.length) return renderLogin('系統還沒有任何成員，請先建立第一位店主');
+    renderPersonas(pw, list);
+  };
+
   const box = h('div', { class: 'login' },
     h('div', { class: 'box' },
       h('div', { class: 'card' },
         h('div', { class: 'card-head' }, h('h2', {}, 'HEEEHABABY 代購營運後台')),
         h('div', { class: 'card-body' },
           h('p', { class: 'muted small', style: 'margin-top:0' },
-            '雛型以身分切換代替 LINE 登入。正式版此處為 LIFF ID Token 驗證（I-02），角色一律由伺服器判定。'),
+            '雛型以共用密碼保護後台入口，再以身分切換代替 LINE 登入。'
+            + '正式版此處為 LINE Login ID Token 驗證（I-02），白名單即 members 名單，角色一律由伺服器判定。'),
+          err ? h('p', { class: 'small', style: 'color:var(--bad,#a8241c); margin:0 0 8px' }, err) : null,
           h('div', { class: 'grid', style: 'gap:8px' },
-            ...personas.data.map((p) => h('button', {
+            input,
+            h('button', { class: 'btn primary', onClick: enter }, '進入'))))));
+
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter') enter(); });
+  document.body.append(box);
+  input.focus();
+}
+
+/** 密碼過關之後才列出人員，並把密碼一併帶去換 token。 */
+function renderPersonas(pw, personas) {
+  document.querySelectorAll('.login').forEach((n) => n.remove());
+  const box = h('div', { class: 'login' },
+    h('div', { class: 'box' },
+      h('div', { class: 'card' },
+        h('div', { class: 'card-head' }, h('h2', {}, '選擇身分')),
+        h('div', { class: 'card-body' },
+          h('div', { class: 'grid', style: 'gap:8px' },
+            ...personas.map((p) => h('button', {
               class: 'persona',
               onClick: async () => {
                 try {
-                  const data = await POST('/api/v1/auth/login', { line_user_id: p.line_user_id });
+                  const data = await POST('/api/v1/auth/login', { line_user_id: p.line_user_id, password: pw });
                   localStorage.setItem(TOKEN_KEY, data.token);
                   session.token = data.token;
                   location.hash = '#/dashboard';
@@ -172,7 +214,8 @@ async function renderLogin() {
               h('div', { class: 'avatar' }, p.nickname.slice(0, 1)),
               h('div', {}, h('div', {}, p.nickname), h('div', { class: 'tiny muted' }, `${roleLabel(p.role)} · ${p.line_user_id}`)),
               h('div', { class: 'spacer', style: 'flex:1' }),
-              h('span', { class: 'tag' }, roleLabel(p.role)))))))));
+              h('span', { class: 'tag' }, roleLabel(p.role)))),
+            h('button', { class: 'btn', onClick: () => renderLogin() }, '返回'))))));
   document.body.append(box);
 }
 

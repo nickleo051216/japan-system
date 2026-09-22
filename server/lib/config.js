@@ -63,6 +63,10 @@ module.exports = {
   // operator it is missing instead of failing on the first query.
   databaseUrl: process.env.DATABASE_URL || '',
   uploadDir: path.resolve(process.env.UPLOAD_DIR || defaultUploadDir),
+  // 後台登入的共用密碼。刻意沒有預設值也沒有推導 fallback —— 沒設就是任何人
+  // 都登不進去（fail closed）。這是 LIFF ID Token 上線前的過渡措施，
+  // 因為雛型的 /auth/login 只比對 line_user_id，而那支 API 是公開的。
+  adminLoginPassword: (process.env.ADMIN_LOGIN_PASSWORD || '').trim(),
   // 通知佇列：n8n 取件時要帶的共用金鑰，以及後端排隊後戳 n8n 的網址。
   // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
   notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),

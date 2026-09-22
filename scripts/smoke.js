@@ -25,6 +25,7 @@ const envFor = (databaseUrl) => ({
   DB_POOL_MAX: '1',
   QR_SIGNING_KEY: 'smoke-test-signing-key',
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
+  ADMIN_LOGIN_PASSWORD: 'smoke-admin-password-0123456789',
   NOTIFY_SHARED_SECRET: 'smoke-notify-secret',
   // NOTIFY_HOOK_URL 刻意不設：驗證「沒接 n8n 也照常出貨」
   FX_JPY_TWD: '0.215',
@@ -61,7 +62,9 @@ async function api(method, url, { token, body, idem, headers: extra } = {}) {
   const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   return { status: res.status, json: await res.json() };
 }
-const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id } })).json.data.token;
+const ADMIN_PW = 'smoke-admin-password-0123456789';
+const login = async (id) =>
+  (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id, password: ADMIN_PW } })).json.data.token;
 
 (async () => {
   let harness = null;
@@ -78,7 +81,7 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     { cwd: ROOT, env: envFor(databaseUrl), stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.on('data', (d) => { const s = d.toString(); if (!/Warning/.test(s)) process.stderr.write(s); });
   for (let i = 0; i < 300; i++) {
-    try { await fetch(BASE + '/api/v1/auth/personas'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    try { await fetch(BASE + '/api/v1/health'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
 
   try {
@@ -283,6 +286,43 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('綁定成功', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-002', carrier: '黑貓' } })).json.ok);
     check('重複單號被擋下', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-004' } })).status === 409);
     check('一單多包裹可綁', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX124', order_id: 'HB2608-002' } })).json.ok);
+
+    section('後台登入的門');
+    check('沒帶密碼拿不到人員名單',
+      (await api('GET', '/api/v1/auth/personas')).status === 401);
+    check('密碼錯了拿不到人員名單',
+      (await api('GET', '/api/v1/auth/personas', { headers: { 'X-Admin-Password': 'wrong' } })).status === 401);
+    const pl = await api('GET', '/api/v1/auth/personas', { headers: { 'X-Admin-Password': ADMIN_PW } });
+    check('密碼正確才列出人員', pl.status === 200 && pl.json.data.length > 0);
+    check('沒帶密碼不發 token',
+      (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner' } })).status === 401);
+    check('密碼錯了不發 token',
+      (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner', password: 'wrong' } })).status === 401);
+    check('密碼對但查無此人回 404，不是 401（不洩漏密碼對錯以外的事）',
+      (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U-nobody', password: ADMIN_PW } })).status === 404);
+    // 登入回應含 token，被冪等快取存起來等於多一條不用密碼就能拿到它的路
+    const idem = 'smoke-login-replay';
+    const relogin = await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner', password: ADMIN_PW }, idem });
+    check('登入本身成功', relogin.status === 200 && !!relogin.json.data.token);
+    check('同一把 Idempotency-Key 重播、但不帶密碼，仍然被擋下',
+      (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner' }, idem })).status === 401);
+    // 冪等快取綁定身分：猜中別人的 key 也領不走別人的回應
+    const shopKey = 'smoke-shop-scope';
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { shop_name: 'HEEEHABABY' }, idem: shopKey });
+    check('助手用同一把 Idempotency-Key 領不到店主的回應',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { shop_name: 'X' }, idem: shopKey })).status === 403);
+
+    // 這一項放在最後：它會把這個來源鎖住幾分鐘，後面的檢查都改用既有 token。
+    let locked = 0;
+    for (let i = 0; i < 6; i++) {
+      locked = (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner', password: 'nope' } })).status;
+    }
+    check('連續打錯會被鎖住（429），不是無限次讓人猜', locked === 429, { locked });
+    // 沒預期到的例外仍然只回 INTERNAL，不洩漏技術細節（I-03）
+    const boom = await api('GET', '/api/v1/orders/detail?order_id=' + encodeURIComponent("x'"), { token: owner });
+    check('沒預期到的錯誤只回 INTERNAL 或一般 4xx，不含技術細節',
+      boom.status < 500 || (boom.json.error.code === 'INTERNAL' && !/pg|postgres|syntax|SELECT/i.test(boom.json.error.message)),
+      boom.json);
 
     section('上線健檢 /api/v1/health');
     const hPublic = await api('GET', '/api/v1/health');
