@@ -8,8 +8,8 @@ const app = require('../server/app');
 
 module.exports = async function handler(req, res) {
   const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  // Serving an upload touches no database, so it must not boot the pool.
   if (pathname.startsWith('/uploads/')) {
-    app.boot();
     return app.serveFile(res, path.join(app.UPLOAD_DIR, path.basename(pathname)));
   }
   return app.handleApi(req, res);

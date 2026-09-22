@@ -50,15 +50,18 @@ function serveFile(res, file) {
 }
 
 async function handleApi(req, res) {
-  boot();
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = decodeURIComponent(url.pathname);
 
-  const hit = httpLib.match(req.method, pathname);
-  if (!hit) return httpLib.send(res, 404, httpLib.fail('NOT_FOUND', '找不到這個 API'));
-
   const idemKey = req.headers['idempotency-key'] || null;
   try {
+    // Inside the try: boot() now throws when DATABASE_URL is missing, and a
+    // misconfigured deployment must still answer in the I-03 error shape.
+    boot();
+
+    const hit = httpLib.match(req.method, pathname);
+    if (!hit) return httpLib.send(res, 404, httpLib.fail('NOT_FOUND', '找不到這個 API'));
+
     if (req.method === 'POST' && hit.route.idempotent && idemKey) {
       const cached = await httpLib.idempotencyLookup(idemKey);
       if (cached) return httpLib.send(res, 200, cached);
