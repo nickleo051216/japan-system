@@ -121,6 +121,9 @@ web/
   views/              dashboard board expense packing labels scan orders logistics audit settings
 scripts/smoke.js      端對端驗收檢查
 scripts/pg-harness.mjs 本機測試用的假 Supabase（PGlite）
+scripts/buyer-contract-server.js  買家 API 參考實作（記憶體版，供前台開發）
+scripts/buyer-contract.test.js    買家 API 合約測試（47 項）
+BUYER_API_CONTRACT.md 買家前台與後端的唯一邊界，兩邊要改先改這份
 supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／004 相容層／005 通知佇列
 ```
 
