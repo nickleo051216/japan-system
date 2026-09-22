@@ -26,6 +26,13 @@ const envFor = (databaseUrl) => ({
   QR_SIGNING_KEY: 'smoke-test-signing-key',
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   ADMIN_LOGIN_PASSWORD: 'smoke-admin-password-0123456789',
+  LINE_LOGIN_CHANNEL_ID: '2011699944',
+  // 綠界官方測試商店的參數不放進原始碼；這裡用假值，只驗「有沒有簽、簽出來的值
+  // 有沒有外洩」，不驗綠界端是否接受 —— 那要真的打到綠界才算數。
+  ECPAY_MERCHANT_ID: '3002607',
+  ECPAY_HASH_KEY: 'smokeEcpayHashKey00',
+  ECPAY_HASH_IV: 'smokeEcpayHashIv000',
+  ECPAY_API_URL: 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5',
   NOTIFY_SHARED_SECRET: 'smoke-notify-secret',
   // NOTIFY_HOOK_URL 刻意不設：驗證「沒接 n8n 也照常出貨」
   FX_JPY_TWD: '0.215',
@@ -107,7 +114,13 @@ const login = async (id) =>
 
     section('F-03 訂單查詢隔離');
     const mine = (await api('GET', '/api/v1/orders/list', { token: buyer })).json.data;
-    check('買家只查得到自己的訂單', mine.length > 0 && mine.every((o) => o.line_user_id === 'U_buyer1'));
+    const allIds = (await api('GET', '/api/v1/orders/list?limit=500', { token: owner })).json.data.map((o) => o.order_id);
+    check('買家只查得到自己的訂單',
+      mine.length > 0 && mine.length < allIds.length && !mine.some((o) => o.order_id === 'HB2608-005'),
+      { mine: mine.length, all: allIds.length });
+    check('買家拿到的是合約形狀（含 items / status_log / shipments）',
+      mine.every((o) => Array.isArray(o.items) && Array.isArray(o.status_log) && Array.isArray(o.shipments))
+      && !('line_user_id' in mine[0]), mine[0]);
     check('買家查他人訂單回 403', (await api('GET', '/api/v1/orders/detail?order_id=HB2608-005', { token: buyer })).status === 403);
 
     // 品項層級的「部分到貨」：order_items.item_status 跟著採購狀態走
@@ -323,6 +336,165 @@ const login = async (id) =>
     check('沒預期到的錯誤只回 INTERNAL 或一般 4xx，不含技術細節',
       boom.status < 500 || (boom.json.error.code === 'INTERNAL' && !/pg|postgres|syntax|SELECT/i.test(boom.json.error.message)),
       boom.json);
+
+    section('買家 API（BUYER_API_CONTRACT）— 會員與首頁');
+    const B = (m, u, o) => api(m, u, { token: buyer, ...o });
+    check('未帶 token 一律 401', (await api('GET', '/api/v1/home/summary')).status === 401);
+    const prof = (await B('GET', '/api/v1/me/profile')).json.data;
+    check('會員資料欄位齊全',
+      ['line_user_id','nickname','cvs_store_name','carrier','shout_drops'].every((k) => k in prof), prof);
+    check('手機格式錯 → BAD_PHONE',
+      (await B('POST', '/api/v1/me/update', { body: { phone: '123' } })).json.error?.code === 'BAD_PHONE');
+    check('載具格式錯 → BAD_CARRIER',
+      (await B('POST', '/api/v1/me/update', { body: { carrier: 'ABC' } })).json.error?.code === 'BAD_CARRIER');
+    const upd = (await B('POST', '/api/v1/me/update',
+      { body: { nickname: '小周', cvs_brand: '全家', cvs_store_name: '板橋溪城店', carrier: '/AB12+3C' } })).json.data;
+    check('更新暱稱與取貨門市', upd.nickname === '小周' && upd.cvs_store_name === '板橋溪城店');
+
+    const home = (await B('GET', '/api/v1/home/summary')).json.data;
+    check('首頁一次取回 shop/batch/價目表/喊單/待辦',
+      ['shop','batch','price_table','broadcast','todo'].every((k) => k in home));
+    check('價目表 11 級距且第二級 220', home.price_table.length === 11 && home.price_table[1].twd === 220);
+    check('已截止的喊單 open=false',
+      home.broadcast.find((b) => b.send_id === 'BC-SEED-001').open === false);
+    check('銀行資訊備妥旗標', home.shop.bank_ready === true);
+
+    section('買家 API — 購物車');
+    check('空白品名 → BAD_NAME',
+      (await B('POST', '/api/v1/cart/add-text', { body: { name: '  ' } })).json.error?.code === 'BAD_NAME');
+    const t1 = (await B('POST', '/api/v1/cart/add-text',
+      { body: { name: 'Pigeon 奶瓶', jpy_taxed: 1000, qty: 2 }, idem: 'bk-text-1' })).json.data;
+    check('文字下單 → pending 且套用級距價', t1.status === 'pending' && t1.price_twd === 400, { p: t1.price_twd });
+    const t1b = (await B('POST', '/api/v1/cart/add-text',
+      { body: { name: 'Pigeon 奶瓶', jpy_taxed: 1000, qty: 2 }, idem: 'bk-text-1' })).json.data;
+    check('同一 Idempotency-Key 不重複建立', t1b.cart_id === t1.cart_id);
+    check('圖片檔名不符規則 → BAD_FILE_NAME',
+      (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'IMG_001.jpg', data: 'x' } }))
+        .json.error?.code === 'BAD_FILE_NAME');
+    const im = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_2993299f_202609221430123.jpg', data: 'x' } })).json.data;
+    check('拍照下單 → pending、低信心、待報價',
+      im.status === 'pending' && im.ai_confidence === 'low' && im.price_twd === null);
+    check('拍照品項標記為辨識未完成', im.ocr_done === false);
+    check('n8n 沒帶金鑰寫不回辨識結果',
+      (await api('POST', '/api/v1/ocr/result', { body: { cart_id: im.cart_id, jpy_taxed: 1000 } })).status === 401);
+    const ocrBack = await api('POST', '/api/v1/ocr/result', {
+      headers: { 'X-Notify-Token': 'smoke-notify-secret' },
+      body: { cart_id: im.cart_id, name: '貝親 母乳實感奶嘴', jpy_taxed: 649, ai_confidence: 'high' } });
+    check('n8n 回寫辨識結果 → 套用級距價、辨識完成',
+      ocrBack.json.data.cart_item.price_twd === 250 && ocrBack.json.data.cart_item.ocr_done === true, ocrBack.json);
+    check('客人已自行確認過就不覆蓋',
+      (await api('POST', '/api/v1/ocr/result', {
+        headers: { 'X-Notify-Token': 'smoke-notify-secret' },
+        body: { cart_id: im.cart_id, name: '蓋掉它', jpy_taxed: 100 } })).json.data.applied === false);
+    const ed = (await B('POST', '/api/v1/cart/update',
+      { body: { cart_id: im.cart_id, name: 'EDWIN 牛仔褲', jpy_taxed: 2519 } })).json.data;
+    check('修改內容 → 自動確認並重算價格', ed.status === 'confirmed' && ed.price_twd === 890);
+    check('確認品項', (await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [t1.cart_id] } }))
+      .json.data.confirmed.includes(t1.cart_id));
+
+    section('買家 API — 喊單（原子搶量）');
+    const sh = (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 9 } })).json.data;
+    check('喊 9 但只剩 3 → 得 3、餘 0', sh.granted === 3 && sh.remaining === 0, sh);
+    check('喊單品項直接為 confirmed', sh.cart_item.status === 'confirmed');
+    check('搶完 → 409 SOLD_OUT',
+      (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } })).status === 409);
+    check('已截止 → 409 DEADLINE_PASSED',
+      (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-001', qty: 1 } }))
+        .json.error?.code === 'DEADLINE_PASSED');
+    check('喊單品項不能改內容 → 409 NOT_EDITABLE',
+      (await B('POST', '/api/v1/cart/update', { body: { cart_id: sh.cart_item.cart_id, name: '改名' } }))
+        .json.error?.code === 'NOT_EDITABLE');
+    check('排候補',
+      (await B('POST', '/api/v1/broadcast/waitlist', { body: { send_id: 'BC-SEED-002', on: true } }))
+        .json.data.waitlisted === true);
+    const drop = (await B('POST', '/api/v1/cart/remove', { body: { cart_id: sh.cart_item.cart_id } })).json.data;
+    check('取消喊單 → 記一次棄單', drop.shout_drops === 1, drop);
+    check('餘量已回補',
+      (await B('GET', '/api/v1/home/summary')).json.data.broadcast
+        .find((b) => b.send_id === 'BC-SEED-002').remaining === 3);
+
+    section('買家 API — 二十人搶五個名額');
+    const race = await Promise.all(Array.from({ length: 20 }, () =>
+      B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-003', qty: 1 } })));
+    const granted = race.filter((r) => r.json.ok).reduce((a, r) => a + r.json.data.granted, 0);
+    const left = (await B('GET', '/api/v1/home/summary')).json.data.broadcast
+      .find((b) => b.send_id === 'BC-SEED-003').remaining;
+    check('二十次併發喊單不超賣', granted + left === 14 && left >= 0, { granted, left });
+
+    section('買家 API — 許願');
+    check('連結不完整 → BAD_URL',
+      (await B('POST', '/api/v1/wishes/create', { body: { src: 'link', ref_url: 'rakuten.co.jp/x' } }))
+        .json.error?.code === 'BAD_URL');
+    const w = (await B('POST', '/api/v1/wishes/create',
+      { body: { src: 'text', item_name: '阪急嬰兒襪', quantity: 3 } })).json.data;
+    check('文字許願 → 待處理', w.wish_status === '待處理');
+    check('未報價不能加購物車 → 409 NOT_QUOTED',
+      (await B('POST', '/api/v1/wishes/to-cart', { body: { wish_id: w.wish_id } }))
+        .json.error?.code === 'NOT_QUOTED');
+    const q = (await B('POST', '/api/v1/wishes/to-cart', { body: { wish_id: 'W-SEED-002' } })).json.data;
+    check('已報價許願 → 加入購物車（已確認）',
+      q.cart_item.status === 'confirmed' && q.wish.wish_status === '已下單');
+    check('別人的許願查不到 → 404',
+      (await api('POST', '/api/v1/wishes/to-cart', { token: owner, body: { wish_id: 'W-SEED-002' } })).status === 404);
+
+    section('買家 API — 結帳');
+    await B('POST', '/api/v1/cart/add-text', { body: { name: '還沒確認的品項', qty: 1 } });
+    const cart = (await B('GET', '/api/v1/cart/list')).json.data;
+    check('結帳前購物車有待確認品項', cart.some((c) => c.status === 'pending'));
+    check('含未確認品項 → 409 NOT_CONFIRMED',
+      (await B('POST', '/api/v1/orders/checkout',
+        { body: { cart_ids: cart.map((c) => c.cart_id), pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } }))
+        .json.error?.code === 'NOT_CONFIRMED');
+    const conf = cart.filter((c) => c.status === 'confirmed').map((c) => c.cart_id);
+    check('統編非 8 碼 → BAD_TAX_ID',
+      (await B('POST', '/api/v1/orders/checkout',
+        { body: { cart_ids: conf, pickup: { type: 'cvs' }, invoice: { type: 'tax', tax_id: '123' } } }))
+        .json.error?.code === 'BAD_TAX_ID');
+    const co = await B('POST', '/api/v1/orders/checkout', {
+      body: { cart_ids: conf, pickup: { type: 'cvs' }, invoice: { type: 'carrier' }, note: '低調包裝' },
+      idem: 'bk-checkout-1' });
+    const order = co.json.data;
+    check('送出訂單 → 待確認／待付款',
+      order.status === '待確認' && order.payment_status === '待付款', { id: order.order_id, t: order.total_twd });
+    check('運費為超商 70', order.ship_fee_twd === 70);
+    check('取貨資訊由會員資料帶入，不由前台傳', /全家|板橋溪城店/.test(order.pickup), { pickup: order.pickup });
+    check('結帳重送不會成立第二張單',
+      (await B('POST', '/api/v1/orders/checkout', {
+        body: { cart_ids: conf, pickup: { type: 'cvs' }, invoice: { type: 'carrier' } },
+        idem: 'bk-checkout-1' })).json.data.order_id === order.order_id);
+    check('已送出品項離開購物車',
+      !(await B('GET', '/api/v1/cart/list')).json.data.some((c) => conf.includes(c.cart_id)));
+    check('待確認訂單不能申請先出貨 → 409 NOT_SPLITTABLE',
+      (await B('POST', '/api/v1/orders/split-request', { body: { order_id: order.order_id, on: true } }))
+        .json.error?.code === 'NOT_SPLITTABLE');
+    check('未出貨不能按「我已收到」→ 409 ILLEGAL_TRANSITION',
+      (await B('POST', '/api/v1/orders/received', { body: { order_id: order.order_id } }))
+        .json.error?.code === 'ILLEGAL_TRANSITION');
+    check('別人的訂單一律 404',
+      (await B('POST', '/api/v1/orders/received', { body: { order_id: 'HB2608-005' } })).status === 404);
+
+    section('買家 API — 對帳單與付款');
+    const st = (await B('GET', '/api/v1/statements/list')).json.data;
+    check('對帳單列表＋未結算彙總', Array.isArray(st.statements) && 'unbilled' in st);
+    check('末五碼非 5 碼 → BAD_LAST5',
+      (await B('POST', '/api/v1/statements/report-transfer',
+        { body: { statement_id: 'STMT-SEED-001', last5: '12' } })).json.error?.code === 'BAD_LAST5');
+    check('回報末五碼 → 待官方確認',
+      (await B('POST', '/api/v1/statements/report-transfer',
+        { body: { statement_id: 'STMT-SEED-001', last5: '48210' } })).json.data.payment_status === '待官方確認');
+    check('已付清不能再付 → 409 ALREADY_PAID',
+      (await B('POST', '/api/v1/statements/pay-init',
+        { body: { statement_id: 'STMT-SEED-002', payway: 'credit' } })).json.error?.code === 'ALREADY_PAID');
+    check('LINE Pay 第一波不支援 → BAD_PAYWAY',
+      (await B('POST', '/api/v1/statements/pay-init',
+        { body: { statement_id: 'STMT-SEED-001', payway: 'linepay' } })).json.error?.code === 'BAD_PAYWAY');
+    const pay = await B('POST', '/api/v1/statements/pay-init',
+      { body: { statement_id: 'STMT-SEED-001', payway: 'credit' } });
+    check('信用卡 → 導轉表單，且 CheckMacValue 在後端產生',
+      pay.json.data.flow === 'redirect' && !!pay.json.data.action && !!pay.json.data.fields.CheckMacValue, pay.json.error);
+    check('回應不含綠界金鑰',
+      !JSON.stringify(pay.json).includes(process.env.SMOKE_ECPAY_HASH_KEY || 'smokeEcpayHashKey00'));
 
     section('上線健檢 /api/v1/health');
     const hPublic = await api('GET', '/api/v1/health');

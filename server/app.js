@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const config = require('./lib/config');
 const auth = require('./lib/auth');
+const liff = require('./lib/liff');
 const httpLib = require('./lib/http');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
@@ -41,6 +42,11 @@ function boot() {
   require('./routes/procurement');
   require('./routes/shipping');
   require('./routes/dashboard');
+  // 買家 API（BUYER_API_CONTRACT.md）。buyer.js 要先載入 —— 另外兩支共用它的
+  // 身分包裝與資料形狀。
+  require('./routes/buyer');
+  require('./routes/buyer-cart');
+  require('./routes/buyer-orders');
   booted = true;
   return true;
 }
@@ -69,12 +75,19 @@ async function handleApi(req, res) {
     // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
-      || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/');
+      || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/')
+      || pathname === '/api/v1/ocr/result';
 
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
     let actor = null;
     try {
+      // 兩種憑證，同一個出口：後端自簽的 session token（兩段）給後台與自動化，
+      // LINE 的 ID Token（JWT，三段）給 LIFF 買家。路由拿到的一律是 members 一列，
+      // 不必各自判斷身分是從哪來的。
       actor = await auth.resolve(token);
+      if (!actor && token && token.split('.').length === 3) {
+        actor = await liff.fromIdToken(token);
+      }
     } catch (e) {
       // 解析 token 要查資料庫。資料庫不通時，公開路由不該跟著一起 500 ——
       // /health 的工作就是在這種時候告訴你哪裡壞了。

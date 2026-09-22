@@ -60,6 +60,9 @@ const ENV_CHECKS = [
   { key: 'ADMIN_LOGIN_PASSWORD', required: true,
     isSet: () => !!config.adminLoginPassword,
     note: '沒設的話後台完全登不進去（刻意設計成鎖死，不是放行）。' },
+  { key: 'LINE_LOGIN_CHANNEL_ID', required: true,
+    isSet: () => !!config.lineLoginChannelId,
+    note: '沒設的話買家前台一律 503 —— LIFF 的 ID Token 無從驗證，不會退化成不驗身分。' },
   { key: 'NOTIFY_SHARED_SECRET', required: true,
     isSet: () => !!config.notifyToken,
     note: '沒設 /api/v1/notify/* 一律回 503，出貨推播會靜靜地不送出。' },
@@ -151,12 +154,18 @@ function machineTokenOk(req) {
  * 誰看得到詳細版。第三條是安裝期窗口 —— 見檔頭說明：它只在「沒有任何人
  * 能登入」時開著，因為那時候要求登入等於把診斷鎖在門外。
  */
-function detailGate({ actor, req, anyoneCanLogIn }) {
+function detailGate({ actor, req, probe }) {
   if (auth.can(actor, 'settings.write')) return { allowed: true, reason: '店主 token' };
   if (machineTokenOk(req)) return { allowed: true, reason: '機器金鑰（X-Notify-Token）' };
-  if (!anyoneCanLogIn) {
-    const reason = '此刻沒有任何人能登入（資料庫連不上或尚無成員），安裝期間開放診斷';
-    console.warn('[health] 詳細健檢以安裝期窗口開放：' + reason);
+  if (!probe.up) {
+    // 只剩這一種真死結：登入要查 members，查 members 要先連得上資料庫。
+    // 資料庫掛掉時沒有人拿得到 token，而那正是最需要看診斷的時候。
+    //
+    // 原本「members 為 0」也開放，已收掉（合約 v1.2 #1）：那時候資料庫是通的，
+    // 機器金鑰照樣進得來，窗口沒有存在的必要，卻會讓買家前台的 /health 看到
+    // 「後台密碼未設定」這類內部狀態。窗口愈窄愈好。
+    const reason = '資料庫連不上，此刻無人能登入，開放診斷';
+    console.warn('[health] 詳細健檢以緊急窗口開放：' + reason);
     return { allowed: true, reason };
   }
   return { allowed: false, hint: '詳細資訊需要店主登入，或帶上 X-Notify-Token。' };
@@ -226,8 +235,7 @@ get('/api/v1/health', async ({ actor, req }) => {
 
   const data = { status, checked_at, db: probe };
 
-  const anyoneCanLogIn = probe.up && !!counts && counts.members > 0;
-  const gate = detailGate({ actor, req, anyoneCanLogIn });
+  const gate = detailGate({ actor, req, probe });
   if (!gate.allowed) {
     data.detail = null;
     data.detail_hint = gate.hint;

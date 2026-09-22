@@ -153,6 +153,37 @@ async function seed() {
       }
     }
 
+    // ---- 買家端示範資料（BUYER_API_CONTRACT）----
+    // 喊單刻意做出三種狀態：還有量、剩最後幾個、已截止。前台三種 UI 都看得到，
+    // 驗收也才驗得到「搶完」與「過期」這兩條不同的錯誤路徑。
+    const inAnHour = new Date(Date.now() + 3600_000).toISOString();
+    const lastWeek = new Date(Date.now() - 7 * 86400_000).toISOString();
+    for (const [id, name, jpy, twd, quantity, remaining, deadline] of [
+      ['BC-SEED-001', '麵包超人 造型圍兜 兩件', 1309, 490, 6, 0, lastWeek],
+      ['BC-SEED-002', '貝親 母乳實感奶嘴 SS', 649, 250, 12, 3, inAnHour],
+      ['BC-SEED-003', '日本製 嬰兒純棉短襪 三入組', 979, 350, 20, 14, inAnHour],
+    ]) {
+      await db.run(
+        'INSERT INTO broadcast (send_id, batch, name, jpy_taxed, price_twd, quantity, remaining, deadline_at, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        id, BATCH, name, jpy, twd, quantity, remaining, deadline, ts);
+    }
+
+    // 兩筆許願：一筆還沒報價（加購物車要被擋），一筆已報價（可以加）。
+    await db.run(
+      "INSERT INTO wishlist (wish_id, line_user_id, item_name, quantity, wish_status, wished_at) VALUES (?,?,?,?,'待處理',?)",
+      'W-SEED-001', 'U_buyer1', '阪急限定 嬰兒襪', 3, ts);
+    await db.run(
+      "INSERT INTO wishlist (wish_id, line_user_id, item_name, quantity, wish_status, quote_twd, wished_at) VALUES (?,?,?,?,'已報價',?,?)",
+      'W-SEED-002', 'U_buyer1', 'EDWIN 牛仔褲', 1, 890, ts);
+
+    // 一張待付款的對帳單，外加一張已核對的 —— 驗收要驗「已付清不能再付」。
+    await db.run(
+      "INSERT INTO statements (statement_id, line_user_id, total_amount, payment_status, created_at) VALUES (?,?,?,'待付款',?)",
+      'STMT-SEED-001', 'U_buyer1', 1940, ts);
+    await db.run(
+      "INSERT INTO statements (statement_id, line_user_id, total_amount, payment_status, payway, paid_at, created_at) VALUES (?,?,?,'已核對','credit',?,?)",
+      'STMT-SEED-002', 'U_buyer1', 760, ts, ts);
+
     await db.run('INSERT INTO notifications (notif_id, audience, kind, title, body, target, created_at) VALUES (?,?,?,?,?,?,?)',
       'ntf_seed_1', 'owner', 'out_of_stock', '買不到：虎牌保溫瓶 500ml', '需求 1 件，實際 0 件，需要決策（補買 / 改品 / 退款）', 'prc_seed_P08', ts);
     await db.run('INSERT INTO notifications (notif_id, audience, kind, title, body, target, created_at) VALUES (?,?,?,?,?,?,?)',

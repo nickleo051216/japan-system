@@ -67,10 +67,20 @@ module.exports = {
   // 都登不進去（fail closed）。這是 LIFF ID Token 上線前的過渡措施，
   // 因為雛型的 /auth/login 只比對 line_user_id，而那支 API 是公開的。
   adminLoginPassword: (process.env.ADMIN_LOGIN_PASSWORD || '').trim(),
+  // LINE Login channel ID（買家 LIFF 的 ID Token 就是用它核發的）。
+  // 沒設的話買家 API 一律 503 —— 同樣是 fail closed，不會退化成不驗身分。
+  lineLoginChannelId: (process.env.LINE_LOGIN_CHANNEL_ID || '').trim(),
   // 通知佇列：n8n 取件時要帶的共用金鑰，以及後端排隊後戳 n8n 的網址。
   // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
   notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),
   notifyHookUrl: (process.env.NOTIFY_HOOK_URL || '').trim(),
+  // 綠界（ECPay）。HashKey／HashIV 只在伺服器端，永遠不進 API 回應或前端。
+  // 沒設就不開放線上刷卡（回 503），不會退化成不驗簽。
+  ecpayMerchantId: (process.env.ECPAY_MERCHANT_ID || '').trim(),
+  ecpayHashKey: (process.env.ECPAY_HASH_KEY || '').trim(),
+  ecpayHashIv: (process.env.ECPAY_HASH_IV || '').trim(),
+  ecpayApiUrl: (process.env.ECPAY_API_URL || 'https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5').trim(),
+  ecpayReturnUrl: (process.env.ECPAY_RETURN_URL || '').trim(),
   qrSigningKey: keyOrEphemeral('QR_SIGNING_KEY'),
   sessionSigningKey: keyOrEphemeral('SESSION_SIGNING_KEY'),
   defaultFxRate: Number(process.env.FX_JPY_TWD || 0.215),
