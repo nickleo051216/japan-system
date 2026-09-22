@@ -5,7 +5,7 @@ insert into price_table (jpy_taxed_max, twd) values
 on conflict (jpy_taxed_max) do update set twd = excluded.twd;
 
 -- 收款銀行資訊（bank_name / bank_code / bank_account）刻意不放在這裡：
--- 這個 repo 是公開的。請由業主在 Supabase SQL Editor 或後台另外寫入 settings。
+-- 這個 repo 是公開的。請由業主在後台「設定 → 店家與收款設定」填寫。
 -- 也不要在這裡放佔位值 —— 本檔是 upsert，重跑會把正式帳號覆蓋掉。
 insert into settings (key, value) values
   ('shop_name','HEEEHABABY'),

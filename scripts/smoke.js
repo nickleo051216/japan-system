@@ -228,6 +228,28 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     const dashHelper = (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data;
     check('助手看不到毛利數字', !('gross_profit_twd' in dashHelper) && !('margin_pct' in dashHelper));
 
+    section('店家與收款設定');
+    check('助手讀店家設定回 403', (await api('GET', '/api/v1/settings/shop', { token: helper })).status === 403);
+    const shop0 = (await api('GET', '/api/v1/settings/shop', { token: owner })).json.data;
+    check('店主可讀，且標出未填的必填欄位', Array.isArray(shop0.missing) && shop0.missing.length > 0, shop0.missing);
+    check('銀行代碼非 3 碼被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { bank_code: '12' } })).status === 400);
+    check('結算日超出 1–28 被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { statement_days: '1,40' } })).status === 400);
+    check('加價下限高於上限被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { bulky_add_min: 80, bulky_add_max: 50 } })).status === 400);
+    const ACCT = '1234567890123';
+    const saved = (await api('POST', '/api/v1/settings/shop', { token: owner, body: {
+      shop_name: 'HEEEHABABY', bank_name: '測試銀行', bank_code: '008', bank_account: ACCT,
+      payment_deadline_days: 2, statement_days: '16,1', bulky_add_min: 30, bulky_add_max: 50 } })).json;
+    check('店主可寫入，寫完不再有缺項', saved.ok && saved.data.missing.length === 0, saved);
+    check('結算日已正規化為 1,16', saved.ok && saved.data.values.statement_days === '1,16');
+    check('助手寫店家設定回 403',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { bank_name: '亂改' } })).status === 403);
+    const auditAll = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data);
+    check('稽核紀錄不含收款帳號，只記改了哪些欄位',
+      !auditAll.includes(ACCT) && auditAll.includes('settings.shop') && auditAll.includes('bank_account'));
+
     section('F-20 物流綁定');
     check('綁定成功', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-002', carrier: '黑貓' } })).json.ok);
     check('重複單號被擋下', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-004' } })).status === 409);

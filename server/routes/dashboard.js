@@ -135,6 +135,107 @@ post('/api/v1/settings/batch', async ({ actor, body }) => {
   return ok({ current_batch: body.batch });
 });
 
+// ---- 店家與結算設定 -------------------------------------------------------
+/**
+ * These rows live in `settings` and are deliberately absent from the seed
+ * migration: this repository is public and a real collection account does not
+ * belong in it. This page is where the owner fills them in, and the only place
+ * they can be changed.
+ */
+const SHOP_FIELDS = [
+  { key: 'shop_name',             label: '店名',           type: 'text',   max: 40, required: true,
+    hint: '出現在對帳單與客人通知上' },
+  { key: 'bank_name',             label: '銀行名稱',        type: 'text',   max: 20, required: true,
+    hint: '例：華南銀行' },
+  { key: 'bank_code',             label: '銀行代碼',        type: 'digits', len: 3,  required: true,
+    hint: '三碼數字' },
+  { key: 'bank_account',          label: '收款帳號',        type: 'digits', minLen: 5, maxLen: 16, required: true,
+    hint: '只有店主看得到，不會寫進稽核紀錄' },
+  { key: 'payment_deadline_days', label: '付款期限（天）',   type: 'int',    lo: 1, hi: 30, required: true,
+    hint: '客人收到對帳單後幾天內要完成付款' },
+  { key: 'statement_days',        label: '對帳單結算日',     type: 'days',   required: true,
+    hint: '每月的哪幾天結算，逗號分隔，例：1,16' },
+  { key: 'bulky_add_min',         label: '大型品加價下限',   type: 'int',    lo: 0, hi: 9999,
+    hint: '盒裝或大型物品的加價區間（台幣）' },
+  { key: 'bulky_add_max',         label: '大型品加價上限',   type: 'int',    lo: 0, hi: 9999,
+    hint: '' },
+];
+
+/** Normalise one field for storage, or throw a 400 the owner can act on. */
+function shopValue(field, raw) {
+  const v = String(raw ?? '').trim();
+  if (!v) {
+    if (field.required) throw err('BAD_SETTING', `${field.label}不能空白`);
+    return '';
+  }
+  if (field.type === 'digits') {
+    if (!/^[0-9]+$/.test(v)) throw err('BAD_SETTING', `${field.label}只能填數字`);
+    if (field.len && v.length !== field.len) throw err('BAD_SETTING', `${field.label}必須是 ${field.len} 碼`);
+    if (field.minLen && v.length < field.minLen) throw err('BAD_SETTING', `${field.label}至少 ${field.minLen} 碼`);
+    if (field.maxLen && v.length > field.maxLen) throw err('BAD_SETTING', `${field.label}最多 ${field.maxLen} 碼`);
+    return v;
+  }
+  if (field.type === 'int') {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < field.lo || n > field.hi) {
+      throw err('BAD_SETTING', `${field.label}必須是 ${field.lo}–${field.hi} 的整數`);
+    }
+    return String(n);
+  }
+  if (field.type === 'days') {
+    const days = [...new Set(v.split(/[,，\s]+/).filter(Boolean).map(Number))];
+    if (!days.length || days.some((d) => !Number.isInteger(d) || d < 1 || d > 28)) {
+      throw err('BAD_SETTING', `${field.label}請填 1–28 之間的日期，逗號分隔（例：1,16）`);
+    }
+    return days.sort((a, b) => a - b).join(',');
+  }
+  if (field.max && v.length > field.max) throw err('BAD_SETTING', `${field.label}最多 ${field.max} 個字`);
+  return v;
+}
+
+async function readShop() {
+  const values = {};
+  for (const f of SHOP_FIELDS) values[f.key] = (await db.setting(f.key, '')) || '';
+  return values;
+}
+const shopMissing = (values) => SHOP_FIELDS.filter((f) => f.required && !values[f.key]).map((f) => f.label);
+
+// 收款帳號只有店主看得到 —— 讀寫都要 settings.write
+get('/api/v1/settings/shop', async ({ actor }) => {
+  auth.requireCap(actor, 'settings.write');
+  const values = await readShop();
+  return ok({ values, missing: shopMissing(values), fields: SHOP_FIELDS });
+});
+
+post('/api/v1/settings/shop', async ({ actor, body }) => {
+  auth.requireCap(actor, 'settings.write');
+  const incoming = SHOP_FIELDS.filter((f) => body[f.key] !== undefined);
+  if (!incoming.length) throw err('NO_CHANGE', '沒有要更新的欄位');
+
+  // Validate everything first: a bad field must not leave half the settings written.
+  const next = {};
+  for (const f of incoming) next[f.key] = shopValue(f, body[f.key]);
+
+  // The surcharge range has to hold against whatever the other half already is.
+  const current = await readShop();
+  const lo = next.bulky_add_min ?? current.bulky_add_min;
+  const hi = next.bulky_add_max ?? current.bulky_add_max;
+  if (lo !== '' && hi !== '' && Number(lo) > Number(hi)) {
+    throw err('BAD_SETTING', '大型品加價下限不可高於上限');
+  }
+
+  await db.tx(async () => {
+    for (const f of incoming) await db.putSetting(f.key, next[f.key]);
+  });
+  // detail records which keys changed, never their values — the collection
+  // account must not be copied into audit_log.
+  await audit.record({ actor: actor.line_user_id, action: 'settings.shop',
+    detail: { keys: incoming.map((f) => f.key) }, result: 'ok' });
+
+  const values = await readShop();
+  return ok({ updated: incoming.map((f) => f.key), values, missing: shopMissing(values) });
+});
+
 get('/api/v1/products/list', async ({ actor, query }) => {
   auth.requireCap(actor, 'order.read');
   const rows = query.batch
