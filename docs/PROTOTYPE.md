@@ -121,6 +121,9 @@ web/
   views/              dashboard board expense packing labels scan orders logistics audit settings
 scripts/smoke.js      端對端驗收檢查
 scripts/pg-harness.mjs 本機測試用的假 Supabase（PGlite）
+scripts/buyer-contract-server.js  買家 API 參考實作（記憶體版，供前台開發）
+scripts/buyer-contract.test.js    買家 API 合約測試（47 項）
+BUYER_API_CONTRACT.md 買家前台與後端的唯一邊界，兩邊要改先改這份
 supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／004 相容層／005 通知佇列
 ```
 
@@ -132,7 +135,7 @@ supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／
 npm run smoke
 ```
 
-依規格「驗收條件」逐項檢查，目前 75 項全數通過（原 54 項，另加狀態機 2、品項狀態 2、店家設定 9、通知佇列 8），包含：
+依規格「驗收條件」逐項檢查，目前 91 項全數通過（原 54 項，另加狀態機 2、品項狀態 2、店家設定 9、通知佇列 8、上線健檢 16），包含：
 
 - 兩個請求同時認領同一項，只有一個成功（F-08）
 - 改匯率後既有紀錄的台幣成本不變（F-07 / F-23）
@@ -146,6 +149,42 @@ npm run smoke
 - 認領後品項轉「採買中」、買足後轉「已到貨」
 - 收款帳號只有店主讀得到，且不會出現在稽核紀錄裡
 - 出貨後通知自動進佇列，一張單一筆；取件即上鎖，兩個 n8n 執行不會重複發
+- 健檢在沒有 `DATABASE_URL` 時仍然答得出話，而且回應裡不含金鑰、帳號、連線字串
+
+---
+
+## 4.1 上線健檢 `GET /api/v1/health`
+
+換環境重建、交接、或 n8n 每天自動巡檢時，只需要看這一支。它回答三件事：
+**這個部署活著嗎、設定齊了嗎、資料庫是不是我以為的那個。**
+
+```bash
+curl -s https://<你的部署網址>/api/v1/health | jq
+
+# n8n 巡檢：帶機器金鑰拿詳細版
+curl -s -H "X-Notify-Token: $NOTIFY_SHARED_SECRET" https://<你的部署網址>/api/v1/health | jq
+```
+
+`data.status` 三種值：
+
+| status | 意思 | 該做什麼 |
+|---|---|---|
+| `ok` | 全部就緒 | 沒事 |
+| `degraded` | 連得上資料庫，但有東西沒設完 | 看 `detail.blocking` |
+| `down` | 資料庫連不上 | 先修 `DATABASE_URL` |
+
+`detail` 預設是 `null`，在三種情況下才打開：帶**店主 token**、帶 **`X-Notify-Token`**，
+或**此刻沒有任何人能登入**（資料庫不通，或 `members` 一筆都沒有）。
+
+第三條是刻意留的安裝期窗口，補的是一個真實的死結：登入要查 `members`，查 `members`
+要先連得上資料庫 —— 資料庫掛掉時沒有人拿得到 token，而那正是最需要看
+「`DATABASE_URL` 到底設了沒」的時候。它的代價是這段期間會洩漏「某某環境變數未設」，
+所以窗口只在「系統本來就還不能用」時開著，第一個店主一建立就自動關上；
+回應裡的 `open_reason` 會寫明它為什麼開著，伺服器日誌也會留一筆。
+
+**任何情況下都只回「有沒有設」，不回值。** 連線字串只換算成
+`transaction-pooler:6543` 這種模式描述，不含主機、帳號、密碼。驗收檢查裡有三項
+專門守這條線（不含收款帳號、不含金鑰值、不含連線字串）。
 
 ---
 

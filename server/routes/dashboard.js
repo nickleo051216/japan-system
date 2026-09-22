@@ -248,3 +248,6 @@ get('/api/v1/members/list', async ({ actor }) => {
   auth.requireCap(actor, 'order.read');
   return ok(await db.all('SELECT line_user_id, nickname, display_name, role, bound_at FROM members ORDER BY role, nickname'));
 });
+
+// 健檢要知道「哪幾個必填欄位還空著」，但不能碰值 —— 只借欄位定義出去。
+module.exports = { SHOP_FIELDS };

@@ -11,7 +11,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const config = require('./lib/config');
-const db = require('./lib/db');
 const auth = require('./lib/auth');
 const httpLib = require('./lib/http');
 
@@ -23,15 +22,20 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 let booted = false;
 
 /**
- * Create the connection pool and register routes. Idempotent because a
- * serverless instance calls it on every invocation but only the first does
- * work. Schema belongs to supabase/migrations and demo data to `npm run reset`,
- * so boot() never writes anything.
+ * Register routes. Idempotent because a serverless instance calls it on every
+ * invocation but only the first does work. Schema belongs to
+ * supabase/migrations and demo data to `npm run reset`, so boot() never writes
+ * anything.
+ *
+ * It deliberately does NOT open the connection pool: lib/db opens lazily on the
+ * first query, so a deployment with no DATABASE_URL can still answer
+ * /api/v1/health with "that is exactly what is missing" instead of failing
+ * before routing even happens.
  */
 function boot() {
   if (booted) return false;
-  db.open();
   // Route modules register themselves on require.
+  require('./routes/health');
   require('./routes/auth');
   require('./routes/orders');
   require('./routes/procurement');
@@ -67,12 +71,21 @@ async function handleApi(req, res) {
       if (cached) return httpLib.send(res, 200, cached);
     }
 
-    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
-    const actor = await auth.resolve(token);
     // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
-    // 不經過會員 token —— n8n 不是會員。
+    // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
-      || pathname.startsWith('/api/v1/notify/');
+      || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/');
+
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
+    let actor = null;
+    try {
+      actor = await auth.resolve(token);
+    } catch (e) {
+      // 解析 token 要查資料庫。資料庫不通時，公開路由不該跟著一起 500 ——
+      // /health 的工作就是在這種時候告訴你哪裡壞了。
+      if (!isPublic) throw e;
+      console.warn('[auth] 公開路由解析 token 失敗，視為未登入：', e.message);
+    }
     if (!actor && !isPublic) return httpLib.send(res, 401, httpLib.fail('UNAUTHENTICATED', '尚未登入'));
 
     const body = req.method === 'POST' ? await httpLib.readJson(req) : {};
