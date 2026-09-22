@@ -66,11 +66,6 @@ async function handleApi(req, res) {
     const hit = httpLib.match(req.method, pathname);
     if (!hit) return httpLib.send(res, 404, httpLib.fail('NOT_FOUND', '找不到這個 API'));
 
-    if (req.method === 'POST' && hit.route.idempotent && idemKey) {
-      const cached = await httpLib.idempotencyLookup(idemKey);
-      if (cached) return httpLib.send(res, 200, cached);
-    }
-
     // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
@@ -88,20 +83,31 @@ async function handleApi(req, res) {
     }
     if (!actor && !isPublic) return httpLib.send(res, 401, httpLib.fail('UNAUTHENTICATED', '尚未登入'));
 
+    // 查冪等快取必須在身分解析之後 —— 快取鍵綁定發話者，否則猜中一把
+    // Idempotency-Key 就能在完全不驗身分的情況下領走別人的回應。
+    const actorId = actor ? actor.line_user_id : null;
+    if (req.method === 'POST' && hit.route.idempotent && idemKey) {
+      const cached = await httpLib.idempotencyLookup(idemKey, actorId);
+      if (cached) return httpLib.send(res, 200, cached);
+    }
+
     const body = req.method === 'POST' ? await httpLib.readJson(req) : {};
     const query = Object.fromEntries(url.searchParams);
     const payload = await hit.route.handler({ actor, body, query, params: hit.params, req });
 
-    if (req.method === 'POST' && hit.route.idempotent && idemKey) await httpLib.idempotencyStore(idemKey, payload);
+    if (req.method === 'POST' && hit.route.idempotent && idemKey) await httpLib.idempotencyStore(idemKey, payload, actorId);
     return httpLib.send(res, 200, payload);
   } catch (e) {
-    const status = e.status || 500;
-    if (status >= 500) {
-      // I-03: users never see technical detail; it goes to the server log.
-      console.error('[error]', pathname, e);
-      return httpLib.send(res, 500, httpLib.fail('INTERNAL', '系統忙碌中，稍後再試'));
+    // 有明確 status 的是我們自己丟的，訊息本來就是寫給人看的（例如「後台登入
+    // 尚未設定密碼」），照原樣回。先前一律用 status >= 500 判斷，結果刻意丟的
+    // 503 也被收斂成「系統忙碌中」—— 設定漏了卻看不出漏在哪，剛好違背初衷。
+    // 沒帶 status 的才是沒預期到的例外，一律收斂：I-03 規定使用者不該看到技術細節。
+    if (e.status) {
+      if (e.status >= 500) console.error('[error]', pathname, e.code, e.message);
+      return httpLib.send(res, e.status, httpLib.fail(e.code || 'ERROR', e.message));
     }
-    return httpLib.send(res, status, httpLib.fail(e.code || 'ERROR', e.message));
+    console.error('[error]', pathname, e);
+    return httpLib.send(res, 500, httpLib.fail('INTERNAL', '系統忙碌中，稍後再試'));
   }
 }
 

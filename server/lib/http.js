@@ -55,18 +55,27 @@ async function readJson(req) {
   catch { throw Object.assign(new Error('請求格式錯誤'), { status: 400, code: 'BAD_JSON' }); }
 }
 
-/** Replay protection for writes — I-02 rule 4. */
-async function idempotencyLookup(key) {
+/**
+ * Replay protection for writes — I-02 rule 4.
+ *
+ * 快取鍵綁定發話者。Idempotency-Key 由客戶端自己產生，不是祕密；只用它當鍵的話，
+ * 猜中一把就能把別人的回應整包領走 —— 例如 /settings/shop 的回應裡有收款帳號。
+ * 加上 actor 之後，重播最多只能拿回自己本來就看得到的東西。
+ * 前綴進的是既有的 key 欄位，不動資料表結構。
+ */
+const scopedKey = (key, actorId) => `${actorId || 'anon'}:${key}`;
+
+async function idempotencyLookup(key, actorId) {
   if (!key) return null;
-  const row = await db.one('SELECT response FROM idempotency WHERE key = ?', key);
+  const row = await db.one('SELECT response FROM idempotency WHERE key = ?', scopedKey(key, actorId));
   return row ? JSON.parse(row.response) : null;
 }
-async function idempotencyStore(key, payload) {
+async function idempotencyStore(key, payload, actorId) {
   if (!key) return;
   await db.run(
     'INSERT INTO idempotency (key, response, created_at) VALUES (?,?,?) ' +
     'ON CONFLICT (key) DO UPDATE SET response = excluded.response, created_at = excluded.created_at',
-    key, JSON.stringify(payload), now());
+    scopedKey(key, actorId), JSON.stringify(payload), now());
 }
 
 module.exports = { get, post, add, match, ok, fail, send, readJson, idempotencyLookup, idempotencyStore, routes };

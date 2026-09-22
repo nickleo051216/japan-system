@@ -57,6 +57,9 @@ const ENV_CHECKS = [
   { key: 'QR_SIGNING_KEY', required: true,
     isSet: () => !config.derivedKeys.includes('QR_SIGNING_KEY'),
     note: '未設定時改用部署網址推導。已經印出來貼在箱子上的標籤，下次部署後會驗不過。' },
+  { key: 'ADMIN_LOGIN_PASSWORD', required: true,
+    isSet: () => !!config.adminLoginPassword,
+    note: '沒設的話後台完全登不進去（刻意設計成鎖死，不是放行）。' },
   { key: 'NOTIFY_SHARED_SECRET', required: true,
     isSet: () => !!config.notifyToken,
     note: '沒設 /api/v1/notify/* 一律回 503，出貨推播會靜靜地不送出。' },
@@ -180,6 +183,10 @@ function blockers({ probe, envs, schema, counts, shopGaps }) {
   }
   if (counts && counts.members === 0) {
     out.push('members 一個人都沒有：還沒有人能登入，後台進不去。需要先建立第一位店主。');
+  }
+  // 太短的共用密碼等於沒擋。只回報「太短」，不回報長度也不回報值。
+  if (config.adminLoginPassword && config.adminLoginPassword.length < 16) {
+    out.push('ADMIN_LOGIN_PASSWORD 太短：這是公開端點上的共用密碼，請改用 16 字以上的隨機字串。');
   }
   if (shopGaps && shopGaps.length) {
     out.push(`店家與收款設定未完成（${shopGaps.join('、')}）：客人會拿不到匯款帳號。到後台「設定 → 店家與收款設定」填寫。`);
