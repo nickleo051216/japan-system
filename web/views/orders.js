@@ -1,6 +1,6 @@
 import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '/app.js';
 
-const STATUSES = ['待付款', '待採購', '部分到貨', '待出貨', '已出貨', '已完成', '待退款', '已退款', '已取消'];
+const STATUSES = ['待確認', '已報價', '已到貨', '已出貨', '已送達', '缺貨', '已取消'];
 
 export async function render(root, ctx) {
   const state = { status: ctx.query.status || '', q: '' };
@@ -73,10 +73,10 @@ export async function render(root, ctx) {
       h('td', { class: 'tiny muted' }, l.reason || ''))))));
 
     const actions = [];
-    if (session.can('order.write') && session.member.role === 'owner' && ['待採購', '部分到貨'].includes(o.status)) {
+    if (session.can('order.write') && session.member.role === 'owner' && o.status === '已報價') {
       actions.push({ label: '拆單', onClick: (close) => { close(); splitDialog(o); } });
     }
-    if (session.can('shipment.write') && o.status === '待出貨') {
+    if (session.can('shipment.write') && o.status === '已到貨') {
       actions.push({ label: '手動出貨（未經掃碼）', onClick: (close) => { close(); shipDialog(o); } });
     }
     modal(`訂單 ${o.order_id}`, body, actions);
@@ -147,7 +147,7 @@ export async function render(root, ctx) {
                   class: 'btn sm primary', onClick: async () => {
                     try {
                       await POST('/api/v1/payments/reconcile', { order_id: c.order_id, amount_twd: Number(amount.value), last5: last5.value || null, method: 'transfer' });
-                      toast(`${c.order_id} 已認列，狀態轉為待採購`);
+                      toast(`${c.order_id} 已認列，狀態轉為已報價`);
                       load();
                     } catch (e) { fail(e); }
                   },

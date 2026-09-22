@@ -1,74 +1,97 @@
 'use strict';
 /**
- * Order state machine — README §2.3.
- * Transitions only follow the arrows; no jumps. Every transition is logged.
+ * Order state machine — 實際營運狀態（業主確認版）。
+ *
+ *   待確認 → 已報價 / 已取消
+ *   已報價 → 已到貨 / 缺貨 / 已取消
+ *   已到貨 → 已出貨
+ *   已出貨 → 已送達
+ *   已送達 / 缺貨 / 已取消 為終點
+ *
+ * The database owns both halves of this: order_status_rules plus the
+ * trg_order_status_check trigger reject every illegal move, and
+ * trg_order_status_log writes order_status_log by itself on insert and on
+ * every status change. This module therefore never writes that log — doing so
+ * would record each transition twice.
+ *
+ * The table below mirrors order_status_rules so the API can tell a plain
+ * illegal move (409) from an owner correction that still needs a reason (400)
+ * before the write reaches the database.
  */
 const db = require('./db');
-const { uid, now } = require('./ids');
 const audit = require('./audit');
 
 const STATUS = {
-  WISHLIST: '願望清單',
-  AWAITING_PAYMENT: '待付款',
-  AWAITING_PURCHASE: '待採購',
-  PARTIALLY_ARRIVED: '部分到貨',
-  AWAITING_SHIPMENT: '待出貨',
+  PENDING: '待確認',
+  QUOTED: '已報價',
+  ARRIVED: '已到貨',
   SHIPPED: '已出貨',
-  DONE: '已完成',
-  AWAITING_REFUND: '待退款',
-  REFUNDED: '已退款',
+  DELIVERED: '已送達',
+  OUT_OF_STOCK: '缺貨',
   CANCELLED: '已取消',
 };
 
 const TRANSITIONS = {
-  [STATUS.WISHLIST]: [STATUS.AWAITING_PAYMENT],
-  [STATUS.AWAITING_PAYMENT]: [STATUS.AWAITING_PURCHASE, STATUS.CANCELLED],
-  [STATUS.AWAITING_PURCHASE]: [STATUS.PARTIALLY_ARRIVED, STATUS.AWAITING_SHIPMENT, STATUS.AWAITING_REFUND],
-  [STATUS.PARTIALLY_ARRIVED]: [STATUS.AWAITING_SHIPMENT, STATUS.AWAITING_REFUND],
-  [STATUS.AWAITING_SHIPMENT]: [STATUS.SHIPPED],
-  [STATUS.SHIPPED]: [STATUS.DONE],
-  [STATUS.AWAITING_REFUND]: [STATUS.REFUNDED],
-  [STATUS.DONE]: [],
-  [STATUS.REFUNDED]: [],
+  [STATUS.PENDING]: [STATUS.QUOTED, STATUS.CANCELLED],
+  [STATUS.QUOTED]: [STATUS.ARRIVED, STATUS.OUT_OF_STOCK, STATUS.CANCELLED],
+  [STATUS.ARRIVED]: [STATUS.SHIPPED],
+  [STATUS.SHIPPED]: [STATUS.DELIVERED],
+  [STATUS.DELIVERED]: [],
+  [STATUS.OUT_OF_STOCK]: [],
   [STATUS.CANCELLED]: [],
 };
 
-/** 2.3 rule 3: this is the only transition that notifies the customer. */
-const NOTIFIES_CUSTOMER = (from, to) => from === STATUS.AWAITING_SHIPMENT && to === STATUS.SHIPPED;
+/** Only this transition notifies the customer. */
+const NOTIFIES_CUSTOMER = (from, to) => from === STATUS.ARRIVED && to === STATUS.SHIPPED;
 
 const canTransition = (from, to) => (TRANSITIONS[from] || []).includes(to);
 
+/** What check_order_status() raises: SQLSTATE P0001, message ILLEGAL_TRANSITION … */
+const isIllegalTransition = (e) =>
+  !!e && e.code === 'P0001' && /^ILLEGAL_TRANSITION/.test(e.message || '');
+
 /**
- * Move an order forward. `force` is the §2.3 rule 4 escape hatch: only an owner
- * may correct a status backwards, and only with a reason, which is audited.
+ * Move an order forward. `force` is the owner's escape hatch: only an owner may
+ * correct a status backwards, and only with a reason, which is audited and
+ * passed to the database as app.override so the trigger lets it through.
  */
-function transition(orderId, to, { actor, reason = null, force = false } = {}) {
-  const order = db.one('SELECT * FROM orders WHERE order_id = ?', orderId);
+async function transition(orderId, to, { actor, reason = null, force = false } = {}) {
+  const order = await db.one('SELECT * FROM orders WHERE order_id = ?', orderId);
   if (!order) throw Object.assign(new Error('查無此訂單'), { code: 'ORDER_NOT_FOUND', status: 404 });
 
   const from = order.status;
   if (from === to) return order;
 
-  if (!canTransition(from, to)) {
-    if (!force) {
-      audit.record({ actor, action: 'order.transition', target: orderId, detail: { from, to }, result: 'blocked' });
-      throw Object.assign(new Error(`狀態不可由「${from}」轉為「${to}」`), { code: 'ILLEGAL_TRANSITION', status: 409 });
-    }
-    if (!reason) {
-      throw Object.assign(new Error('狀態修正必須填寫原因'), { code: 'REASON_REQUIRED', status: 400 });
-    }
+  // Checked before the write so an owner override without a reason is a 400,
+  // not a database error.
+  if (force && !canTransition(from, to) && !reason) {
+    throw Object.assign(new Error('狀態修正必須填寫原因'), { code: 'REASON_REQUIRED', status: 400 });
   }
 
-  db.run('UPDATE orders SET status = ? WHERE order_id = ?', to, orderId);
-  db.run(
-    'INSERT INTO order_status_log (log_id, order_id, from_status, to_status, actor, reason, ts) VALUES (?,?,?,?,?,?,?)',
-    uid('slog'), orderId, from, to, actor || null, reason, now()
-  );
-  audit.record({
+  try {
+    await db.tx(async () => {
+      // Read back by trg_order_status_log; app.override by trg_order_status_check.
+      await db.setLocal('app.actor', actor);
+      await db.setLocal('app.reason', reason);
+      if (force) await db.setLocal('app.override', 'on');
+      await db.run('UPDATE orders SET status = ? WHERE order_id = ?', to, orderId);
+    });
+  } catch (e) {
+    if (!isIllegalTransition(e)) throw e;
+    // Best effort: when transition() runs inside a caller's transaction that
+    // transaction is already aborted, so this write cannot land. The 409 is
+    // what the caller needs either way.
+    try {
+      await audit.record({ actor, action: 'order.transition', target: orderId, detail: { from, to }, result: 'blocked' });
+    } catch (_) { /* aborted transaction */ }
+    throw Object.assign(new Error(`狀態不可由「${from}」轉為「${to}」`), { code: 'ILLEGAL_TRANSITION', status: 409 });
+  }
+
+  await audit.record({
     actor, action: force ? 'order.transition.forced' : 'order.transition',
     target: orderId, detail: { from, to, reason }, result: force ? 'warn' : 'ok',
   });
   return { ...order, status: to, _notified: NOTIFIES_CUSTOMER(from, to) };
 }
 
-module.exports = { STATUS, TRANSITIONS, canTransition, transition, NOTIFIES_CUSTOMER };
+module.exports = { STATUS, TRANSITIONS, canTransition, transition, NOTIFIES_CUSTOMER, isIllegalTransition };

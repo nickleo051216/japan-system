@@ -10,9 +10,15 @@
   "scripts": {
     "start": "node server/index.js",
     "reset": "node server/index.js --reset",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "test:db": "node scripts/pg-harness.mjs"
   },
   "dependencies": {
+    "pg": "^8.13.1",
     "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.2",
+    "@electric-sql/pglite-socket": "0.0.6"
   }
 }

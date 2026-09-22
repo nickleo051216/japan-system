@@ -1,25 +1,49 @@
 'use strict';
 /**
- * End-to-end smoke test. Boots the server on a throwaway database and walks
- * the acceptance conditions that matter most in README §4.
- *   node scripts/smoke.js
+ * End-to-end smoke test. Boots the server against the PGlite harness (a real
+ * Postgres speaking the wire protocol, same as Supabase) on freshly reset demo
+ * data, and walks the acceptance conditions that matter most in README §4.
+ *
+ *   node scripts/pg-harness.mjs        # in another terminal, then
+ *   DATABASE_URL=… npm run smoke
+ *
+ * With no DATABASE_URL set it starts a harness of its own. It never touches
+ * the production Supabase project.
  */
 const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hb-smoke-'));
-const env = {
+const ROOT = path.join(__dirname, '..');
+
+/** PGlite serves one connection at a time, hence DB_POOL_MAX=1. */
+const envFor = (databaseUrl) => ({
   ...process.env,
   PORT: String(PORT),
-  DB_PATH: path.join(tmpDir, 'smoke.db'),
+  DATABASE_URL: databaseUrl,
+  DB_POOL_MAX: '1',
   QR_SIGNING_KEY: 'smoke-test-signing-key',
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   FX_JPY_TWD: '0.215',
-};
+});
+
+/** Start scripts/pg-harness.mjs and resolve with the DATABASE_URL it prints. */
+function startHarness() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'pg-harness.mjs')],
+      { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    const timer = setTimeout(() => reject(new Error('harness 啟動逾時')), 120000);
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      const m = /DATABASE_URL=(\S+)/.exec(buf);
+      if (m) { clearTimeout(timer); resolve({ child, url: m[1] }); }
+    });
+    child.stderr.on('data', (d) => process.stderr.write(d));
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`harness 結束，代碼 ${code}`)); });
+  });
+}
 
 let passed = 0, failed = 0;
 const check = (name, cond, extra) => {
@@ -38,9 +62,20 @@ async function api(method, url, { token, body, idem } = {}) {
 const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id } })).json.data.token;
 
 (async () => {
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let harness = null;
+  let databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    harness = await startHarness();
+    databaseUrl = harness.url;
+    console.log(`[smoke] 已啟動 harness：${databaseUrl}`);
+  }
+
+  // --reset wipes the demo tables and re-seeds; the schema itself belongs to
+  // supabase/migrations and is already in place.
+  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js'), '--reset'],
+    { cwd: ROOT, env: envFor(databaseUrl), stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.on('data', (d) => { const s = d.toString(); if (!/Warning/.test(s)) process.stderr.write(s); });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 300; i++) {
     try { await fetch(BASE + '/api/v1/auth/personas'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
 
@@ -70,6 +105,18 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('買家只查得到自己的訂單', mine.length > 0 && mine.every((o) => o.line_user_id === 'U_buyer1'));
     check('買家查他人訂單回 403', (await api('GET', '/api/v1/orders/detail?order_id=HB2608-005', { token: buyer })).status === 403);
 
+    // 品項層級的「部分到貨」：order_items.item_status 跟著採購狀態走
+    const itemStatusOf = async (orderId, sku) => {
+      const d = (await api('GET', `/api/v1/orders/detail?order_id=${orderId}`, { token: owner })).json.data;
+      const it = d.items.find((i) => i.sku === sku);
+      return it ? it.item_status : null;
+    };
+    const quotedOrderWith = async (sku) => {
+      const rows = (await api('GET', '/api/v1/orders/list?status=已報價', { token: owner })).json.data;
+      const hit = rows.find((o) => o.items.some((i) => i.sku === sku));
+      return hit ? hit.order_id : null;
+    };
+
     section('F-08 認領併發（條件更新）');
     const open = boardOwner.rows.find((r) => r.state === 'open');
     const [a, b] = await Promise.all([
@@ -81,9 +128,14 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('落敗者收到「已被認領」', [a, b].some((r) => r.json.error && r.json.error.code === 'ALREADY_CLAIMED'));
     check('非認領者不可放掉', (await api('POST', '/api/v1/procurement/release', { token: packer, body: { proc_id: open.proc_id } })).status !== 200);
 
+    section('品項狀態（部分到貨在品項層級）');
+    const tracked = await quotedOrderWith(open.sku);
+    check('認領後品項轉為採買中', tracked && (await itemStatusOf(tracked, open.sku)) === '採買中', { tracked, sku: open.sku });
+
     section('F-08 回報結果');
     const r1 = await api('POST', '/api/v1/procurement/result', { token: helper, body: { proc_id: open.proc_id, got_qty: open.need_qty + 5 } });
     check('回報數量 ≥ 需求記為買足', r1.json.data.state === 'got' && r1.json.data.got_qty === open.need_qty);
+    check('買足後品項轉為已到貨', tracked && (await itemStatusOf(tracked, open.sku)) === '已到貨', { tracked, sku: open.sku });
     const oos = boardOwner.rows.find((r) => r.state === 'claimed');
     if (oos) {
       await api('POST', '/api/v1/procurement/result', { token: owner, body: { proc_id: oos.proc_id, got_qty: 0 } });
@@ -154,9 +206,13 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('助手不可拆單', (await api('POST', '/api/v1/orders/split', { token: helper, body: { order_id: 'HB2608-002', items: [{ item_id: 'x', qty: 1 }] } })).status === 403);
     check('已出貨訂單不可拆', (await api('POST', '/api/v1/orders/split', { token: owner, body: { order_id: 'HB2608-006', items: [{ item_id: 'x', qty: 1 }] } })).status === 409);
 
-    section('§2.3 狀態機');
-    check('不可跳躍狀態', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已完成' } })).status === 409);
-    check('強制修正需填原因', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已完成', force: true } })).status === 400);
+    section('狀態機（資料庫為唯一真相）');
+    check('不可跳躍狀態', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已送達' } })).status === 409);
+    check('狀態被擋下後資料庫未改變',
+      (await api('GET', '/api/v1/orders/detail?order_id=HB2608-002', { token: owner })).json.data.status === '已報價');
+    check('強制修正需填原因', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已送達', force: true } })).status === 400);
+    const shippedLog = (await api('GET', '/api/v1/orders/detail?order_id=HB2608-004', { token: owner })).json.data.status_log;
+    check('一次狀態轉換只留一筆紀錄', shippedLog.filter((l) => l.to_status === '已出貨').length === 1, shippedLog);
 
     section('F-06 對帳 / I-02 冪等');
     const key = 'smoke-idem-1';
@@ -172,6 +228,28 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     const dashHelper = (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data;
     check('助手看不到毛利數字', !('gross_profit_twd' in dashHelper) && !('margin_pct' in dashHelper));
 
+    section('店家與收款設定');
+    check('助手讀店家設定回 403', (await api('GET', '/api/v1/settings/shop', { token: helper })).status === 403);
+    const shop0 = (await api('GET', '/api/v1/settings/shop', { token: owner })).json.data;
+    check('店主可讀，且標出未填的必填欄位', Array.isArray(shop0.missing) && shop0.missing.length > 0, shop0.missing);
+    check('銀行代碼非 3 碼被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { bank_code: '12' } })).status === 400);
+    check('結算日超出 1–28 被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { statement_days: '1,40' } })).status === 400);
+    check('加價下限高於上限被拒絕',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { bulky_add_min: 80, bulky_add_max: 50 } })).status === 400);
+    const ACCT = '1234567890123';
+    const saved = (await api('POST', '/api/v1/settings/shop', { token: owner, body: {
+      shop_name: 'HEEEHABABY', bank_name: '測試銀行', bank_code: '008', bank_account: ACCT,
+      payment_deadline_days: 2, statement_days: '16,1', bulky_add_min: 30, bulky_add_max: 50 } })).json;
+    check('店主可寫入，寫完不再有缺項', saved.ok && saved.data.missing.length === 0, saved);
+    check('結算日已正規化為 1,16', saved.ok && saved.data.values.statement_days === '1,16');
+    check('助手寫店家設定回 403',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { bank_name: '亂改' } })).status === 403);
+    const auditAll = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data);
+    check('稽核紀錄不含收款帳號，只記改了哪些欄位',
+      !auditAll.includes(ACCT) && auditAll.includes('settings.shop') && auditAll.includes('bank_account'));
+
     section('F-20 物流綁定');
     check('綁定成功', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-002', carrier: '黑貓' } })).json.ok);
     check('重複單號被擋下', (await api('POST', '/api/v1/logistics/bind', { token: owner, body: { tracking_no: 'BX123', order_id: 'HB2608-004' } })).status === 409);
@@ -181,7 +259,7 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     console.error('\n測試中止：', e);
   } finally {
     child.kill();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (harness) harness.child.kill();
   }
 
   console.log(`\n通過 ${passed} 項，失敗 ${failed} 項`);

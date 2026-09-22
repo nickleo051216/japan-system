@@ -19,7 +19,7 @@ function issue(lineUserId) {
   return `${body}.${mac}`;
 }
 
-function resolve(token) {
+async function resolve(token) {
   if (!token) return null;
   const [body, mac] = String(token).split('.');
   if (!body || !mac) return null;
@@ -28,7 +28,7 @@ function resolve(token) {
   let claims;
   try { claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch { return null; }
   if (!claims.exp || claims.exp < Date.now()) return null;
-  return db.one('SELECT line_user_id, nickname, display_name, role FROM members WHERE line_user_id = ?', claims.sub);
+  return await db.one('SELECT line_user_id, nickname, display_name, role FROM members WHERE line_user_id = ?', claims.sub);
 }
 
 /** Capability matrix — README F-21. Server-side source of truth. */

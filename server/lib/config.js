@@ -41,17 +41,22 @@ function keyOrEphemeral(name) {
   return generated;
 }
 
-// Serverless filesystems are read-only apart from /tmp, and /tmp does not
-// survive a cold start — so the demo site reseeds itself from scratch whenever
-// Vercel spins up a new instance. Documented in docs/PROTOTYPE.md.
-const defaultDbPath = ON_VERCEL
-  ? '/tmp/hb-prototype/prototype.db'
-  : path.join(__dirname, '..', '..', 'data', 'prototype.db');
+// Receipt images only. The database itself lives in Supabase (DATABASE_URL);
+// nothing durable is kept on disk any more. Serverless filesystems are
+// read-only apart from /tmp, so on Vercel uploads land there and disappear on
+// a cold start — acceptable for the demo, replaced by object storage later.
+const defaultUploadDir = ON_VERCEL
+  ? '/tmp/hb-prototype/uploads'
+  : path.join(__dirname, '..', '..', 'data', 'uploads');
 
 module.exports = {
   onVercel: ON_VERCEL,
   port: Number(process.env.PORT || 3000),
-  dbPath: path.resolve(process.env.DB_PATH || defaultDbPath),
+  // Supabase → Connect → Transaction pooler (port 6543). Read by lib/db.js
+  // straight from the environment; exposed here only so startup can tell the
+  // operator it is missing instead of failing on the first query.
+  databaseUrl: process.env.DATABASE_URL || '',
+  uploadDir: path.resolve(process.env.UPLOAD_DIR || defaultUploadDir),
   qrSigningKey: keyOrEphemeral('QR_SIGNING_KEY'),
   sessionSigningKey: keyOrEphemeral('SESSION_SIGNING_KEY'),
   defaultFxRate: Number(process.env.FX_JPY_TWD || 0.215),

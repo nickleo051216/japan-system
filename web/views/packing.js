@@ -11,7 +11,7 @@ export async function render(root) {
   async function load() {
     const orders = await GET('/api/v1/packing/list');
     wrap.innerHTML = '';
-    if (!orders.length) { wrap.append(h('div', { class: 'card' }, h('div', { class: 'empty' }, '目前沒有待出貨訂單'))); return; }
+    if (!orders.length) { wrap.append(h('div', { class: 'card' }, h('div', { class: 'empty' }, '目前沒有已到貨待出貨的訂單'))); return; }
     const grid = h('div', { class: 'grid cols-2' });
     for (const o of orders) {
       const items = h('div', { class: 'grid', style: 'grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;margin-top:10px' });
