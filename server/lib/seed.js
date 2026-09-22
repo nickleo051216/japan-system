@@ -58,6 +58,12 @@ const ORDERS = [
   ['HB2608-007', 'U_buyer3', STATUS.ARRIVED, false, [['P01', 1]]],
 ];
 
+/** procurements.state → order_items.item_status; 'partial' leaves the lines
+ *  where they are (see syncItemStatus in routes/procurement.js). */
+const ITEM_STATUS_BY_PROC_STATE = {
+  open: '待採買', claimed: '採買中', got: '已到貨', out_of_stock: '缺貨',
+};
+
 // [sku, need, state, claimed_by, got_qty, unit_cost_jpy|null]
 const PROCUREMENTS = [
   ['P01', 4, 'got',          'U_helper1', 4, 960],
@@ -132,6 +138,14 @@ async function seed() {
       const procId = `prc_seed_${sku}`;
       await db.run('INSERT INTO procurements (proc_id, batch, sku, need_qty, claimed_by, claimed_at, got_qty, state, unit_cost_jpy, fx_rate, receipt_url, amount_edited, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
         procId, BATCH, sku, need, claimedBy, claimedBy ? ts : null, gotQty, state, cost, cost ? fx : null, null, false, ts);
+      // Keep the order lines consistent with the procurement they belong to.
+      const itemStatus = ITEM_STATUS_BY_PROC_STATE[state];
+      if (itemStatus) {
+        await db.run(
+          `UPDATE order_items SET item_status = ?
+            WHERE sku = ? AND order_id IN (SELECT order_id FROM orders WHERE batch = ?)`,
+          itemStatus, sku, BATCH);
+      }
       if (cost) {
         await db.run('INSERT INTO expenses (expense_id, proc_id, qty, unit_cost_jpy, fx_rate, receipt_url, amount_edited, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
           `exp_seed_${sku}`, procId, gotQty || 1, cost, fx, null, false, claimedBy, ts);

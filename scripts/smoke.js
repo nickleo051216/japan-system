@@ -105,6 +105,18 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('買家只查得到自己的訂單', mine.length > 0 && mine.every((o) => o.line_user_id === 'U_buyer1'));
     check('買家查他人訂單回 403', (await api('GET', '/api/v1/orders/detail?order_id=HB2608-005', { token: buyer })).status === 403);
 
+    // 品項層級的「部分到貨」：order_items.item_status 跟著採購狀態走
+    const itemStatusOf = async (orderId, sku) => {
+      const d = (await api('GET', `/api/v1/orders/detail?order_id=${orderId}`, { token: owner })).json.data;
+      const it = d.items.find((i) => i.sku === sku);
+      return it ? it.item_status : null;
+    };
+    const quotedOrderWith = async (sku) => {
+      const rows = (await api('GET', '/api/v1/orders/list?status=已報價', { token: owner })).json.data;
+      const hit = rows.find((o) => o.items.some((i) => i.sku === sku));
+      return hit ? hit.order_id : null;
+    };
+
     section('F-08 認領併發（條件更新）');
     const open = boardOwner.rows.find((r) => r.state === 'open');
     const [a, b] = await Promise.all([
@@ -116,9 +128,14 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('落敗者收到「已被認領」', [a, b].some((r) => r.json.error && r.json.error.code === 'ALREADY_CLAIMED'));
     check('非認領者不可放掉', (await api('POST', '/api/v1/procurement/release', { token: packer, body: { proc_id: open.proc_id } })).status !== 200);
 
+    section('品項狀態（部分到貨在品項層級）');
+    const tracked = await quotedOrderWith(open.sku);
+    check('認領後品項轉為採買中', tracked && (await itemStatusOf(tracked, open.sku)) === '採買中', { tracked, sku: open.sku });
+
     section('F-08 回報結果');
     const r1 = await api('POST', '/api/v1/procurement/result', { token: helper, body: { proc_id: open.proc_id, got_qty: open.need_qty + 5 } });
     check('回報數量 ≥ 需求記為買足', r1.json.data.state === 'got' && r1.json.data.got_qty === open.need_qty);
+    check('買足後品項轉為已到貨', tracked && (await itemStatusOf(tracked, open.sku)) === '已到貨', { tracked, sku: open.sku });
     const oos = boardOwner.rows.find((r) => r.state === 'claimed');
     if (oos) {
       await api('POST', '/api/v1/procurement/result', { token: owner, body: { proc_id: oos.proc_id, got_qty: 0 } });

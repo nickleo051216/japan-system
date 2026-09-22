@@ -20,6 +20,36 @@ async function notifyOwner({ kind, title, body, target }) {
 }
 
 /**
+ * procurements.state → order_items.item_status.
+ *
+ * 'partial' is deliberately absent. A board row aggregates demand for one sku
+ * across several orders, so when only part of it was bought, which buyer's
+ * line got filled is the owner's allocation call (補買 / 改品 / 退款) — the
+ * notification raised in /procurement/result is what asks for it. Guessing
+ * here would put a wrong 已到貨 in front of a customer.
+ */
+const ITEM_STATUS_BY_PROC_STATE = {
+  open: '待採買',
+  claimed: '採買中',
+  got: '已到貨',
+  out_of_stock: '缺貨',
+};
+
+/**
+ * Mirror a procurement's state onto the order lines it covers. Only orders
+ * still 已報價 are touched — once an order has moved on, its lines are history.
+ */
+async function syncItemStatus(batch, sku, procState) {
+  const to = ITEM_STATUS_BY_PROC_STATE[procState];
+  if (!to || !batch || !sku) return 0;
+  const res = await db.run(
+    `UPDATE order_items SET item_status = ?
+      WHERE sku = ? AND order_id IN (SELECT order_id FROM orders WHERE batch = ? AND status = ?)`,
+    to, sku, batch, STATUS.QUOTED);
+  return res.changes;
+}
+
+/**
  * Aggregate every 已報價 order in the batch into one row per sku.
  * Claims are never touched here — re-aggregating must not drop a claim.
  */
@@ -91,7 +121,7 @@ post('/api/v1/procurement/claim', async ({ actor, body }) => {
   auth.requireCap(actor, 'procurement.write');
   return db.tx(async () => {
     const res = await db.run(
-      'UPDATE procurements SET claimed_by = ?, claimed_at = ?, state = ?, updated_at = ? WHERE proc_id = ? AND claimed_by IS NULL',
+      'UPDATE procurements SET claimed_by = ?, claimed_at = ?, state = ?, updated_at = ? WHERE proc_id = ? AND claimed_by IS NULL RETURNING batch, sku',
       actor.line_user_id, now(), 'claimed', now(), body.proc_id);
     if (Number(res.changes) === 0) {
       const row = await db.one(`SELECT pr.claimed_by, m.nickname FROM procurements pr LEFT JOIN members m ON m.line_user_id = pr.claimed_by WHERE pr.proc_id = ?`, body.proc_id);
@@ -99,6 +129,8 @@ post('/api/v1/procurement/claim', async ({ actor, body }) => {
       await audit.record({ actor: actor.line_user_id, action: 'procurement.claim', target: body.proc_id, detail: { holder: row.claimed_by }, result: 'blocked' });
       throw err('ALREADY_CLAIMED', `已被 ${row.nickname || '其他人'} 認領`, 409);
     }
+    const claimed = res.rows[0];
+    await syncItemStatus(claimed.batch, claimed.sku, 'claimed');
     await audit.record({ actor: actor.line_user_id, action: 'procurement.claim', target: body.proc_id, result: 'ok' });
     return ok({ proc_id: body.proc_id, claimed_by: actor.line_user_id });
   });
@@ -107,9 +139,10 @@ post('/api/v1/procurement/claim', async ({ actor, body }) => {
 post('/api/v1/procurement/release', async ({ actor, body }) => {
   auth.requireCap(actor, 'procurement.write');
   const res = await db.run(
-    'UPDATE procurements SET claimed_by = NULL, claimed_at = NULL, state = ?, updated_at = ? WHERE proc_id = ? AND claimed_by = ? AND state = ?',
+    'UPDATE procurements SET claimed_by = NULL, claimed_at = NULL, state = ?, updated_at = ? WHERE proc_id = ? AND claimed_by = ? AND state = ? RETURNING batch, sku',
     'open', now(), body.proc_id, actor.line_user_id, 'claimed');
   if (Number(res.changes) === 0) throw err('NOT_CLAIMER', '只有認領者本人可以放掉，且已回報結果的項目不可放掉', 409);
+  await syncItemStatus(res.rows[0].batch, res.rows[0].sku, 'open');
   await audit.record({ actor: actor.line_user_id, action: 'procurement.release', target: body.proc_id, result: 'ok' });
   return ok({ proc_id: body.proc_id });
 });
@@ -132,6 +165,8 @@ post('/api/v1/procurement/result', async ({ actor, body }) => {
 
   await db.run('UPDATE procurements SET got_qty = ?, state = ?, claimed_by = COALESCE(claimed_by, ?), updated_at = ? WHERE proc_id = ?',
     gotQty, state, actor.line_user_id, now(), proc.proc_id);
+  // Before refreshOrderProgress, which may move orders out of 已報價.
+  await syncItemStatus(proc.batch, proc.sku, state);
 
   const product = await db.one('SELECT name_zh FROM products WHERE sku = ?', proc.sku);
   if (state !== 'got') {
@@ -250,4 +285,4 @@ get('/api/v1/procurement/expenses', async ({ actor, query }) => {
     ...(query.proc_id ? [query.proc_id] : [])));
 });
 
-module.exports = { syncBoard, boardRows, notifyOwner, refreshOrderProgress };
+module.exports = { syncBoard, boardRows, notifyOwner, refreshOrderProgress, syncItemStatus, ITEM_STATUS_BY_PROC_STATE };
