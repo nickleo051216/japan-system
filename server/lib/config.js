@@ -57,6 +57,10 @@ module.exports = {
   // operator it is missing instead of failing on the first query.
   databaseUrl: process.env.DATABASE_URL || '',
   uploadDir: path.resolve(process.env.UPLOAD_DIR || defaultUploadDir),
+  // 通知佇列：n8n 取件時要帶的共用金鑰，以及後端排隊後戳 n8n 的網址。
+  // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
+  notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),
+  notifyHookUrl: (process.env.NOTIFY_HOOK_URL || '').trim(),
   qrSigningKey: keyOrEphemeral('QR_SIGNING_KEY'),
   sessionSigningKey: keyOrEphemeral('SESSION_SIGNING_KEY'),
   defaultFxRate: Number(process.env.FX_JPY_TWD || 0.215),

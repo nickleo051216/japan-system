@@ -6,6 +6,7 @@ const audit = require('../lib/audit');
 const { STATUS, transition } = require('../lib/state');
 const { uid, now } = require('../lib/ids');
 const { round2 } = require('../lib/money');
+const notify = require('../lib/notify');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 
@@ -138,13 +139,24 @@ post('/api/v1/orders/ship', async ({ actor, body }) => {
     }
   }
 
-  await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason) VALUES (?,?,?,?,?,?)',
-    uid('shp'), order.order_id, now(), !!body.verified_by_scan, actor.line_user_id, overrideReason);
-  const moved = await transition(order.order_id, STATUS.SHIPPED, { actor: actor.line_user_id, reason: overrideReason });
+  const text = await notificationText(order);
+  // Same atomicity as the scan path: shipment, status and queued notification
+  // commit together, so 已出貨 can never exist with nothing scheduled to send.
+  let moved;
+  await db.tx(async () => {
+    await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason) VALUES (?,?,?,?,?,?)',
+      uid('shp'), order.order_id, now(), !!body.verified_by_scan, actor.line_user_id, overrideReason);
+    moved = await transition(order.order_id, STATUS.SHIPPED, { actor: actor.line_user_id, reason: overrideReason });
+    if (moved._notified) {
+      await notify.queue({ kind: 'shipped', lineUserId: order.line_user_id, orderId: order.order_id,
+        payload: await shipmentPayload(order, text) });
+    }
+  });
+  notify.poke();
   await audit.record({ actor: actor.line_user_id, action: 'order.ship', target: order.order_id,
     detail: { verified_by_scan: !!body.verified_by_scan, override_reason: overrideReason }, result: overrideReason ? 'warn' : 'ok' });
 
-  return ok({ order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: !!body.verified_by_scan, notification: moved._notified ? await notificationText(order) : null });
+  return ok({ order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: !!body.verified_by_scan, notification: moved._notified ? text : null });
 });
 
 /** F-10 通知範本. The prototype renders it instead of calling LINE push. */
@@ -154,6 +166,49 @@ async function notificationText(order) {
   const summary = items.map((i) => `${i.name_zh} ×${i.qty}`).join('、') || '（無品項）';
   return `📦 出貨通知\n\n${member ? member.nickname : ''} 您好，您的訂單 ${order.order_id} 已出貨囉！\n\n品項：${summary}\n預計 3 個工作天內送達\n\n有任何問題歡迎直接回覆這則訊息 🙌`;
 }
+
+/**
+ * What n8n needs to render the LINE message. The ready-made text is included so
+ * a plain push works with no extra lookups; the structured fields are there for
+ * a Flex card without n8n having to call back for them.
+ */
+async function shipmentPayload(order, text) {
+  const member = await db.one('SELECT nickname FROM members WHERE line_user_id = ?', order.line_user_id);
+  const items = await itemsOf(order.order_id);
+  const shipments = await db.all(
+    'SELECT carrier, tracking_no, eta FROM shipments WHERE order_id = ? ORDER BY shipped_at DESC', order.order_id);
+  return {
+    text,
+    order_id: order.order_id,
+    nickname: member ? member.nickname : null,
+    pieces: items.reduce((s, i) => s + i.qty, 0),
+    items: items.map((i) => ({ name: i.name_zh, qty: i.qty })),
+    shipment: shipments[0] || null,
+  };
+}
+
+// ---- 通知佇列：n8n 取件與回報 --------------------------------------------
+// 這兩個端點不走會員 token（n8n 不是會員），改驗共用金鑰。
+
+post('/api/v1/notify/pending', async ({ body, req }) => {
+  notify.requireMachine(req);
+  // POST, not GET: taking a batch mutates state — it marks the rows as claimed.
+  const rows = await notify.claim(body && body.limit);
+  return ok({ notifications: rows, count: rows.length });
+}, { idempotent: false });
+
+post('/api/v1/notify/result', async ({ body, req }) => {
+  notify.requireMachine(req);
+  if (!body || !body.notif_id) throw err('BAD_REQUEST', '缺少 notif_id');
+  const r = await notify.report({
+    notifId: body.notif_id,
+    ok: body.ok === true,
+    error: body.error || null,
+    lineResponse: body.line_response || null,
+  });
+  if (!r) throw err('NOT_FOUND', '查無此通知', 404);
+  return ok(r);
+}, { idempotent: false });
 
 // 店主倒退修正：需填原因，資料庫以 app.override 放行，全程稽核。
 post('/api/v1/orders/transition', async ({ actor, body }) => {
@@ -231,4 +286,4 @@ get('/api/v1/logistics/list', async ({ actor, query }) => {
   return ok(rows);
 });
 
-module.exports = { itemsOf, procurementCoverage, notificationText };
+module.exports = { itemsOf, procurementCoverage, notificationText, shipmentPayload };

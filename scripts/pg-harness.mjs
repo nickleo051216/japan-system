@@ -11,7 +11,10 @@ const PORT = Number(process.env.PG_HARNESS_PORT || 55432);
 const dir = path.resolve('supabase/migrations');
 const db = new PGlite();
 await db.exec('create role anon; create role authenticated;');
-for (const f of fs.readdirSync(dir).filter((f) => /^00[124]_.*\.sql$/.test(f)).sort()) {
+// Everything except 000 (rollback) and 003 (self-test — designed to be run by
+// hand in the Supabase SQL Editor, and it drops its own fixtures afterwards).
+const SKIP = /^(000|003)_/;
+for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.sql') && !SKIP.test(f)).sort()) {
   await db.exec(fs.readFileSync(path.join(dir, f), 'utf8'));
 }
 const srv = new PGLiteSocketServer({ db, port: PORT, host: '127.0.0.1' });
