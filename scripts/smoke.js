@@ -25,6 +25,8 @@ const envFor = (databaseUrl) => ({
   DB_POOL_MAX: '1',
   QR_SIGNING_KEY: 'smoke-test-signing-key',
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
+  NOTIFY_SHARED_SECRET: 'smoke-notify-secret',
+  // NOTIFY_HOOK_URL 刻意不設：驗證「沒接 n8n 也照常出貨」
   FX_JPY_TWD: '0.215',
 });
 
@@ -52,8 +54,8 @@ const check = (name, cond, extra) => {
 };
 const section = (t) => console.log(`\n${t}`);
 
-async function api(method, url, { token, body, idem } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
+async function api(method, url, { token, body, idem, headers: extra } = {}) {
+  const headers = { 'Content-Type': 'application/json', ...extra };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (idem) headers['Idempotency-Key'] = idem;
   const res = await fetch(BASE + url, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -189,6 +191,33 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('綠燈掃碼即出貨', commit.status === '已出貨' && commit.verified_by_scan === true);
     check('產生出貨通知文案', typeof commit.notification === 'string' && commit.notification.includes('出貨通知'));
     check('重複掃同一張 → 已出貨黃燈', (await v(label.payload)).code === 'ALREADY_SHIPPED');
+
+    section('出貨推播佇列');
+    const NKEY = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const claim = (limit = 20) => api('POST', '/api/v1/notify/pending', { ...NKEY, body: { limit } });
+    check('沒帶金鑰的取件被擋', (await api('POST', '/api/v1/notify/pending', { body: {} })).status === 401);
+    check('金鑰錯誤的取件被擋',
+      (await api('POST', '/api/v1/notify/pending', { headers: { 'X-Notify-Token': 'wrong' }, body: {} })).status === 401);
+    const batch1 = (await claim()).json.data;
+    // 這一輪測試前已出貨兩張單（HB2608-007 覆寫、HB2608-004 掃碼）
+    check('出貨後通知進佇列，一張單一筆', batch1.count === 2
+      && new Set(batch1.notifications.map((n) => n.order_id)).size === 2
+      && batch1.notifications.every((n) => n.kind === 'shipped'), batch1.notifications.map((n) => n.order_id));
+    check('通知內容含文案與訂單資訊',
+      batch1.notifications.every((n) => n.payload && typeof n.payload.text === 'string'
+        && n.payload.text.includes('出貨通知') && n.payload.order_id));
+    check('取件即上鎖，第二次拿不到同一批', (await claim()).json.data.count === 0);
+
+    const first = batch1.notifications[0], second = batch1.notifications[1];
+    check('回報成功後不會再被取件',
+      (await api('POST', '/api/v1/notify/result', { ...NKEY, body: { notif_id: first.notif_id, ok: true } })).json.ok);
+    const failed = (await api('POST', '/api/v1/notify/result', { ...NKEY,
+      body: { notif_id: second.notif_id, ok: false, error: '429 rate limit', line_response: { message: 'quota' } } })).json;
+    check('回報失敗會排重試，不會立刻再拿到',
+      failed.ok && failed.data.status === 'failed' && failed.data.gave_up === false
+      && (await claim()).json.data.count === 0, failed.data);
+    check('查無通知回 404',
+      (await api('POST', '/api/v1/notify/result', { ...NKEY, body: { notif_id: 'nope', ok: true } })).status === 404);
 
     section('F-19 稽核軌跡');
     const logs = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data;

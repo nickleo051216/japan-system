@@ -69,7 +69,10 @@ async function handleApi(req, res) {
 
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
     const actor = await auth.resolve(token);
-    const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas';
+    // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
+    // 不經過會員 token —— n8n 不是會員。
+    const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
+      || pathname.startsWith('/api/v1/notify/');
     if (!actor && !isPublic) return httpLib.send(res, 401, httpLib.fail('UNAUTHENTICATED', '尚未登入'));
 
     const body = req.method === 'POST' ? await httpLib.readJson(req) : {};

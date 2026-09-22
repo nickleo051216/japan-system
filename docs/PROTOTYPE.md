@@ -67,7 +67,7 @@ DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres DB_POOL_MAX=1 npm run 
 | F-07 | 拍照請款 | 先選商品 → 拍收據 → **人工確認金額** → 寫入；匯率快照、加權平均成本、毛利率 <20% 提醒 |
 | F-08 | 現場採購看板 | 認領為**條件更新**（僅 `claimed_by IS NULL` 時成功）；買足／部分／缺貨三種回報，後兩者即時通知店主。採購狀態會同步到 `order_items.item_status`（待採買／採買中／已到貨／缺貨），訂單層級沒有「部分到貨」，**部分到貨看的是品項狀態** |
 | F-09 | 看圖理貨 | 已到貨待出貨訂單卡片顯示客人原始圖片 |
-| F-10 | 確認出貨與通知 | 未付款預設阻擋、需店主覆寫並記錄；產生通知文案 |
+| F-10 | 確認出貨與通知 | 未付款預設阻擋、需店主覆寫並記錄。出貨時**在同一個交易內**把通知排進 `notification_outbox`，由 n8n 取件後發 LINE；後端不持有推播憑證，n8n 掛掉通知也不會遺失 |
 | F-15 | QR 出貨標籤 | 50×30mm、QR 20mm、容錯 Q、靜區 4 模組，`@page` 直接列印 |
 | F-16 | HMAC 防偽簽章 | `UPPER(BASE36(HMAC-SHA256(key, order_id)[0..3]))[0..3]`，金鑰只在伺服器 |
 | F-17 | 掃碼核對工作站 | 輸入框永遠保持焦點、Enter 觸發後清空、大面積燈號 |
@@ -90,6 +90,7 @@ DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres DB_POOL_MAX=1 npm run 
 | 登入 | 身分切換 + HMAC 簽章的不透明 token | LIFF ID Token／後台 JWT，於 n8n 端驗證 |
 | 圖片儲存 | 收據存在本機 `data/uploads/`，商品圖為內嵌 SVG | Google Drive / Cloudinary（F-11 需先做直連驗證） |
 | 資料庫 | 本機以 PGlite harness 代替 Supabase | Supabase Postgres（Transaction pooler, port 6543） |
+| LINE 推播 | 通知排進佇列，由測試取件驗證 | n8n 取件後實際呼叫 LINE Messaging API |
 
 ### 未實作
 
@@ -108,6 +109,7 @@ server/
   lib/db.js           Postgres 連線池、`?` → `$n`、交易（AsyncLocalStorage 釘住連線）
   lib/seed.js         示範資料（只有 npm run reset 會寫入）
   lib/state.js        訂單狀態機的程式側：帶入 actor/reason/override、轉譯資料庫錯誤
+  lib/notify.js       通知佇列：排隊、取件（含租約）、回報與重試
   lib/signature.js    F-16 HMAC 簽章產生與驗證
   lib/money.js        匯率快照、加權平均成本、毛利
   lib/auth.js         角色能力矩陣、欄位遮蔽
@@ -119,7 +121,7 @@ web/
   views/              dashboard board expense packing labels scan orders logistics audit settings
 scripts/smoke.js      端對端驗收檢查
 scripts/pg-harness.mjs 本機測試用的假 Supabase（PGlite）
-supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／004 相容層
+supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／004 相容層／005 通知佇列
 ```
 
 ---
@@ -130,7 +132,7 @@ supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／
 npm run smoke
 ```
 
-依規格「驗收條件」逐項檢查，目前 67 項全數通過（原 54 項，另加狀態機 2、品項狀態 2、店家設定 9），包含：
+依規格「驗收條件」逐項檢查，目前 75 項全數通過（原 54 項，另加狀態機 2、品項狀態 2、店家設定 9、通知佇列 8），包含：
 
 - 兩個請求同時認領同一項，只有一個成功（F-08）
 - 改匯率後既有紀錄的台幣成本不變（F-07 / F-23）
@@ -143,6 +145,7 @@ npm run smoke
 - 同一次狀態轉換，`order_status_log` 只留一筆（trigger 寫，程式不寫）
 - 認領後品項轉「採買中」、買足後轉「已到貨」
 - 收款帳號只有店主讀得到，且不會出現在稽核紀錄裡
+- 出貨後通知自動進佇列，一張單一筆；取件即上鎖，兩個 n8n 執行不會重複發
 
 ---
 

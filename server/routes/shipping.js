@@ -7,7 +7,8 @@ const audit = require('../lib/audit');
 const { STATUS, transition } = require('../lib/state');
 const { uid, now } = require('../lib/ids');
 const sig = require('../lib/signature');
-const { itemsOf, procurementCoverage, notificationText } = require('./orders');
+const notify = require('../lib/notify');
+const { itemsOf, procurementCoverage, notificationText, shipmentPayload } = require('./orders');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 
@@ -79,13 +80,21 @@ post('/api/v1/scan/commit', async ({ actor, body }) => {
     await audit.record({ actor: actor.line_user_id, action: 'scan.commit', target: order.order_id, detail: { status: order.status }, result: 'blocked' });
     throw err('ILLEGAL_STATE', `狀態為「${order.status}」的訂單還不能出貨`, 409);
   }
-  await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason) VALUES (?,?,?,?,?,?)',
-    uid('shp'), order.order_id, now(), true, actor.line_user_id, reason);
-  await transition(order.order_id, STATUS.SHIPPED, { actor: actor.line_user_id, reason: reason || '掃碼核對通過' });
+  const text = await notificationText(order);
+  // Shipment, status and the queued notification land together or not at all:
+  // an order must never read 已出貨 with nobody scheduled to tell the customer.
+  await db.tx(async () => {
+    await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason) VALUES (?,?,?,?,?,?)',
+      uid('shp'), order.order_id, now(), true, actor.line_user_id, reason);
+    await transition(order.order_id, STATUS.SHIPPED, { actor: actor.line_user_id, reason: reason || '掃碼核對通過' });
+    await notify.queue({ kind: 'shipped', lineUserId: order.line_user_id, orderId: order.order_id,
+      payload: await shipmentPayload(order, text) });
+  });
+  notify.poke();
   await audit.record({ actor: actor.line_user_id, action: 'scan.commit', target: order.order_id,
     detail: { check: result.code, override_reason: reason, verified_by_scan: true }, result: reason ? 'warn' : 'ok' });
 
-  return ok({ order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: true, override_reason: reason, notification: await notificationText(order) });
+  return ok({ order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: true, override_reason: reason, notification: text });
 });
 
 // F-15 QR 出貨標籤產生器
