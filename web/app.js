@@ -83,9 +83,9 @@ export function modal(title, bodyNode, actions = []) {
 }
 
 export const STATUS_TONE = {
-  '願望清單': '', '待付款': 'amber', '待採購': 'blue', '部分到貨': 'amber',
-  '待出貨': 'blue', '已出貨': 'green', '已完成': 'green',
-  '待退款': 'red', '已退款': '', '已取消': '',
+  '待確認': 'amber', '已報價': 'blue', '已到貨': 'blue',
+  '已出貨': 'green', '已送達': 'green',
+  '缺貨': 'red', '已取消': '',
 };
 export const statusTag = (s) => h('span', { class: 'tag ' + (STATUS_TONE[s] || '') }, s);
 

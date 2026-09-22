@@ -15,11 +15,11 @@ const config = require('./config');
 
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-const currentFxRate = () => Number(db.setting('fx_jpy_twd', config.defaultFxRate));
+const currentFxRate = async () => Number(await db.setting('fx_jpy_twd', config.defaultFxRate));
 
 /** Weighted average across every receipt logged for a procurement (F-07 例外 3). */
-function weightedCost(procId) {
-  const rows = db.all('SELECT qty, unit_cost_jpy, fx_rate FROM expenses WHERE proc_id = ?', procId);
+async function weightedCost(procId) {
+  const rows = await db.all('SELECT qty, unit_cost_jpy, fx_rate FROM expenses WHERE proc_id = ?', procId);
   if (!rows.length) return null;
   const qty = rows.reduce((s, r) => s + r.qty, 0);
   if (qty <= 0) return null;

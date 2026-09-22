@@ -6,7 +6,7 @@ import { GET, h, toast, fail } from '/app.js';
  * @page in style.css sets the print size; 列印時只有標籤會進紙。
  */
 export async function render(root, ctx) {
-  const input = h('input', { type: 'text', placeholder: '訂單編號，逗號分隔；留空＝所有待出貨', value: ctx.query.order_ids || '', style: 'width:340px' });
+  const input = h('input', { type: 'text', placeholder: '訂單編號，逗號分隔；留空＝所有已到貨待出貨', value: ctx.query.order_ids || '', style: 'width:340px' });
   const sheet = h('div', { class: 'label-sheet' });
   const card = h('div', { class: 'card' },
     h('div', { class: 'card-head no-print' },

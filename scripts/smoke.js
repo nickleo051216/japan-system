@@ -1,25 +1,49 @@
 'use strict';
 /**
- * End-to-end smoke test. Boots the server on a throwaway database and walks
- * the acceptance conditions that matter most in README §4.
- *   node scripts/smoke.js
+ * End-to-end smoke test. Boots the server against the PGlite harness (a real
+ * Postgres speaking the wire protocol, same as Supabase) on freshly reset demo
+ * data, and walks the acceptance conditions that matter most in README §4.
+ *
+ *   node scripts/pg-harness.mjs        # in another terminal, then
+ *   DATABASE_URL=… npm run smoke
+ *
+ * With no DATABASE_URL set it starts a harness of its own. It never touches
+ * the production Supabase project.
  */
 const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hb-smoke-'));
-const env = {
+const ROOT = path.join(__dirname, '..');
+
+/** PGlite serves one connection at a time, hence DB_POOL_MAX=1. */
+const envFor = (databaseUrl) => ({
   ...process.env,
   PORT: String(PORT),
-  DB_PATH: path.join(tmpDir, 'smoke.db'),
+  DATABASE_URL: databaseUrl,
+  DB_POOL_MAX: '1',
   QR_SIGNING_KEY: 'smoke-test-signing-key',
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   FX_JPY_TWD: '0.215',
-};
+});
+
+/** Start scripts/pg-harness.mjs and resolve with the DATABASE_URL it prints. */
+function startHarness() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'pg-harness.mjs')],
+      { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    const timer = setTimeout(() => reject(new Error('harness 啟動逾時')), 120000);
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      const m = /DATABASE_URL=(\S+)/.exec(buf);
+      if (m) { clearTimeout(timer); resolve({ child, url: m[1] }); }
+    });
+    child.stderr.on('data', (d) => process.stderr.write(d));
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`harness 結束，代碼 ${code}`)); });
+  });
+}
 
 let passed = 0, failed = 0;
 const check = (name, cond, extra) => {
@@ -38,9 +62,20 @@ async function api(method, url, { token, body, idem } = {}) {
 const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id } })).json.data.token;
 
 (async () => {
-  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let harness = null;
+  let databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    harness = await startHarness();
+    databaseUrl = harness.url;
+    console.log(`[smoke] 已啟動 harness：${databaseUrl}`);
+  }
+
+  // --reset wipes the demo tables and re-seeds; the schema itself belongs to
+  // supabase/migrations and is already in place.
+  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js'), '--reset'],
+    { cwd: ROOT, env: envFor(databaseUrl), stdio: ['ignore', 'pipe', 'pipe'] });
   child.stderr.on('data', (d) => { const s = d.toString(); if (!/Warning/.test(s)) process.stderr.write(s); });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 300; i++) {
     try { await fetch(BASE + '/api/v1/auth/personas'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
 
@@ -154,9 +189,13 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     check('助手不可拆單', (await api('POST', '/api/v1/orders/split', { token: helper, body: { order_id: 'HB2608-002', items: [{ item_id: 'x', qty: 1 }] } })).status === 403);
     check('已出貨訂單不可拆', (await api('POST', '/api/v1/orders/split', { token: owner, body: { order_id: 'HB2608-006', items: [{ item_id: 'x', qty: 1 }] } })).status === 409);
 
-    section('§2.3 狀態機');
-    check('不可跳躍狀態', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已完成' } })).status === 409);
-    check('強制修正需填原因', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已完成', force: true } })).status === 400);
+    section('狀態機（資料庫為唯一真相）');
+    check('不可跳躍狀態', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已送達' } })).status === 409);
+    check('狀態被擋下後資料庫未改變',
+      (await api('GET', '/api/v1/orders/detail?order_id=HB2608-002', { token: owner })).json.data.status === '已報價');
+    check('強制修正需填原因', (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: 'HB2608-002', to: '已送達', force: true } })).status === 400);
+    const shippedLog = (await api('GET', '/api/v1/orders/detail?order_id=HB2608-004', { token: owner })).json.data.status_log;
+    check('一次狀態轉換只留一筆紀錄', shippedLog.filter((l) => l.to_status === '已出貨').length === 1, shippedLog);
 
     section('F-06 對帳 / I-02 冪等');
     const key = 'smoke-idem-1';
@@ -181,7 +220,7 @@ const login = async (id) => (await api('POST', '/api/v1/auth/login', { body: { l
     console.error('\n測試中止：', e);
   } finally {
     child.kill();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (harness) harness.child.kill();
   }
 
   console.log(`\n通過 ${passed} 項，失敗 ${failed} 項`);

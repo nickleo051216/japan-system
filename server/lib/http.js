@@ -56,14 +56,17 @@ async function readJson(req) {
 }
 
 /** Replay protection for writes — I-02 rule 4. */
-function idempotencyLookup(key) {
+async function idempotencyLookup(key) {
   if (!key) return null;
-  const row = db.one('SELECT response FROM idempotency WHERE key = ?', key);
+  const row = await db.one('SELECT response FROM idempotency WHERE key = ?', key);
   return row ? JSON.parse(row.response) : null;
 }
-function idempotencyStore(key, payload) {
+async function idempotencyStore(key, payload) {
   if (!key) return;
-  db.run('INSERT OR REPLACE INTO idempotency (key, response, created_at) VALUES (?,?,?)', key, JSON.stringify(payload), now());
+  await db.run(
+    'INSERT INTO idempotency (key, response, created_at) VALUES (?,?,?) ' +
+    'ON CONFLICT (key) DO UPDATE SET response = excluded.response, created_at = excluded.created_at',
+    key, JSON.stringify(payload), now());
 }
 
 module.exports = { get, post, add, match, ok, fail, send, readJson, idempotencyLookup, idempotencyStore, routes };

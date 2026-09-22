@@ -1,224 +1,133 @@
 'use strict';
 /**
- * Data layer. Prototype uses node:sqlite so the whole thing runs with one
- * dependency and no external service.
+ * Data layer — Postgres (Supabase) edition.
  *
- * Table and column names follow README §3.1 verbatim so the Phase 2 migration
- * to Supabase (§3.2 / I-01) is a type change, not a rename.
+ * Same surface as the original SQLite helper (open/get/all/one/run/tx/
+ * setting/putSetting) so route code only needs `await` added, but every call
+ * is now async.
+ *
+ * - Connection: DATABASE_URL, Supabase *transaction pooler* (port 6543) —
+ *   required on Vercel serverless, where each instance must hold few sockets.
+ * - Placeholders: routes keep writing `?`; they are rewritten to $1..$n here.
+ * - Transactions: tx(fn) pins one client; any all/one/run called inside fn
+ *   (however deep) is routed to that client via AsyncLocalStorage, so helper
+ *   functions don't need a client argument.
+ * - Types: numeric/bigint come back as JS numbers and timestamptz as ISO
+ *   strings, matching what the SQLite version returned.
+ * - Schema is owned by migrations (supabase/*.sql), never created at runtime.
  */
-const { DatabaseSync } = require('node:sqlite');
-const fs = require('node:fs');
-const path = require('node:path');
-const config = require('./config');
+const { Pool, types } = require('pg');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
-const SCHEMA = `
-PRAGMA foreign_keys = ON;
+// ---- type parsers: keep the shapes the rest of the app already expects ----
+types.setTypeParser(20,   (v) => (v === null ? null : Number(v)));       // int8 (count(*))
+types.setTypeParser(1700, (v) => (v === null ? null : Number(v)));       // numeric
+types.setTypeParser(1184, (v) => (v === null ? null : new Date(v).toISOString())); // timestamptz
+types.setTypeParser(1114, (v) => (v === null ? null : new Date(v + 'Z').toISOString())); // timestamp
 
-CREATE TABLE IF NOT EXISTS members (
-  line_user_id  TEXT PRIMARY KEY,
-  nickname      TEXT NOT NULL,
-  display_name  TEXT,
-  phone         TEXT,
-  bound_at      TEXT,
-  role          TEXT NOT NULL CHECK (role IN ('buyer','helper','packer','owner'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_members_nickname ON members (LOWER(TRIM(nickname)));
-
-CREATE TABLE IF NOT EXISTS batches (
-  batch      TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
-  opened_at  TEXT,
-  closed_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS products (
-  sku             TEXT PRIMARY KEY,
-  name_zh         TEXT NOT NULL,
-  name_local      TEXT,
-  brand           TEXT,
-  price_twd       REAL NOT NULL,
-  est_cost_jpy    REAL,
-  actual_cost_jpy REAL,
-  image_url       TEXT,
-  batch           TEXT REFERENCES batches(batch),
-  -- F-14 groundwork. Enforcement needs a real transactional DB (I-01);
-  -- the prototype uses a SQLite transaction so the semantics are testable.
-  stock_limit     INTEGER,
-  reserved        INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS orders (
-  order_id        TEXT PRIMARY KEY,
-  line_user_id    TEXT NOT NULL REFERENCES members(line_user_id),
-  batch           TEXT REFERENCES batches(batch),
-  status          TEXT NOT NULL,
-  total_twd       REAL NOT NULL DEFAULT 0,
-  paid            INTEGER NOT NULL DEFAULT 0,
-  paid_at         TEXT,
-  parent_order_id TEXT REFERENCES orders(order_id),
-  created_at      TEXT NOT NULL,
-  note            TEXT
-);
-
-CREATE TABLE IF NOT EXISTS order_items (
-  item_id          TEXT PRIMARY KEY,
-  order_id         TEXT NOT NULL REFERENCES orders(order_id),
-  sku              TEXT NOT NULL REFERENCES products(sku),
-  qty              INTEGER NOT NULL,
-  unit_price_twd   REAL NOT NULL,        -- price snapshot taken at order time
-  source_image_url TEXT
-);
-
-CREATE TABLE IF NOT EXISTS order_status_log (
-  log_id      TEXT PRIMARY KEY,
-  order_id    TEXT NOT NULL REFERENCES orders(order_id),
-  from_status TEXT,
-  to_status   TEXT NOT NULL,
-  actor       TEXT,
-  reason      TEXT,
-  ts          TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS procurements (
-  proc_id       TEXT PRIMARY KEY,
-  batch         TEXT NOT NULL,
-  sku           TEXT NOT NULL REFERENCES products(sku),
-  need_qty      INTEGER NOT NULL,
-  claimed_by    TEXT REFERENCES members(line_user_id),
-  claimed_at    TEXT,
-  got_qty       INTEGER,
-  state         TEXT NOT NULL CHECK (state IN ('open','claimed','got','partial','out_of_stock')),
-  unit_cost_jpy REAL,
-  fx_rate       REAL,                    -- rate snapshot, see F-23
-  receipt_url   TEXT,
-  amount_edited INTEGER NOT NULL DEFAULT 0,
-  updated_at    TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_proc_batch_sku ON procurements (batch, sku);
-
-CREATE TABLE IF NOT EXISTS expenses (
-  expense_id    TEXT PRIMARY KEY,
-  proc_id       TEXT NOT NULL REFERENCES procurements(proc_id),
-  qty           INTEGER NOT NULL,
-  unit_cost_jpy REAL NOT NULL,
-  fx_rate       REAL NOT NULL,
-  receipt_url   TEXT,
-  amount_edited INTEGER NOT NULL DEFAULT 0,
-  created_by    TEXT,
-  created_at    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS payments (
-  payment_id     TEXT PRIMARY KEY,
-  order_id       TEXT NOT NULL REFERENCES orders(order_id),
-  amount_twd     REAL NOT NULL,
-  method         TEXT NOT NULL CHECK (method IN ('transfer','linepay','cash')),
-  last5          TEXT,
-  received_at    TEXT,
-  reconciled_by  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS shipments (
-  shipment_id      TEXT PRIMARY KEY,
-  order_id         TEXT NOT NULL REFERENCES orders(order_id),
-  shipped_at       TEXT NOT NULL,
-  verified_by_scan INTEGER NOT NULL DEFAULT 0,
-  operator         TEXT,
-  override_reason  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS logistics_bindings (
-  tracking_no TEXT PRIMARY KEY,
-  order_id    TEXT NOT NULL REFERENCES orders(order_id),
-  carrier     TEXT,
-  bound_at    TEXT,
-  bound_by    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-  log_id TEXT PRIMARY KEY,
-  ts     TEXT NOT NULL,
-  actor  TEXT,
-  action TEXT NOT NULL,
-  target TEXT,
-  detail TEXT,
-  result TEXT NOT NULL CHECK (result IN ('ok','warn','blocked'))
-);
-
-CREATE TABLE IF NOT EXISTS fx_history (
-  fx_id      TEXT PRIMARY KEY,
-  rate       REAL NOT NULL,
-  changed_by TEXT,
-  changed_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT
-);
-
-CREATE TABLE IF NOT EXISTS notifications (
-  notif_id   TEXT PRIMARY KEY,
-  audience   TEXT NOT NULL,          -- 'owner' | line_user_id
-  kind       TEXT NOT NULL,
-  title      TEXT NOT NULL,
-  body       TEXT,
-  target     TEXT,
-  created_at TEXT NOT NULL,
-  read_at    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS idempotency (
-  key        TEXT PRIMARY KEY,
-  response   TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-`;
-
-let db = null;
+let pool = null;
+const txStore = new AsyncLocalStorage();
 
 function open() {
-  if (db) return db;
-  const file = config.dbPath;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  db = new DatabaseSync(file);
-  db.exec(SCHEMA);
-  return db;
+  if (pool) return pool;
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error('DATABASE_URL 未設定');
+  const local = /localhost|127\.0\.0\.1/.test(url);
+  pool = new Pool({
+    connectionString: url,
+    max: Number(process.env.DB_POOL_MAX || 3),
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 8_000,
+    ssl: local ? false : { rejectUnauthorized: false },
+  });
+  pool.on('error', (e) => console.error('[db] idle client error', e.message));
+  return pool;
 }
 
-function get() {
-  return db || open();
+const get = () => pool || open();
+
+/** Rewrite `?` placeholders to $1..$n, skipping ones inside quoted literals. */
+function toPg(sql) {
+  let n = 0, out = '', quote = null;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    if (quote) { out += c; if (c === quote) quote = null; continue; }
+    if (c === "'" || c === '"') { quote = c; out += c; continue; }
+    out += c === '?' ? '$' + (++n) : c;
+  }
+  return out;
 }
 
-// --- small query helpers -------------------------------------------------
+/** Booleans pass through; everything else as-is (pg handles numbers/strings/null). */
+const norm = (params) => params.map((p) => (p === undefined ? null : p));
 
-const all = (sql, ...params) => get().prepare(sql).all(...params).map(plain);
-const one = (sql, ...params) => {
-  const row = get().prepare(sql).get(...params);
-  return row ? plain(row) : null;
-};
-const run = (sql, ...params) => get().prepare(sql).run(...params);
-const tx = (fn) => {
-  const d = get();
-  d.exec('BEGIN IMMEDIATE');
+/**
+ * SQL errors raised by Postgres (constraint, ILLEGAL_TRANSITION, CONFLICT…)
+ * carry a 5-char SQLSTATE and leave the connection healthy — keep it.
+ * Only transport failures (no SQLSTATE) should throw the client away.
+ * pool.query() would destroy the client on *any* error, forcing a fresh TLS
+ * handshake per business error — costly exactly when a 喊單 rush produces
+ * many "sold out" / conflict errors at once.
+ */
+const isSqlError = (e) => !!(e && typeof e.code === 'string' && /^[0-9A-Z]{5}$/.test(e.code));
+
+async function q(sql, params) {
+  const pinned = txStore.getStore();
+  if (pinned) return pinned.query(toPg(sql), norm(params));
+  const client = await get().connect();
+  let failure;
   try {
-    const out = fn();
-    d.exec('COMMIT');
+    return await client.query(toPg(sql), norm(params));
+  } catch (e) {
+    failure = e;
+    throw e;
+  } finally {
+    client.release(failure && !isSqlError(failure) ? failure : undefined);
+  }
+}
+
+const all = async (sql, ...params) => (await q(sql, params)).rows;
+const one = async (sql, ...params) => (await q(sql, params)).rows[0] || null;
+/** `changes` mirrors the old SQLite driver so existing `res.changes === 0` checks still work. */
+const run = async (sql, ...params) => {
+  const r = await q(sql, params);
+  return { changes: r.rowCount, rows: r.rows };
+};
+
+/**
+ * Run fn inside a transaction. Nested tx() calls reuse the outer one.
+ * Throwing (or a rejected promise) rolls everything back.
+ */
+async function tx(fn) {
+  if (txStore.getStore()) return fn();
+  const client = await get().connect();
+  try {
+    await client.query('BEGIN');
+    const out = await txStore.run(client, fn);
+    await client.query('COMMIT');
     return out;
   } catch (err) {
-    d.exec('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) { /* connection already broken */ }
     throw err;
+  } finally {
+    client.release();
   }
-};
+}
 
-// node:sqlite returns null-prototype objects; normalise for JSON.stringify
-const plain = (row) => Object.assign({}, row);
+/** Per-transaction session setting, e.g. actor/reason read by DB triggers. */
+async function setLocal(key, value) {
+  if (!txStore.getStore()) throw new Error('setLocal 必須在 tx() 內呼叫');
+  await q('SELECT set_config(?, ?, true)', [key, value == null ? '' : String(value)]);
+}
 
-const setting = (key, fallback = null) => {
-  const row = one('SELECT value FROM settings WHERE key = ?', key);
+const setting = async (key, fallback = null) => {
+  const row = await one('SELECT value FROM settings WHERE key = ?', key);
   return row ? row.value : fallback;
 };
 const putSetting = (key, value) =>
-  run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value));
+  run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+      key, String(value));
 
-module.exports = { open, get, all, one, run, tx, setting, putSetting, SCHEMA };
+async function close() { if (pool) { await pool.end(); pool = null; } }
+
+module.exports = { open, get, all, one, run, tx, setLocal, setting, putSetting, close, toPg, isSqlError };

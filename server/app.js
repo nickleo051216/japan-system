@@ -12,25 +12,25 @@ const fs = require('node:fs');
 const path = require('node:path');
 const config = require('./lib/config');
 const db = require('./lib/db');
-const seed = require('./lib/seed');
 const auth = require('./lib/auth');
 const httpLib = require('./lib/http');
 
 const WEB_DIR = path.join(__dirname, '..', 'web');
-const UPLOAD_DIR = path.join(path.dirname(config.dbPath), 'uploads');
+const UPLOAD_DIR = config.uploadDir;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.json': 'application/json; charset=utf-8', '.ico': 'image/x-icon' };
 
 let booted = false;
 
 /**
- * Open the database, seed demo data, register routes. Idempotent because a
- * serverless instance calls it on every invocation but only the first does work.
+ * Create the connection pool and register routes. Idempotent because a
+ * serverless instance calls it on every invocation but only the first does
+ * work. Schema belongs to supabase/migrations and demo data to `npm run reset`,
+ * so boot() never writes anything.
  */
-function boot({ reset = false } = {}) {
+function boot() {
   if (booted) return false;
   db.open();
-  const seeded = reset ? seed.reset() : seed.seed();
   // Route modules register themselves on require.
   require('./routes/auth');
   require('./routes/orders');
@@ -38,7 +38,7 @@ function boot({ reset = false } = {}) {
   require('./routes/shipping');
   require('./routes/dashboard');
   booted = true;
-  return seeded;
+  return true;
 }
 
 function serveFile(res, file) {
@@ -60,12 +60,12 @@ async function handleApi(req, res) {
   const idemKey = req.headers['idempotency-key'] || null;
   try {
     if (req.method === 'POST' && hit.route.idempotent && idemKey) {
-      const cached = httpLib.idempotencyLookup(idemKey);
+      const cached = await httpLib.idempotencyLookup(idemKey);
       if (cached) return httpLib.send(res, 200, cached);
     }
 
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
-    const actor = auth.resolve(token);
+    const actor = await auth.resolve(token);
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas';
     if (!actor && !isPublic) return httpLib.send(res, 401, httpLib.fail('UNAUTHENTICATED', '尚未登入'));
 
@@ -73,7 +73,7 @@ async function handleApi(req, res) {
     const query = Object.fromEntries(url.searchParams);
     const payload = await hit.route.handler({ actor, body, query, params: hit.params, req });
 
-    if (req.method === 'POST' && hit.route.idempotent && idemKey) httpLib.idempotencyStore(idemKey, payload);
+    if (req.method === 'POST' && hit.route.idempotent && idemKey) await httpLib.idempotencyStore(idemKey, payload);
     return httpLib.send(res, 200, payload);
   } catch (e) {
     const status = e.status || 500;

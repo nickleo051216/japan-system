@@ -20,7 +20,7 @@ export async function render(root, ctx) {
     stats.append(stat('已知毛利', nt(d.gross_profit_twd), `毛利率 ${pct(d.margin_pct)}`));
   }
   stats.append(stat('待採購件數', d.pending_procurement_pieces, '尚未買齊的件數'));
-  stats.append(stat('待出貨筆數', d.pending_shipment_count, '可列印標籤後掃碼'));
+  stats.append(stat('已到貨待出貨', d.pending_shipment_count, '可列印標籤後掃碼'));
   root.append(stats);
 
   // F-22 毛利呈現規則：未登錄成本的營收必須明確標示，不得用預估成本充數。

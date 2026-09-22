@@ -5,24 +5,47 @@
 | 對應規格 | `README.md` v1.0 |
 | 範圍 | 網頁後台（前端 SPA）+ API 後端 |
 | 目的 | 讓規格中的商業邏輯可以實際跑起來、被點擊、被驗收 |
-| 不含 | n8n 工作流、LINE OA 串接、Google Sheets／Supabase 實際連線 |
+| 不含 | n8n 工作流、LINE OA 串接、Google Sheets 連線 |
 
 ---
 
 ## 1. 怎麼跑
 
+資料庫是 Supabase（Postgres）。Schema 由 `supabase/migrations/` 擁有，程式**不再自己建表**，啟動時也**不再自動寫入示範資料**。
+
 ```bash
 npm install
+cp .env.example .env     # 填入 DATABASE_URL
 npm start
 # → http://localhost:3000
 ```
 
-首次啟動會自動建立 SQLite 資料庫並載入示範資料（0817 日本團）。
+```bash
+npm run reset   # 清空並重新載入示範資料（0817 日本團）
+npm run smoke   # 執行驗收條件的自動化檢查
+```
+
+### 本機測試方式（不要連正式 Supabase）
+
+本機用 `scripts/pg-harness.mjs`：它在記憶體裡跑一顆真的 Postgres（PGlite，WebAssembly 版），套用 `supabase/migrations/001`、`002`、`004`，再用 Postgres 連線協定對外服務，所以 `pg` 連它和連 Supabase 完全一樣。
 
 ```bash
-npm run reset   # 清空並重新載入示範資料
-npm run smoke   # 執行驗收條件的自動化檢查（54 項）
+# 終端機 A：啟動 harness，會印出一行 DATABASE_URL=…
+npm run test:db
+
+# 終端機 B：用那行位址跑伺服器或驗收檢查
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres DB_POOL_MAX=1 npm run reset
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres DB_POOL_MAX=1 npm run smoke
 ```
+
+`npm run smoke` 在沒有 `DATABASE_URL` 時會自己開一份 harness，所以直接跑也可以。
+
+兩件要注意的事：
+
+- **`DB_POOL_MAX=1`**。PGlite 一次只接受一條連線，連線數開大會卡住。正式環境用 Supabase 的 Transaction pooler（port 6543），預設 3。
+- **不要把正式 `DATABASE_URL` 指向測試**。migrations 已在正式專案執行過，重跑會出錯。
+
+正式環境的 schema 變更請**新增** `supabase/migrations/005_*.sql`，不要改動 `001`～`004`——那四支已在正式 Supabase 執行，改了會與線上不一致。資料庫層要整個重來時才執行 `000_rollback.sql`（會刪光所有資料表）。
 
 環境變數請複製 `.env.example` 為 `.env`。**未設定 `QR_SIGNING_KEY` 時，系統會產生臨時隨機金鑰並在啟動時警告**——重啟後先前印出的標籤即驗證失敗，這是刻意的行為（等同金鑰輪替），正式環境必須明確設定。
 
@@ -36,14 +59,14 @@ npm run smoke   # 執行驗收條件的自動化檢查（54 項）
 
 | 規格 | 功能 | 落地方式 |
 |---|---|---|
-| §2.3 | 訂單狀態機 | `server/lib/state.js`。只能依箭頭轉換，每次轉換寫入 `order_status_log`；往回修正需店主權限＋原因 |
-| §3.1 | 資料模型 | SQLite，表名／欄名與規格逐字相同，Phase 2 遷 Supabase 只需改型別 |
+| §2.3 | 訂單狀態機 | **規則在資料庫**：`order_status_rules` ＋ `trg_order_status_check` 擋下非法轉換（`ILLEGAL_TRANSITION`，回 409），`trg_order_status_log` 自動寫 `order_status_log`。`server/lib/state.js` 只負責帶入 `app.actor`／`app.reason`／`app.override` 並轉譯錯誤，程式繞不過去 |
+| §3.1 | 資料模型 | Supabase Postgres，schema 見 `supabase/migrations/001_init.sql`（＋ `004_japan_compat.sql` 相容層） |
 | F-03 | 訂單查詢 | 買家只查得到本人訂單（伺服器端過濾，非前端隱藏） |
 | F-04 | 訂單拆分 | 子單 `-A`/`-B`，金額不符整筆回滾 |
 | F-06 | 付款對帳 | 金額比對、多筆候選需人工指定、溢繳短繳不自動認列 |
 | F-07 | 拍照請款 | 先選商品 → 拍收據 → **人工確認金額** → 寫入；匯率快照、加權平均成本、毛利率 <20% 提醒 |
 | F-08 | 現場採購看板 | 認領為**條件更新**（僅 `claimed_by IS NULL` 時成功）；買足／部分／缺貨三種回報，後兩者即時通知店主 |
-| F-09 | 看圖理貨 | 待出貨訂單卡片顯示客人原始圖片 |
+| F-09 | 看圖理貨 | 已到貨待出貨訂單卡片顯示客人原始圖片 |
 | F-10 | 確認出貨與通知 | 未付款預設阻擋、需店主覆寫並記錄；產生通知文案 |
 | F-15 | QR 出貨標籤 | 50×30mm、QR 20mm、容錯 Q、靜區 4 模組，`@page` 直接列印 |
 | F-16 | HMAC 防偽簽章 | `UPPER(BASE36(HMAC-SHA256(key, order_id)[0..3]))[0..3]`，金鑰只在伺服器 |
@@ -65,7 +88,7 @@ npm run smoke   # 執行驗收條件的自動化檢查（54 項）
 | LINE 推播 | 出貨後把通知文案顯示在畫面上 | LINE Messaging API push（注意額度，見 F-02） |
 | 登入 | 身分切換 + HMAC 簽章的不透明 token | LIFF ID Token／後台 JWT，於 n8n 端驗證 |
 | 圖片儲存 | 收據存在本機 `data/uploads/`，商品圖為內嵌 SVG | Google Drive / Cloudinary（F-11 需先做直連驗證） |
-| 資料庫 | SQLite（`node:sqlite`） | Phase 1 Google Sheets／Phase 2 Supabase Postgres |
+| 資料庫 | 本機以 PGlite harness 代替 Supabase | Supabase Postgres（Transaction pooler, port 6543） |
 
 ### 未實作
 
@@ -81,9 +104,9 @@ npm run smoke   # 執行驗收條件的自動化檢查（54 項）
 server/
   index.js            HTTP 伺服器、靜態檔、API 分派、冪等、錯誤轉譯
   lib/config.js       環境變數（金鑰一律不落地）
-  lib/db.js           schema + 查詢輔助（表名同規格 §3.1）
-  lib/seed.js         示範資料
-  lib/state.js        §2.3 訂單狀態機
+  lib/db.js           Postgres 連線池、`?` → `$n`、交易（AsyncLocalStorage 釘住連線）
+  lib/seed.js         示範資料（只有 npm run reset 會寫入）
+  lib/state.js        訂單狀態機的程式側：帶入 actor/reason/override、轉譯資料庫錯誤
   lib/signature.js    F-16 HMAC 簽章產生與驗證
   lib/money.js        匯率快照、加權平均成本、毛利
   lib/auth.js         角色能力矩陣、欄位遮蔽
@@ -94,6 +117,8 @@ web/
   index.html app.js style.css
   views/              dashboard board expense packing labels scan orders logistics audit settings
 scripts/smoke.js      端對端驗收檢查
+scripts/pg-harness.mjs 本機測試用的假 Supabase（PGlite）
+supabase/migrations/  000 回滾／001 schema／002 種子／003 自我檢測／004 相容層
 ```
 
 ---
@@ -104,7 +129,7 @@ scripts/smoke.js      端對端驗收檢查
 npm run smoke
 ```
 
-依規格「驗收條件」逐項檢查，目前 54 項全數通過，包含：
+依規格「驗收條件」逐項檢查，目前 56 項全數通過（原 54 項 ＋ 2 項狀態機新檢查），包含：
 
 - 兩個請求同時認領同一項，只有一個成功（F-08）
 - 改匯率後既有紀錄的台幣成本不變（F-07 / F-23）
@@ -113,6 +138,8 @@ npm run smoke
 - 拆分前後金額一致（F-04）
 - 相同 `Idempotency-Key` 不重複認列（I-02 / F-06）
 - 毛利分母不含未登錄成本的品項（F-22）
+- 非法狀態轉換回 409，且資料庫中狀態沒有改變
+- 同一次狀態轉換，`order_status_log` 只留一筆（trigger 寫，程式不寫）
 
 ---
 
@@ -138,7 +165,7 @@ npm run smoke
 | 1 | 「後台理貨」指資料端或網頁介面 | 做成網頁介面（看圖理貨頁），歸屬待確認 |
 | 2 | 收據金額含稅或未稅 | 一律以輸入的數字為準，未做稅別區分 |
 | 3 | 現場採購單人或多人 | 假設多人，故實作認領機制 |
-| 4 | Supabase 帳號歸屬 | 雛型用 SQLite，未建立任何雲端帳號 |
+| 4 | Supabase 帳號歸屬 | 專案已由業主建立（Tokyo），連線字串由業主在 Vercel 設定 |
 | 5 | LINE Pay T+7 是否可接受 | 未實作 |
 | 6 | 驗收後修改次數上限 | 不影響實作 |
 | 7 | 驗收默示通過天數 | 不影響實作 |
@@ -151,5 +178,5 @@ npm run smoke
 | # | 事項 | 雛型暫時作法 |
 |---|---|---|
 | 11 | 「理貨」角色在 §3.1 `members.role` 沒有定義（只有 buyer/helper/owner），但 F-21 權限表有「理貨」 | 新增 `packer` 角色；若不需要，移除即可 |
-| 12 | 部分到貨的訂單何時可以出貨？規格未定義是否允許「先出已到貨部分」 | 目前不允許，必須先拆單或補齊 |
+| 12 | 部分到貨的訂單何時可以出貨？實際營運狀態沒有「部分到貨」 | 目前不允許：買不齊的訂單停在「已報價」，必須先拆單或補齊才會進「已到貨」 |
 | 13 | 同一商品多筆採購成本以加權平均計（F-07 例外 3），但規格未定義毛利用哪一筆匯率 | 以各筆自己的匯率快照加權，不用單一匯率回推 |
