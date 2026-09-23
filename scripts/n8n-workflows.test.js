@@ -5,7 +5,7 @@
  * 不是檢查 JSON 長得像不像，而是：
  *   - Code 節點的 JavaScript 真的執行（跟 n8n 一樣拿到 $json、$('節點名')）
  *   - 打後端的節點真的打到本機的後端程式＋ PGlite（跟 Supabase 同一套 migration）
- *   - LINE 與 Claude 換成假的伺服器，記下收到什麼、照劇本回應
+ *   - LINE 與 OpenRouter 換成假的伺服器，記下收到什麼、照劇本回應
  *
  * 所以流程裡任何一個欄位名對不上後端（data.notifications、cart_id、ok…），
  * 這裡就會失敗，而不是等到 Nick 匯入 n8n 才發現。
@@ -33,7 +33,7 @@ function check(name, cond, detail) {
 }
 const section = (t) => console.log(`\n${t}`);
 
-// ---- 假的外部服務：Supabase Storage、LINE、Claude ------------------------------
+// ---- 假的外部服務：Supabase Storage、LINE、OpenRouter ------------------------------
 
 const mock = { objects: new Map(), line: [], lineScript: [], claude: [], claudeScript: [] };
 function startMock() {
@@ -61,7 +61,7 @@ function startMock() {
           const next = mock.lineScript.shift() || { status: 200, body: { sentMessages: [{ id: '1' }] } };
           return send(next.status, next.body, next.headers);
         }
-        if (req.url === '/v1/messages') {
+        if (req.url === '/api/v1/chat/completions') {
           mock.claude.push({ headers: req.headers, body: JSON.parse(raw.toString()) });
           const next = mock.claudeScript.shift();
           return send(next.status, next.body);
@@ -73,9 +73,10 @@ function startMock() {
   });
 }
 
+// OpenRouter 的回應是 OpenAI 相容格式（choices[0].message.content）。
 const claudeSays = (obj) => ({ status: 200, body: {
-  id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-5', stop_reason: 'end_turn',
-  content: [{ type: 'text', text: JSON.stringify(obj) }],
+  id: 'gen-test', object: 'chat.completion', model: 'anthropic/claude-sonnet-5',
+  choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(obj) } }],
 } });
 
 // ---- 迷你 n8n：只做這兩條流程用得到的節點 ------------------------------------
@@ -83,7 +84,7 @@ const claudeSays = (obj) => ({ status: 200, body: {
 /** 每個節點選哪一把憑證 —— 跟 n8n/README.md 教 Nick 選的一致。 */
 function credentialHeaders(node) {
   if (node.name === 'LINE 推播') return { Authorization: 'Bearer test-line-token' };
-  if (node.name === 'Claude 辨識') return { 'x-api-key': 'test-anthropic-key' };
+  if (node.name === 'Claude 辨識') return { Authorization: 'Bearer test-openrouter-key' };
   return { 'X-Notify-Token': MACHINE };
 }
 
@@ -111,7 +112,7 @@ async function runCode(node, item) {
 }
 
 function rewrite(url) {
-  return url.replace('https://api.line.me', mock.base).replace('https://api.anthropic.com', mock.base);
+  return url.replace('https://api.line.me', mock.base).replace('https://openrouter.ai', mock.base);
 }
 
 async function runHttp(node, item) {
@@ -312,7 +313,7 @@ function startHarness() {
     const odd = await runCode(build, { json: { notif_id: 'n1', kind: 'arrived', line_user_id: 'U_x', payload: {} }, lineage });
     check('沒有文案的通知種類不會推空訊息', odd.messages.length === 0, odd);
 
-    section('拍照辨識：照片 → Claude → 回寫 → 後端查表定價');
+    section('拍照辨識：照片 → OpenRouter（Claude）→ 回寫 → 後端查表定價');
     const jpg = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg').toString('base64');
     const add = async (name) => (await api('POST', '/api/v1/cart/add-image',
       { token: buyer, body: { file_name: name, data: jpg } })).data;
@@ -322,24 +323,27 @@ function startHarness() {
     mock.claudeScript.push(claudeSays({ name: 'Pigeon 母乳實感奶瓶 240ml', name_ja: '母乳実感 哺乳びん 240ml', jpy_taxed: 1089, confidence: 'high' }));
     out = await run(ocrWf, '每分鐘');
     const call = mock.claude.shift();
-    check('Claude 收到 API key、版本、fallback beta 標頭',
-      call && call.headers['x-api-key'] === 'test-anthropic-key' && call.headers['anthropic-version'] === '2023-06-01'
-      && call.headers['anthropic-beta'] === 'server-side-fallback-2026-07-01', call && call.headers);
-    const img = call.body.messages[0].content.find((c) => c.type === 'image');
+    check('OpenRouter 收到 Bearer 憑證', call && call.headers.authorization === 'Bearer test-openrouter-key', call && call.headers);
+    const user = call.body.messages.find((m) => m.role === 'user');
+    const img = user && user.content.find((c) => c.type === 'image_url');
     check('圖片用後端給的短效簽名網址，不是永久連結',
-      img && img.source.type === 'url' && img.source.url.startsWith(mock.base + '/storage/v1/object/sign/'), img);
-    check('用 claude-opus-5、結構化輸出、fallbacks default',
-      call.body.model === 'claude-opus-5' && call.body.output_config.format.type === 'json_schema'
-      && call.body.fallbacks === 'default', call.body);
+      img && img.image_url.url.startsWith(mock.base + '/storage/v1/object/sign/'), img);
+    check('模型取自「設定」節點、結構化輸出、只派給支援參數的供應商',
+      call.body.model === 'anthropic/claude-sonnet-5' && call.body.response_format.type === 'json_schema'
+      && call.body.provider.require_parameters === true, call.body);
+    // 正式環境踩過的雷：Claude Sonnet 5 不接受自訂取樣參數，配上 require_parameters
+    // 會讓 OpenRouter 找不到任何供應商，整條辨識靜靜地全數失敗。
+    check('請求不帶 temperature／top_p／top_k',
+      !['temperature', 'top_p', 'top_k'].some((k) => k in call.body), Object.keys(call.body));
     const got = await cartItem(a.cart_id);
     check('回寫成功：品名、日文名、¥1089 → 後端查表 NT$400、辨識完成',
       got.name === 'Pigeon 母乳實感奶瓶 240ml' && got.name_ja === '母乳実感 哺乳びん 240ml'
       && got.price_twd === 400 && got.ocr_done === true, got);
 
     const b = await add('ocr_temp_n8ntest2_202609240900002.jpg');
-    mock.claudeScript.push({ status: 529, body: { type: 'error', error: { type: 'overloaded_error' } } });
+    mock.claudeScript.push({ status: 404, body: { error: { code: 404, message: 'No endpoints found that can handle the requested parameters.' } } });
     out = await run(ocrWf, '每分鐘');
-    check('Claude 暫時掛掉 → 不回寫，照片留在佇列等下一輪',
+    check('OpenRouter 回錯誤 → 不回寫，照片留在佇列等下一輪',
       out['解析結果'][0].write === false && !out['回寫辨識結果'] && (await cartItem(b.cart_id)).ocr_done === false, out['解析結果']);
 
     const c = await add('ocr_temp_n8ntest3_202609240900003.jpg');
@@ -352,12 +356,17 @@ function startHarness() {
     mock.claude.length = 0;
     mock.claudeScript.length = 0;
     out = await run(ocrWf, '每分鐘');
-    check('沒有待辨識的照片就不呼叫 Claude（不花錢）', mock.claude.length === 0 && !out['組請求'], mock.claude.length);
+    check('沒有待辨識的照片就不呼叫模型（不花錢）', mock.claude.length === 0 && !out['組請求'], mock.claude.length);
 
     const parse = ocrWf.nodes.find((n) => n.name === '解析結果');
-    const refused = await runCode(parse, { json: { statusCode: 200, body: { stop_reason: 'refusal', content: [] } },
-      lineage: { 組請求: { cart_id: 'x' } } });
-    check('Claude 拒絕 → 不回寫', refused.write === false, refused);
+    const refused = await runCode(parse, { json: { statusCode: 200,
+      body: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: null, refusal: '不處理' } }] } },
+    lineage: { 組請求: { cart_id: 'x' } } });
+    check('模型拒絕 → 不回寫', refused.write === false, refused);
+    const fenced = await runCode(parse, { json: { statusCode: 200, body: { choices: [{ finish_reason: 'stop',
+      message: { content: '```json\n{"name":"X","name_ja":null,"jpy_taxed":500,"confidence":"high"}\n```' } }] } },
+    lineage: { 組請求: { cart_id: 'x' } } });
+    check('回應包在 ```json 區塊裡也解析得出來', fenced.write === true && fenced.result.jpy_taxed === 500, fenced);
     const odd2 = claudeSays({ name: 'X', name_ja: null, jpy_taxed: -5, confidence: 'sure' });
     const weird = await runCode(parse, { json: { statusCode: 200, body: odd2.body }, lineage: { 組請求: { cart_id: 'x' } } });
     check('怪異的價格與信心度被收斂成 null / low', weird.result.jpy_taxed === null && weird.result.ai_confidence === 'low', weird);

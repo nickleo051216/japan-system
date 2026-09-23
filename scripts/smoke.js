@@ -66,6 +66,9 @@ const envFor = (databaseUrl) => ({
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   ADMIN_LOGIN_PASSWORD: 'smoke-admin-password-0123456789',
   LINE_LOGIN_CHANNEL_ID: '2011699944',
+  // 後台 LINE 登入。LINE 的驗證端點由 scripts/line-verify-mock.cjs 換成假資料。
+  ADMIN_LIFF_ID: '2011699944-smokeAdm',
+  NODE_OPTIONS: `--require ${path.join(ROOT, 'scripts', 'line-verify-mock.cjs')}`,
   SUPABASE_URL: STORAGE_MOCK_URL,
   SUPABASE_SERVICE_KEY: 'smoke-supabase-secret',
   // 綠界官方測試商店的參數不放進原始碼；這裡用假值，只驗「有沒有簽、簽出來的值
@@ -823,6 +826,55 @@ const login = async (id) =>
     check('重複新增被拒絕', (await MA({ line_user_id: NEW_ID, nickname: '新人2', role: 'helper' })).json.error?.code === 'MEMBER_EXISTS');
     const mAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
     check('角色異動都記在稽核軌跡', mAudit.includes('members.role') && mAudit.includes('members.add'));
+
+    section('後台 LINE 登入（白名單就是 members）');
+    const cfg = (await api('GET', '/api/v1/auth/config')).json.data;
+    check('登入頁拿得到 LIFF ID，兩扇門都開著（過渡期）',
+      cfg.line.liff_id === '2011699944-smokeAdm' && cfg.line.ready === true && cfg.password === true, cfg);
+    const LL = (id_token) => api('POST', '/api/v1/auth/line', { body: { id_token } });
+    const ownerLine = await LL('mock-idtoken:U_owner:周方');
+    check('店主用 LINE 登入拿到 token 與店主權限',
+      ownerLine.status === 200 && ownerLine.json.data.member.role === 'owner'
+      && ownerLine.json.data.capabilities.includes('settings.write'), ownerLine.json);
+    check('LINE 換來的 token 跟密碼登入的一樣能用',
+      (await api('GET', '/api/v1/auth/me', { token: ownerLine.json.data.token })).json.data.member.line_user_id === 'U_owner');
+    check('小幫手用 LINE 登入，拿到的是小幫手的權限',
+      (await LL('mock-idtoken:U_helper1')).json.data.capabilities.includes('settings.write') === false);
+    check('店主從後台新增的員工，可以直接用 LINE 登入',
+      (await LL(`mock-idtoken:${NEW_ID}`)).json.data?.member.role === 'helper');
+    const buyerLine = await LL('mock-idtoken:U_buyer1');
+    check('客人用 LINE 登入後台 → 403 NOT_STAFF',
+      buyerLine.status === 403 && buyerLine.json.error.code === 'NOT_STAFF', buyerLine.json);
+    check('擋下時附上他自己的 LINE userId，店主才知道要加誰',
+      /U_buyer1/.test(buyerLine.json.error.message), buyerLine.json.error.message);
+    const STRANGER = 'U' + 'b2'.repeat(16);
+    check('陌生的 LINE 帳號 → 403', (await LL(`mock-idtoken:${STRANGER}:路人`)).status === 403);
+    check('陌生人不會被順手建成會員（後台不自動建檔）',
+      (await api('GET', `/api/v1/members/admin-list?q=${STRANGER}`, { token: owner })).json.data.buyers.length === 0);
+    check('假造或過期的 ID Token → 401', (await LL('eyJhbGciOi.forged.token')).status === 401);
+    check('沒帶 id_token → 400', (await LL('')).status === 400);
+    const lAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
+    check('LINE 登入記在稽核軌跡', /"via":"line"|via.{0,6}line/.test(lAudit));
+
+    // 關掉共用密碼入口：另開一台不接資料庫的伺服器就夠了 —— 密碼入口在碰資料庫之前就擋掉。
+    const OFF_PORT = PORT + 7;
+    const off = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+      cwd: ROOT, stdio: ['ignore', 'ignore', 'ignore'],
+      env: { ...envFor('postgres://nobody@127.0.0.1:1/none'), PORT: String(OFF_PORT), ADMIN_PASSWORD_LOGIN: 'off' },
+    });
+    try {
+      const OFF = `http://127.0.0.1:${OFF_PORT}`;
+      let offCfg = null;
+      for (let i = 0; i < 100 && !offCfg; i++) {
+        try { offCfg = await (await fetch(OFF + '/api/v1/auth/config')).json(); } catch { await new Promise((r) => setTimeout(r, 100)); }
+      }
+      check('ADMIN_PASSWORD_LOGIN=off：登入頁不再顯示密碼入口', offCfg && offCfg.data.password === false, offCfg);
+      const offPersonas = await (await fetch(OFF + '/api/v1/auth/personas', { headers: { 'X-Admin-Password': ADMIN_PW } })).json();
+      check('密碼正確也拿不到人員名單（入口已關）', offPersonas.error?.code === 'PASSWORD_LOGIN_DISABLED', offPersonas);
+      const offLogin = await (await fetch(OFF + '/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line_user_id: 'U_owner', password: ADMIN_PW }) })).json();
+      check('密碼正確也換不到 token（入口已關）', offLogin.error?.code === 'PASSWORD_LOGIN_DISABLED', offLogin);
+    } finally { off.kill(); }
   } catch (e) {
     failed++;
     console.error('\n測試中止：', e);

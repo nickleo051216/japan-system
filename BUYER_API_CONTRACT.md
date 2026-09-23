@@ -122,7 +122,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 3. `GET /home/summary`
 ```json
-{ "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
+{ "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "bank_ready", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
             "ship_fee": { "cvs": 70, "home": 120 } },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
@@ -133,6 +133,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
 - `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
+- `bank_ready` = 銀行名稱、代碼、帳號三者都有值才是 `true`；`false` 時前台引導改用信用卡／ATM（見 §8 #5）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
 
 ### 5. `POST /cart/add-text`
@@ -144,13 +145,14 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 6. `POST /cart/add-image`
 請求 `{ file_name, orig_name, mime, data }`（data 為 base64 data URL）
-- `file_name` 必須符合 `^ocr_temp_[0-9a-f]{8}_\d{15}\.(jpg|png|webp|heic)$`（userId 末 8 碼＋15 碼時間戳），否則 `BAD_FILE_NAME`
-- 後端存 Drive、交給 n8n 辨識；**先回 pending、低信心、價格 null 的 CartItem**，辨識完成由 n8n 回寫
+- `file_name` 必須符合 `^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$`（userId 末 8 碼＋15 碼時間戳），否則 `BAD_FILE_NAME`
+- 圖片上限 3 MB（前台先壓縮；Vercel 單一請求 4.5 MB，base64 會膨脹約 1.33 倍）
+- 後端存 Supabase Storage 的**私有** bucket（照片可能含個資），交給 n8n 辨識；**先回 pending、低信心、價格 null 的 CartItem**，辨識完成由 n8n 回寫。`image_url` 是 15 分鐘有效的簽名網址
 - **辨識完成的通知方式：輪詢（已定案 2026-09-22，前端已實作）**
-  - 前台在收到回應後，若 `price_twd == null`，每 **4 秒**重打 `GET /cart/list`，最多 **15 次（約 1 分鐘）**
-  - 判定完成：`price_twd != null` 或 `ai_confidence != "low"`
+  - 前台在收到回應後，若 `ocr_done == false`，每 **4 秒**重打 `GET /cart/list`，最多 **40 次（約 2.5 分鐘）**（2026-09-24 由 15 次放寬：n8n 每分鐘領一次工作）
+  - 判定完成：`ocr_done == true`（後端已提供）。`ocr_done == true` 但 `price_twd == null` 代表 AI 認不出來或重試用完，請客人自行填寫
   - 頁面切到背景時暫停輪詢；品項被移除或已下單則停止；超過上限提示客人自行填寫，不再輪詢
-  - 後端不需要推播管線。若後端願意多回一個布林欄位 `ocr_done`，前台會優先採用（非必要）
+  - 後端不需要推播管線
 
 ### 7. `POST /cart/confirm`
 請求 `{ cart_ids: [] }` → 回 `{ confirmed: [] }`（只有 pending 的會被改）

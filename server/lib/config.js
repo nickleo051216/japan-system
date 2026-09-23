@@ -70,6 +70,12 @@ module.exports = {
   // LINE Login channel ID（買家 LIFF 的 ID Token 就是用它核發的）。
   // 沒設的話買家 API 一律 503 —— 同樣是 fail closed，不會退化成不驗身分。
   lineLoginChannelId: (process.env.LINE_LOGIN_CHANNEL_ID || '').trim(),
+  // 後台的 LINE 登入：同一個 LINE Login channel 底下另開一個 LIFF app，
+  // Endpoint URL 指向後台首頁。LIFF ID 不是機密（本來就會出現在網頁上）。
+  adminLiffId: (process.env.ADMIN_LIFF_ID || '').trim(),
+  // 共用密碼入口是 LINE 登入之前的過渡措施。LINE 登入確認可用後設成 off，
+  // 後台就只剩 LINE 一扇門。預設開著，免得部署當下兩扇門都打不開。
+  adminPasswordLogin: !/^(off|false|0|no)$/i.test((process.env.ADMIN_PASSWORD_LOGIN || '').trim()),
   // 通知佇列：n8n 取件時要帶的共用金鑰，以及後端排隊後戳 n8n 的網址。
   // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
   notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),

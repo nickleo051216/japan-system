@@ -1,26 +1,28 @@
 # n8n 流程
 
-後端只做兩件事：**排隊**和**記帳**。真正對外（推 LINE、叫 Claude 看照片）的是這裡的兩條 n8n 流程。
-後端不握 LINE 和 Anthropic 的金鑰，n8n 也不碰資料庫，兩邊只透過 `/api/v1/notify/*`、`/api/v1/ocr/*` 對話。
+後端只做兩件事：**排隊**和**記帳**。真正對外（推 LINE、叫 AI 看照片）的是這裡的兩條 n8n 流程。
+後端不握 LINE 和 AI 服務的金鑰，n8n 也不碰資料庫，兩邊只透過 `/api/v1/notify/*`、`/api/v1/ocr/*` 對話。
 
 | 檔案 | 做什麼 | 多久跑一次 |
 |---|---|---|
 | `notify-collector.json` | 領出貨／對帳單通知 → LINE OA 推播 → 回報結果 | 每分鐘；後端出貨時也會打 Webhook 叫醒 |
-| `ocr-worker.json` | 領待辨識的照片 → Claude 讀品名與含稅日幣價 → 回寫（售價由後端查表） | 每分鐘，一次最多 5 張 |
+| `ocr-worker.json` | 領待辨識的照片 → OpenRouter（`anthropic/claude-sonnet-5`）讀品名與含稅日幣價 → 回寫（售價由後端查表） | 每分鐘，一次最多 5 張 |
 
-兩條都用 `npm run test:n8n` 在本機逐節點跑過：真的後端＋真的資料庫，LINE 和 Claude 用假的伺服器代替。
+兩條都用 `npm run test:n8n` 在本機逐節點跑過：真的後端＋真的資料庫，LINE 和 OpenRouter 用假的伺服器代替。
+
+**目前狀態（2026-09-24）**：兩條都已在正式環境啟用，並用真的 LINE 與 OpenRouter 實測過。這兩個檔案是從線上的 n8n 匯出的，線上有改動請重新匯出同步回來。
 
 ---
 
 ## 匯入步驟
 
-### 1. 建三把憑證（Credentials → Add credential → **Header Auth**）
+### 1. 準備三把憑證
 
-| 憑證名稱（建議） | Name | Value | 給哪些節點 |
+| 憑證名稱 | 類型 | 內容 | 給哪些節點 |
 |---|---|---|---|
-| `HEEEHABABY 機器金鑰` | `X-Notify-Token` | Vercel 上 `NOTIFY_SHARED_SECRET` 的值 | 領取通知、回報結果、領取待辨識、回寫辨識結果 |
-| `LINE OA 推播` | `Authorization` | `Bearer ` ＋ LINE OA 的 Channel access token（long-lived） | LINE 推播 |
-| `Anthropic API` | `x-api-key` | Anthropic Console 建立的 API key | Claude 辨識 |
+| `HEEEHABABY 機器金鑰` | Header Auth | Name `X-Notify-Token`，Value 是 Vercel 上 `NOTIFY_SHARED_SECRET` 的值 | 領取通知、回報結果、領取待辨識、回寫辨識結果 |
+| `代購小幫手` | Line Messaging API（n8n 內建類型） | LINE OA 的 Channel access token | LINE 推播 |
+| `nickleo3` | OpenRouter（n8n 內建類型） | OpenRouter API key | Claude 辨識 |
 
 > 金鑰只放在 n8n 的憑證裡。不要貼進流程的欄位、不要貼進任何對話、不要 commit。
 
@@ -35,7 +37,9 @@ n8n → **Workflows → Import from File**，分別匯入兩個 `.json`。
 |---|---|---|---|
 | 兩條都有 | `api_base` | `https://japan-system-lilac.vercel.app` | 後端網址 |
 | 通知收集器 | `liff_url` | 空白 | 填了之後，對帳單通知會附上「查看明細與付款」連結 |
-| 拍照辨識 | `model` | `claude-opus-5` | 要換便宜的模型再改這裡 |
+| 拍照辨識 | `model` | `anthropic/claude-sonnet-5` | OpenRouter 的模型名稱。要換便宜的再改這裡（例如 `google/gemini-3.5-flash`） |
+
+> ⚠️ 辨識請求**不要加 `temperature`、`top_p`、`top_k`**。Claude Sonnet 5 不接受自訂取樣參數，加上請求裡的 `provider.require_parameters: true`，OpenRouter 會找不到任何供應商而回 404，每一張照片都會靜靜地辨識失敗（2026-09-24 正式環境實際發生過）。
 
 ### 4. 手動跑一次，再啟用
 
@@ -62,6 +66,6 @@ n8n → **Workflows → Import from File**，分別匯入兩個 `.json`。
 
 - **同一則通知永遠只推一次。** 每次重試都用同一把 `X-Line-Retry-Key`（由通知編號算出）。
   就算 n8n 在推完、還沒回報的那一刻掛掉，下一輪重推時 LINE 也會認出來、不再發。
-- **價格只有一個來源。** Claude 只讀日幣含稅價，台幣由後端查 `price_table` 換算。n8n 送台幣過去，後端也不採信。
+- **價格只有一個來源。** AI 只讀日幣含稅價，台幣由後端查 `price_table` 換算。n8n 送台幣過去，後端也不採信。
 - **客人贏過 AI。** 客人自己改過的品項，晚到的辨識結果不會蓋掉。
 - **Webhook 不驗簽。** 它只負責「叫醒流程去輪詢」，本身不帶任何資料。被亂打最多只是多輪詢一次。
