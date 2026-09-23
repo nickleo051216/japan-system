@@ -33,6 +33,7 @@ const config = require('../lib/config');
 const { get, post, ok } = require('../lib/http');
 const auth = require('../lib/auth');
 const audit = require('../lib/audit');
+const liff = require('../lib/liff');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 
@@ -82,6 +83,9 @@ function noteFailure(ip, where) {
  * 「誰都進得去」—— 前者看得見，後者看不見。
  */
 function requirePassword(given, req, where) {
+  if (!config.adminPasswordLogin) {
+    throw err('PASSWORD_LOGIN_DISABLED', '後台已改用 LINE 登入，共用密碼入口已關閉', 403);
+  }
   const secret = config.adminLoginPassword;
   if (!secret) {
     throw err('LOGIN_NOT_CONFIGURED',
@@ -123,6 +127,46 @@ post('/api/v1/auth/login', async ({ body, req }) => {
   const member = await db.one('SELECT * FROM members WHERE line_user_id = ?', body.line_user_id);
   if (!member) throw err('NO_SUCH_MEMBER', '查無此使用者', 404);
   await audit.record({ actor: member.line_user_id, action: 'auth.login', result: 'ok' });
+  return ok({
+    token: auth.issue(member.line_user_id),
+    member: { line_user_id: member.line_user_id, nickname: member.nickname, display_name: member.display_name, role: member.role },
+    capabilities: Object.keys(auth.CAPABILITIES).filter((c) => auth.can(member, c)),
+  });
+}, { idempotent: false });
+
+// ---- 後台 LINE 登入 --------------------------------------------------------
+//
+// 後台頁面用 LIFF（ADMIN_LIFF_ID）登入 LINE，把 ID Token 交過來換 session token。
+// 白名單就是 members：查得到、而且不是客人，才放行。
+//
+// 跟買家那條路最大的不同：**這裡不自動建檔。** 買家第一次進來會自動變成
+// buyer；後台若也這樣，任何 LINE 使用者點一下就多一筆會員，雖然進不來，
+// 名單卻被灌了。員工一律由店主在「成員與權限」加。
+//
+// ID Token 走 body，不走 Authorization —— 放在 header 會先被 app.js 當成
+// 買家憑證處理，順手替陌生人建出一筆 buyer。
+
+/** 登入頁要顯示哪幾扇門。不含任何機密：LIFF ID 本來就會出現在網頁上。 */
+get('/api/v1/auth/config', () => ok({
+  line: { liff_id: config.adminLiffId || null, ready: !!(config.adminLiffId && config.lineLoginChannelId) },
+  password: config.adminPasswordLogin,
+}));
+
+post('/api/v1/auth/line', async ({ body }) => {
+  if (!config.adminLiffId) {
+    throw err('LOGIN_NOT_CONFIGURED', '後台尚未設定 LINE 登入（ADMIN_LIFF_ID）', 503);
+  }
+  const idToken = String((body && body.id_token) || '').trim();
+  if (!idToken) throw err('BAD_REQUEST', '缺少 id_token');
+  const { sub } = await liff.verifyIdToken(idToken);
+  const member = await db.one('SELECT * FROM members WHERE line_user_id = ?', sub);
+  if (!member || member.role === 'buyer') {
+    console.warn(`[auth] 非員工嘗試以 LINE 登入後台：${sub}`);
+    // 附上他自己的 userId：店主要用它在「成員與權限」把人加進來。這不是機密。
+    throw err('NOT_STAFF', `這個 LINE 帳號沒有後台權限。請店主到「成員與權限」加入你（你的 LINE userId：${sub}）`, 403);
+  }
+  if (member.status === '停用') throw err('FORBIDDEN', '帳號已停用，請聯絡店主', 403);
+  await audit.record({ actor: member.line_user_id, action: 'auth.login', detail: { via: 'line' }, result: 'ok' });
   return ok({
     token: auth.issue(member.line_user_id),
     member: { line_user_id: member.line_user_id, nickname: member.nickname, display_name: member.display_name, role: member.role },

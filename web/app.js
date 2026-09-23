@@ -152,52 +152,140 @@ function renderTop(title, extra) {
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   session.token = null; session.member = null; session.caps = [];
+  // LINE 那邊也要登出，否則回到登入頁會被自動登回同一個帳號，永遠換不了人。
+  try { if (window.liff && window.liff.isLoggedIn && window.liff.isLoggedIn()) window.liff.logout(); } catch { /* 還沒初始化就不必登出 */ }
   location.hash = '';
   boot();
+}
+
+// ---- 登入 ------------------------------------------------------------------
+//
+// 正門是 LINE 登入：後台頁面本身就是一個 LIFF app（ADMIN_LIFF_ID），登入後把
+// ID Token 交給後端換 session token。白名單是 members，只有員工進得來。
+// 共用密碼是過渡期的側門，給系統管理者用；ADMIN_PASSWORD_LOGIN=off 之後就不再顯示。
+
+const LIFF_SDK = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
+
+function loadLiff() {
+  if (window.liff) return Promise.resolve(window.liff);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = LIFF_SDK;
+    s.onload = () => resolve(window.liff);
+    s.onerror = () => reject(new Error('LINE 登入元件載入失敗，請檢查網路後重新整理'));
+    document.head.append(s);
+  });
+}
+
+function signedIn(data) {
+  localStorage.setItem(TOKEN_KEY, data.token);
+  session.token = data.token;
+  // LINE 登入回來時網址會帶一串 code/state，換到 token 之後就沒用了，清掉。
+  if (location.search) history.replaceState(null, '', location.pathname + '#/dashboard');
+  else location.hash = '#/dashboard';
+  boot();
+}
+
+/**
+ * 走一次 LINE 登入。interactive=false 用在剛從 LINE 導回來、或本來就登入著 LINE 的時候：
+ * 能直接換到 token 就換，不行就回 null，讓登入頁顯示按鈕。
+ */
+async function lineLogin(liffId, interactive) {
+  const liff = await loadLiff();
+  await liff.init({ liffId });
+  if (!liff.isLoggedIn()) {
+    if (interactive) liff.login({ redirectUri: location.origin + '/' });
+    return null;
+  }
+  const idToken = liff.getIDToken();
+  if (!idToken) throw new Error('拿不到 LINE 身分。LIFF app 需要勾選 openid 權限，請聯絡系統管理者');
+  try {
+    signedIn(await POST('/api/v1/auth/line', { id_token: idToken }));
+    return true;
+  } catch (e) {
+    // 驗不過（多半是 ID Token 過期）或不是員工：都先登出 LINE，下一次才能換帳號或重新取得。
+    try { liff.logout(); } catch { /* ignore */ }
+    if (e.code === 'UNAUTHENTICATED') throw new Error('LINE 登入已過期，請再按一次「用 LINE 登入」');
+    throw e;
+  }
 }
 
 async function renderLogin(err = null) {
   document.getElementById('app').style.display = 'none';
   document.querySelectorAll('.login').forEach((n) => n.remove());
 
-  // 後台共用密碼。人員名單本身就是個資，所以要先過密碼才拿得到。
-  // 只放在記憶體，不寫 localStorage —— 重新整理就要再輸入一次。
-  const input = h('input', {
-    id: 'admin-password', type: 'password', class: 'input',
-    placeholder: '後台密碼', autocomplete: 'current-password',
-  });
+  let cfg = { line: { ready: false }, password: true };
+  try { cfg = await GET('/api/v1/auth/config'); } catch { /* 舊版後端沒有這支：只顯示密碼入口 */ }
 
-  const enter = async () => {
-    const pw = input.value;
-    if (!pw) return renderLogin('請輸入後台密碼');
-    let list;
-    try {
-      const res = await fetch('/api/v1/auth/personas', { headers: { 'X-Admin-Password': pw } });
-      const json = await res.json();
-      if (!json.ok) return renderLogin(json.error.message);
-      list = json.data;
-    } catch { return renderLogin('連不上伺服器，請稍後再試'); }
+  // 剛從 LINE 導回來（或本來就登入著 LINE）就直接完成登入，不必再按一次。
+  if (cfg.line.ready && !err) {
+    try { if (await lineLogin(cfg.line.liff_id, false)) return; } catch (e) { err = e.message; }
+  }
 
-    if (!list.length) return renderLogin('系統還沒有任何成員，請先建立第一位店主');
-    renderPersonas(pw, list);
+  const errLine = err ? h('p', { class: 'small', style: 'color:var(--bad,#a8241c); margin:0 0 8px; word-break:break-all' }, err) : null;
+  const lineButton = cfg.line.ready
+    ? h('button', {
+      class: 'btn primary', style: 'background:#06c755;border-color:#06c755',
+      onClick: async () => {
+        try { await lineLogin(cfg.line.liff_id, true); } catch (e) { renderLogin(e.message); }
+      },
+    }, '用 LINE 登入')
+    : null;
+
+  const passwordArea = h('div', { class: 'grid', style: 'gap:8px' });
+  const showPassword = () => {
+    passwordArea.innerHTML = '';
+    // 後台共用密碼。人員名單本身就是個資，所以要先過密碼才拿得到。
+    // 只放在記憶體，不寫 localStorage —— 重新整理就要再輸入一次。
+    const input = h('input', {
+      id: 'admin-password', type: 'password', class: 'input',
+      placeholder: '後台密碼', autocomplete: 'current-password',
+    });
+    const enter = async () => {
+      const pw = input.value;
+      if (!pw) return renderLogin('請輸入後台密碼');
+      let list;
+      try {
+        const res = await fetch('/api/v1/auth/personas', { headers: { 'X-Admin-Password': pw } });
+        const json = await res.json();
+        if (!json.ok) return renderLogin(json.error.message);
+        list = json.data;
+      } catch { return renderLogin('連不上伺服器，請稍後再試'); }
+      if (!list.length) return renderLogin('系統還沒有任何員工，請先建立第一位店主');
+      renderPersonas(pw, list);
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') enter(); });
+    passwordArea.append(input, h('button', { class: 'btn', onClick: enter }, '用密碼進入'));
+    input.focus();
   };
+
+  let body;
+  if (lineButton) {
+    body = [
+      h('p', { class: 'muted small', style: 'margin-top:0' },
+        '用你的 LINE 帳號登入。只有店主在「成員與權限」加入的員工進得來。'),
+      errLine, lineButton,
+      cfg.password ? h('button', { class: 'btn ghost sm', style: 'margin-top:12px', onClick: showPassword }, '系統管理者：用共用密碼登入') : null,
+      passwordArea,
+    ];
+  } else if (cfg.password) {
+    body = [
+      h('p', { class: 'muted small', style: 'margin-top:0' },
+        '後台以共用密碼保護，再選擇身分進入。LINE 登入設定完成（ADMIN_LIFF_ID）後，這裡會改成「用 LINE 登入」。'),
+      errLine, passwordArea,
+    ];
+  } else {
+    body = [errLine, h('p', { class: 'small', style: 'margin:0' },
+      '後台目前沒有可用的登入方式：LINE 登入尚未設定，共用密碼入口也已關閉。請系統管理者檢查 ADMIN_LIFF_ID。')];
+  }
 
   const box = h('div', { class: 'login' },
     h('div', { class: 'box' },
       h('div', { class: 'card' },
         h('div', { class: 'card-head' }, h('h2', {}, 'HEEEHABABY 代購營運後台')),
-        h('div', { class: 'card-body' },
-          h('p', { class: 'muted small', style: 'margin-top:0' },
-            '雛型以共用密碼保護後台入口，再以身分切換代替 LINE 登入。'
-            + '正式版此處為 LINE Login ID Token 驗證（I-02），白名單即 members 名單，角色一律由伺服器判定。'),
-          err ? h('p', { class: 'small', style: 'color:var(--bad,#a8241c); margin:0 0 8px' }, err) : null,
-          h('div', { class: 'grid', style: 'gap:8px' },
-            input,
-            h('button', { class: 'btn primary', onClick: enter }, '進入'))))));
-
-  box.addEventListener('keydown', (e) => { if (e.key === 'Enter') enter(); });
+        h('div', { class: 'card-body' }, h('div', { class: 'grid', style: 'gap:8px' }, ...body)))));
   document.body.append(box);
-  input.focus();
+  if (!lineButton && cfg.password) showPassword();
 }
 
 /** 密碼過關之後才列出人員，並把密碼一併帶去換 token。 */
@@ -213,11 +301,7 @@ function renderPersonas(pw, personas) {
               class: 'persona',
               onClick: async () => {
                 try {
-                  const data = await POST('/api/v1/auth/login', { line_user_id: p.line_user_id, password: pw });
-                  localStorage.setItem(TOKEN_KEY, data.token);
-                  session.token = data.token;
-                  location.hash = '#/dashboard';
-                  boot();
+                  signedIn(await POST('/api/v1/auth/login', { line_user_id: p.line_user_id, password: pw }));
                 } catch (e) { fail(e); }
               },
             },

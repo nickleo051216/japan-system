@@ -3,17 +3,17 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## HEEEHABABY 通知收集器\n後端只負責**排隊**，這條流程負責**取件、用 LINE OA 推播、回報結果**。\n\n- 每分鐘輪詢一次；後端出貨時也會打 Webhook 叫醒它（有設 NOTIFY_HOOK_URL 的話）\n- 失敗會照 1→5→15→60→360 分鐘退避重試，6 次都失敗會變成店主待辦\n- 同一則通知重試時用同一把 X-Line-Retry-Key，LINE 不會重複推播\n\n**要選的憑證（Header Auth）**\n1. 領取通知、回報結果 → `HEEEHABABY 機器金鑰`（X-Notify-Token）\n2. LINE 推播 → `LINE OA 推播`（Authorization: Bearer …）",
-        "width": 520,
-        "height": 300
+        "content": "## HEEEHABABY 通知收集器\n後端只負責**排隊**，這條流程負責**取件、用 LINE OA 推播、回報結果**。\n\n- 每分鐘輪詢一次；後端出貨時也會打 Webhook 叫醒它（有設 NOTIFY_HOOK_URL 的話）\n- 失敗會照 1→5→15→60→360 分鐘退避重試，6 次都失敗會變成店主待辦\n- 同一則通知重試時用同一把 X-Line-Retry-Key，LINE 不會重複推播\n\n**要選的憑證（Header Auth）**\n1. 領取通知、回報結果 → `HEEEHABABY 機器金鑰`（X-Notify-Token）\n2. LINE 推播 → 沿用 `代購小幫手`（Line Messaging API 憑證）",
+        "height": 300,
+        "width": 520
       },
       "id": "2d41c01f-4d57-54bd-aec5-ca5b39d94dea",
       "name": "說明",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -40,
-        -260
+        -48,
+        -256
       ]
     },
     {
@@ -33,14 +33,13 @@
       "typeVersion": 1.2,
       "position": [
         0,
-        120
+        128
       ]
     },
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "heeehababy-notify",
-        "responseMode": "onReceived",
         "options": {}
       },
       "id": "f143c613-c392-5549-8aff-cb3b28e17d34",
@@ -78,8 +77,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        220,
-        220
+        224,
+        224
       ]
     },
     {
@@ -100,9 +99,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        440,
-        220
-      ]
+        448,
+        224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "HEEEHABABY 機器金鑰"
+        }
+      }
     },
     {
       "parameters": {
@@ -114,8 +118,8 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        660,
-        220
+        672,
+        224
       ]
     },
     {
@@ -129,7 +133,7 @@
       "typeVersion": 2,
       "position": [
         880,
-        220
+        224
       ]
     },
     {
@@ -160,16 +164,16 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1100,
-        220
+        1104,
+        224
       ]
     },
     {
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/push",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "lineMessagingApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -183,13 +187,13 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ to: $json.to, messages: $json.messages }) }}",
         "options": {
-          "timeout": 15000,
           "response": {
             "response": {
               "fullResponse": true,
               "neverError": true
             }
-          }
+          },
+          "timeout": 15000
         }
       },
       "id": "48fce360-e899-5b47-b645-3cae0f04e552",
@@ -197,9 +201,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1320,
-        120
+        1328,
+        128
       ],
+      "credentials": {
+        "lineMessagingApi": {
+          "name": "代購小幫手"
+        }
+      },
       "onError": "continueRegularOutput"
     },
     {
@@ -212,8 +221,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1540,
-        120
+        1552,
+        128
       ]
     },
     {
@@ -226,8 +235,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1540,
-        340
+        1552,
+        352
       ]
     },
     {
@@ -249,8 +258,13 @@
       "typeVersion": 4.2,
       "position": [
         1760,
-        220
+        224
       ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "HEEEHABABY 機器金鑰"
+        }
+      },
       "onError": "continueRegularOutput"
     }
   ],

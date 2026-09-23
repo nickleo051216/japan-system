@@ -79,6 +79,7 @@ async function handleApi(req, res) {
     // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
+      || pathname === '/api/v1/auth/line' || pathname === '/api/v1/auth/config'
       || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/')
       || pathname === '/api/v1/ocr/result' || pathname === '/api/v1/ocr/pending'
       || pathname === '/api/v1/statements/generate';
