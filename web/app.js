@@ -127,7 +127,7 @@ function renderNav(active) {
   for (const r of ROUTES) {
     if (!session.can(r.cap)) continue;
     if (r.group && r.group !== group) { group = r.group; nav.append(h('div', { class: 'nav-group' }, group)); }
-    nav.append(h('a', { class: 'navlink' + (r.path === active ? ' active' : ''), href: `#/${r.path}` },
+    nav.append(h('a', { class: 'navlink' + (r.path === active ? ' active' : ''), href: `#/${r.path}`, onClick: () => closeNav() },
       h('span', { class: 'ico' }, r.icon), r.title));
   }
   nav.append(h('div', { class: 'sidebar-foot' },
@@ -137,10 +137,16 @@ function renderNav(active) {
 
 export const roleLabel = (r) => ({ owner: '店主', helper: '小幫手', packer: '理貨', buyer: '買家' }[r] || r);
 
+// 手機版的側邊選單是抽屜：☰ 打開，點遮罩或選了頁面就關。
+export const closeNav = () => document.body.classList.remove('nav-open');
+const toggleNav = () => document.body.classList.toggle('nav-open');
+
 function renderTop(title, extra) {
   const bar = document.getElementById('topbar');
   bar.innerHTML = '';
-  bar.append(h('h1', {}, title), h('div', { class: 'spacer' }));
+  bar.append(
+    h('button', { class: 'menu-btn', type: 'button', 'aria-label': '打開選單', onClick: toggleNav }, '☰'),
+    h('h1', {}, title), h('div', { class: 'spacer' }));
   if (extra) bar.append(extra);
   if (session.member) {
     bar.append(h('div', { class: 'who' },
@@ -341,19 +347,28 @@ async function route() {
     const first = ROUTES.find((x) => session.can(x.cap));
     if (first && first.path !== path) { location.hash = `#/${first.path}`; return; }
   }
+  closeNav();
   renderNav(r.path);
   renderTop(r.title);
   const view = document.getElementById('view');
-  view.innerHTML = '<div class="empty">載入中…</div>';
+  // 轉圈圈一直顯示到這一頁的資料都拿到為止。頁面先畫在隱藏的容器裡，畫完才換上 ——
+  // 不然會先清空、再等 API，中間是一段白畫面，看起來像當掉。
+  const seq = ++routeSeq;
+  const spinner = h('div', { class: 'loading', role: 'status' }, h('span', { class: 'spinner' }), '載入中…');
+  const holder = h('div', { hidden: true });
+  view.replaceChildren(spinner, holder);
   try {
     const mod = await r.mod();
-    view.innerHTML = '';
-    await mod.render(view, { query, setTopbar: (node) => renderTop(r.title, node), reload: route });
+    await mod.render(holder, { query, setTopbar: (node) => renderTop(r.title, node), reload: route });
+    if (seq !== routeSeq) return; // 載入途中又換了頁：這一頁作廢，不要蓋掉新的
+    spinner.remove();
+    holder.hidden = false;
   } catch (e) {
-    view.innerHTML = '';
-    view.append(h('div', { class: 'card' }, h('div', { class: 'empty' }, e.message || '載入失敗')));
+    if (seq !== routeSeq) return;
+    view.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'empty' }, e.message || '載入失敗')));
   }
 }
+let routeSeq = 0;
 
 window.addEventListener('hashchange', route);
 boot();

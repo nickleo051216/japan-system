@@ -846,6 +846,43 @@ const login = async (id) =>
     const loginMe = (await api('POST', '/api/v1/auth/line', { body: { id_token: 'mock-idtoken:U_helper2' } })).json.data;
     check('登入回應的 member 帶會員編號', loginMe.member.member_no === 'HB-00003', loginMe.member);
 
+    check('成員搜尋也找得到員工（用會員編號找自己 HB-00001）',
+      (await api('GET', '/api/v1/members/admin-list?q=HB-00001', { token: owner })).json.data.staff.map((m) => m.nickname).join() === '周方');
+
+    section('代客下單（後台替客人建單）');
+    const LK = (token, q) => api('GET', '/api/v1/members/lookup?q=' + encodeURIComponent(q), { token });
+    const lk = await LK(helper, 'HB-00005');
+    check('小幫手用會員編號找得到客人，而且不回 LINE userId',
+      lk.status === 200 && lk.json.data.length === 1 && lk.json.data[0].member_no === 'HB-00005' && lk.json.data[0].display_name === 'Wendy L.' && !('line_user_id' in lk.json.data[0]), lk.json);
+    check('用稱呼也找得到', (await LK(helper, 'Kiki')).json.data.some((m) => m.member_no === 'HB-00007'));
+    check('理貨不能代客下單（找人就擋）', (await LK(packer, 'HB-00005')).status === 403);
+    const OC = (token, body) => api('POST', '/api/v1/orders/create', { token, body });
+    const made = await OC(helper, { member_no: 'hb-00005', pickup_type: 'cvs', note: 'LINE 私訊',
+      items: [{ name: 'Pigeon 奶瓶', jpy_taxed: 1089, qty: 2 }, { name: '限定托特包', price_twd: 500 }, { name: '還沒問價的東西' }] });
+    const mo = made.json.data;
+    check('代客下單成立：品項照價目表換算（¥1089 → 400）、手填台幣照用、沒價錢的先記 0',
+      made.status === 200 && mo.total_twd === 400 * 2 + 500 + mo.ship_fee_twd && mo.unpriced === 1 && mo.items === 3, made.json);
+    const od = (await api('GET', `/api/v1/orders/detail?order_id=${mo.order_id}`, { token: owner })).json.data;
+    check('訂單掛在那位客人名下、從「待確認」開始、備註標明代客下單',
+      od.status === '待確認' && od.line_user_id === 'U_buyer1' && /代客下單/.test(od.note || '') && od.items.length === 3, od);
+    check('客人在前台看得到這張單',
+      (await api('GET', '/api/v1/orders/list', { token: buyer })).json.data.some((o) => o.order_id === mo.order_id));
+    check('還有沒價錢的品項 → 不能直接報價（狀態機擋下）',
+      (await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: mo.order_id, to: '已報價' } })).json.error?.code === 'UNPRICED_ITEMS');
+    check('找不到的會員編號 → 404', (await OC(helper, { member_no: 'HB-99999', items: [{ name: 'x' }] })).status === 404);
+    check('沒有品項 → 400', (await OC(helper, { member_no: 'HB-00005', items: [] })).json.error?.code === 'NO_ITEMS');
+    check('理貨不能代客下單', (await OC(packer, { member_no: 'HB-00005', items: [{ name: 'x' }] })).status === 403);
+
+    section('稽核軌跡給人看（名字而不是編號）');
+    const al = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data;
+    const createLog = al.find((l) => l.action === 'order.create' && l.target === mo.order_id);
+    check('代客下單記在稽核軌跡，經手人顯示「稱呼（會員編號）」、客人也是',
+      createLog && createLog.actor_label === '小美（HB-00002）' && /（HB-00005）$/.test(createLog.subject_label), createLog);
+    const procLog = al.find((l) => l.action.startsWith('procurement.') && l.target_label);
+    check('採購紀錄的對象換成品名，不是內部編號', procLog && !/^prc_/.test(procLog.target_label), procLog);
+    check('每一筆都有經手人名稱', al.every((l) => l.actor_label && !/^U[_0-9a-f]/.test(l.actor_label)),
+      al.filter((l) => !l.actor_label || /^U[_0-9a-f]/.test(l.actor_label)).slice(0, 3));
+
     section('後台 LINE 登入（白名單就是 members）');
     const cfg = (await api('GET', '/api/v1/auth/config')).json.data;
     check('登入頁拿得到 LIFF ID，兩扇門都開著（過渡期）',

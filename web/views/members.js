@@ -57,17 +57,21 @@ export async function render(root, ctx) {
       h('td', {}, roleSelect(m))))
       : [h('tr', {}, h('td', { colspan: '5', class: 'empty' }, empty))]))));
 
-  root.append(h('div', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h2', {}, `員工（${data.staff.length}）`)),
-    table(data.staff, '還沒有員工')));
-
-  // ---- 從客人名單升級 ----
-  const search = h('input', { type: 'text', value: q, placeholder: '稱呼、LINE 名稱或會員編號', style: 'width:260px' });
+  // ---- 搜尋：員工與客人一起找（用會員編號找自己也要找得到）----
+  const search = h('input', { id: 'member-search', type: 'search', value: q, placeholder: '稱呼、LINE 名稱或會員編號（例：HB-00001）', style: 'width:320px' });
   const go = () => { location.hash = '#/members' + (search.value.trim() ? '?q=' + encodeURIComponent(search.value.trim()) : ''); };
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
   root.append(h('div', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h2', {}, q ? `客人：「${q}」的搜尋結果` : '最近加入的客人'), h('div', { class: 'spacer' }),
-      search, h('button', { class: 'btn sm', onClick: go }, '搜尋')),
+    h('div', { class: 'card-head' }, h('h2', {}, '找人'), h('div', { class: 'spacer' }),
+      search, h('button', { class: 'btn sm primary', onClick: go }, '搜尋'),
+      q ? h('button', { class: 'btn sm', onClick: () => { location.hash = '#/members'; } }, '清除') : null)));
+
+  root.append(h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, q ? `員工：「${q}」的搜尋結果（${data.staff.length}）` : `員工（${data.staff.length}）`)),
+    table(data.staff, q ? '沒有符合的員工' : '還沒有員工')));
+
+  root.append(h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, q ? `客人：「${q}」的搜尋結果（${data.buyers.length}）` : '最近加入的客人')),
     h('div', { class: 'card-body' }, h('div', { class: 'banner info' },
       '新員工：請他先用自己的 LINE 打開一次買家頁面，系統就會自動建檔、給他一個會員編號（例如 HB-00012）。'
       + '請他把會員編號告訴你，在這裡搜尋後把角色改成小幫手或理貨即可。')),

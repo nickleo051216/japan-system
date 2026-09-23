@@ -1,4 +1,5 @@
 import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '/app.js';
+import { openCreateOrder } from '/views/order-create.js';
 
 const STATUSES = ['待確認', '已報價', '已到貨', '已出貨', '已送達', '缺貨', '已取消'];
 
@@ -12,7 +13,10 @@ export async function render(root, ctx) {
       h('option', { value: '' }, '全部狀態'),
       ...STATUSES.map((s) => h('option', { value: s, selected: s === state.status }, s))),
     h('input', { type: 'search', placeholder: '訂單編號 / 暱稱', style: 'width:200px', onInput: (e) => { state.q = e.target.value; clearTimeout(state.t); state.t = setTimeout(load, 250); } }),
-    session.can('payment.reconcile') ? h('button', { class: 'btn', onClick: reconcileDialog }, '付款對帳') : null);
+    session.can('payment.reconcile') ? h('button', { class: 'btn', onClick: reconcileDialog }, '付款對帳') : null,
+    session.can('order.write') ? h('button', {
+      class: 'btn primary', onClick: () => openCreateOrder(() => load()).catch(fail),
+    }, '＋ 代客下單') : null);
 
   const tbody = h('tbody', {});
   const card = h('div', { class: 'card' }, filters,
