@@ -78,7 +78,8 @@ async function handleApi(req, res) {
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
       || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/')
-      || pathname === '/api/v1/ocr/result' || pathname === '/api/v1/statements/generate';
+      || pathname === '/api/v1/ocr/result' || pathname === '/api/v1/ocr/pending'
+      || pathname === '/api/v1/statements/generate';
 
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
     let actor = null;

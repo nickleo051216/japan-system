@@ -41,6 +41,14 @@ const REQUIRED_TABLES = [
   'notifications', 'idempotency', 'notification_outbox',
 ];
 
+/**
+ * 後來的 migration 加在既有表上的欄位。表都在不代表這些都跑過了 ——
+ * 少了它們，對應的功能會在執行時才炸，所以一樣要列出來。
+ */
+const REQUIRED_COLUMNS = [
+  { table: 'cart_items', column: 'ocr_attempts', migration: '006_ocr_pipeline.sql', feature: '拍照辨識領不到工作' },
+];
+
 /** 值得數一數的表。數量本身就是診斷：規則表空了，每一次狀態轉換都會失敗。 */
 const COUNTED_TABLES = [
   'members', 'orders', 'order_items', 'price_table',
@@ -63,6 +71,12 @@ const ENV_CHECKS = [
   { key: 'LINE_LOGIN_CHANNEL_ID', required: true,
     isSet: () => !!config.lineLoginChannelId,
     note: '沒設的話買家前台一律 503 —— LIFF 的 ID Token 無從驗證，不會退化成不驗身分。' },
+  { key: 'SUPABASE_URL', required: true,
+    isSet: () => !!config.supabaseUrl,
+    note: '客人照片的存放處。沒設的話照片只存在 Vercel 暫存區，冷啟動就消失，n8n 也拿不到。' },
+  { key: 'SUPABASE_SERVICE_KEY', required: true,
+    isSet: () => !!config.supabaseServiceKey,
+    note: '上傳照片與簽發短效網址用。只在伺服器端，絕不可放進前端。' },
   { key: 'NOTIFY_SHARED_SECRET', required: true,
     isSet: () => !!config.notifyToken,
     note: '沒設 /api/v1/notify/* 一律回 503，出貨推播會靜靜地不送出。' },
@@ -108,12 +122,18 @@ async function readSchema() {
     "SELECT table_name FROM information_schema.tables " +
     "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'");
   const present = new Set(rows.map((r) => r.table_name));
+  const cols = await db.all(
+    "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'");
+  const haveCol = new Set(cols.map((c) => `${c.table_name}.${c.column_name}`));
   return {
     present,
     report: {
       expected: REQUIRED_TABLES.length,
       present: REQUIRED_TABLES.filter((t) => present.has(t)).length,
       missing: REQUIRED_TABLES.filter((t) => !present.has(t)),
+      missing_migrations: REQUIRED_COLUMNS
+        .filter((c) => present.has(c.table) && !haveCol.has(`${c.table}.${c.column}`))
+        .map((c) => ({ migration: c.migration, feature: c.feature })),
     },
   };
 }
@@ -183,6 +203,9 @@ function blockers({ probe, envs, schema, counts, shopGaps }) {
   for (const e of envs) if (e.required && !e.set) out.push(`${e.key} 未設定 —— ${e.note}`);
   if (schema && schema.missing.length) {
     out.push(`資料表少了 ${schema.missing.length} 張：${schema.missing.join('、')}。到 Supabase SQL Editor 依序跑 supabase/migrations/。`);
+  }
+  for (const m of (schema && schema.missing_migrations) || []) {
+    out.push(`資料庫還沒跑 ${m.migration}：${m.feature}。到 Supabase SQL Editor 執行 supabase/migrations/${m.migration}。`);
   }
   if (counts && counts.order_status_rules === 0) {
     out.push('order_status_rules 是空的：狀態機沒有規則，任何訂單狀態轉換都會被擋下。');

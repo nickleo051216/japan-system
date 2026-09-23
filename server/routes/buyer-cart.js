@@ -6,19 +6,24 @@
  * 不能賣掉二十一個。所以扣量完全交給資料庫的 shout()（列鎖＋原子扣量），
  * 程式端只負責把結果包成合約的形狀。任何「先讀 remaining 再減」的寫法都是錯的。
  */
-const fs = require('node:fs');
-const path = require('node:path');
 const db = require('../lib/db');
-const config = require('../lib/config');
 const price = require('../lib/price');
-const { ok } = require('../lib/http');
+const storage = require('../lib/storage');
+const { ok, post } = require('../lib/http');
+const notify = require('../lib/notify');
 const { now, uid } = require('../lib/ids');
 const { cartShape, bget, bpost, err, num } = require('./buyer');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
 const IMAGE_NAME = /^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$/i;
 const DATA_URL = /^data:(image\/[a-z+]+);base64,(.+)$/i;
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+// Vercel 單一請求本體上限 4.5 MB，base64 又會膨脹約 1.33 倍。
+// 超過這個大小的圖在到達這裡之前就會被 Vercel 擋掉 —— 前台要先壓縮再傳。
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+
+/** 把一批購物車品項的圖片參照換成可顯示的短效網址。 */
+const shapeAll = async (rows) => storage.resolve(rows.map(cartShape), 'image_url');
+const shapeOne = async (row) => (await shapeAll([row]))[0];
 
 const qtyOf = (v, fallback = 1) => {
   if (v === undefined || v === null || v === '') return fallback;
@@ -38,10 +43,10 @@ async function mine(cartId, user) {
 
 // ---- 4 購物車列表 ----------------------------------------------------------
 
-bget('/api/v1/cart/list', async ({ me }) => ok(
-  (await db.all(
+bget('/api/v1/cart/list', async ({ me }) => ok(await shapeAll(
+  await db.all(
     `SELECT * FROM cart_items WHERE line_user_id = ? AND status IN ('pending','confirmed')
-      ORDER BY created_at, cart_id`, me.line_user_id)).map(cartShape)));
+      ORDER BY created_at, cart_id`, me.line_user_id))));
 
 // ---- 5 文字下單 ------------------------------------------------------------
 
@@ -81,13 +86,13 @@ bpost('/api/v1/cart/add-image', async ({ me, body }) => {
     const buf = Buffer.from(m[2], 'base64');
     if (buf.length > MAX_IMAGE_BYTES) throw err('BAD_IMAGE', '圖片太大，請重新拍一張');
     try {
-      fs.mkdirSync(config.uploadDir, { recursive: true });
-      // 檔名已通過上面的白名單比對，不含路徑分隔字元；再 basename 一次求穩。
-      fs.writeFileSync(path.join(config.uploadDir, path.basename(fileName)), buf);
-      imageUrl = `/uploads/${path.basename(fileName)}`;
+      // 依客人分資料夾。檔名已通過上面的白名單比對，不含路徑分隔字元。
+      imageUrl = await storage.put(`cart/${me.line_user_id}/${fileName}`, buf, m[1]);
     } catch (e) {
-      // 存不下來不該讓客人重拍 —— 品項照樣建立，圖之後補。
-      console.error('[buyer] 圖片寫入失敗：', e.message);
+      // 圖存不下來就不建品項 —— 沒有圖的拍照品項永遠辨識不了，只會卡在「辨識中」。
+      // 回 5xx 讓前台自動重試；重試帶同一把 Idempotency-Key，不會多出一筆。
+      console.error('[buyer] 圖片上傳失敗：', e.message);
+      throw Object.assign(new Error('照片上傳失敗，請再試一次'), { code: 'UPLOAD_FAILED', status: 503 });
     }
   }
   const cartId = uid('C');
@@ -97,7 +102,7 @@ bpost('/api/v1/cart/add-image', async ({ me, body }) => {
      VALUES (?,?,'image',?,?,NULL,NULL,?,'low','pending',?,?,?,?)`,
     cartId, me.line_user_id, fileName, String(body.orig_name || '辨識中的品項'),
     qtyOf(body.qty), fileName, imageUrl, 'AI 辨識中，完成後自動更新', now());
-  return ok(cartShape(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)));
+  return ok(await shapeOne(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)));
 });
 
 // ---- 7 確認品項 ------------------------------------------------------------
@@ -336,6 +341,33 @@ bpost('/api/v1/wishes/remove', async ({ me, body }) => {
   return ok({ wish_id: w.wish_id, removed: true });
 });
 
+// ---- n8n 領取待辨識的圖 ----------------------------------------------------
+//
+// 跟出貨通知佇列同一套模式：一句 UPDATE … FOR UPDATE SKIP LOCKED 同時挑出與蓋章，
+// 兩個 n8n 執行不會領到同一張；租約 10 分鐘，逾時沒回寫就回到佇列；
+// 同一張圖最多試 5 次，壞圖不會被無限重試。沒有圖的拍照品項不發出去 ——
+// 那種品項辨識不了，前台輪詢一分鐘後會請客人自己填。
+const OCR_LEASE_MINUTES = 10;
+const OCR_MAX_ATTEMPTS = 5;
+
+post('/api/v1/ocr/pending', async ({ body, req }) => {
+  notify.requireMachine(req);
+  const n = Math.min(Math.max(parseInt(body && body.limit, 10) || 10, 1), 50);
+  const res = await db.run(
+    `UPDATE cart_items SET ocr_claimed_at = now(), ocr_attempts = ocr_attempts + 1
+      WHERE cart_id IN (
+        SELECT cart_id FROM cart_items
+         WHERE source = 'image' AND ai_confidence = 'low' AND price_twd IS NULL
+           AND status = 'pending' AND image_url IS NOT NULL AND ocr_attempts < ?
+           AND (ocr_claimed_at IS NULL OR ocr_claimed_at < now() - (? || ' minutes')::interval)
+         ORDER BY created_at LIMIT ? FOR UPDATE SKIP LOCKED)
+      RETURNING cart_id, line_user_id, file_name, image_url, name, created_at, ocr_attempts`,
+    OCR_MAX_ATTEMPTS, String(OCR_LEASE_MINUTES), n);
+  // 給 n8n 的是 15 分鐘就失效的簽名網址，不是永久連結。
+  const jobs = await storage.resolve(res.rows.map((r) => ({ ...r })), 'image_url');
+  return ok({ jobs, count: jobs.length, lease_minutes: OCR_LEASE_MINUTES });
+}, { idempotent: false });
+
 // ---- n8n 回寫辨識結果 ------------------------------------------------------
 //
 // 前台輪詢等的就是這一支。沒有它，拍照下單的品項會永遠停在「辨識中」——
@@ -344,9 +376,6 @@ bpost('/api/v1/wishes/remove', async ({ me, body }) => {
 // 這是機器對機器的介面，身分驗 X-Notify-Token（跟通知佇列同一把），不走會員
 // token —— n8n 不是會員。刻意不是冪等路由：同一張圖辨識兩次應該以最後一次為準，
 // 而不是回放第一次的答案。
-const notify = require('../lib/notify');
-const { post } = require('../lib/http');
-
 post('/api/v1/ocr/result', async ({ body, req }) => {
   notify.requireMachine(req);
   const cartId = String(body.cart_id ?? '');
@@ -375,5 +404,5 @@ post('/api/v1/ocr/result', async ({ body, req }) => {
     name, body.name_ja || row.name_ja, jpy, await price.twdOf(jpy), confidence,
     jpy === null ? '無法辨識金額，請自行填寫' : null, cartId);
   return ok({ cart_id: cartId, applied: true,
-    cart_item: cartShape(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)) });
+    cart_item: await shapeOne(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)) });
 }, { idempotent: false });

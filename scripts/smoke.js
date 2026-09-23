@@ -17,6 +17,45 @@ const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.join(__dirname, '..');
 
+/**
+ * 假的 Supabase Storage：照 Supabase 的 REST 介面回應（上傳、批次簽名網址），
+ * 讓驗收真的走過 lib/storage.js 的程式路徑。路徑含 failfail 的上傳會回 500，
+ * 用來驗「照片存不下來時不建品項」。
+ */
+const http = require('node:http');
+const storageMock = { objects: new Map(), requests: [] };
+function startStorageMock() {
+  return new Promise((resolve) => {
+    const srv = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        storageMock.requests.push({ method: req.method, url: req.url, apikey: req.headers.apikey, auth: req.headers.authorization });
+        const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        const sign = /^\/storage\/v1\/object\/sign\/cart-images$/.exec(req.url);
+        const up = /^\/storage\/v1\/object\/cart-images\/(.+)$/.exec(req.url);
+        if (req.method === 'POST' && sign) {
+          const { expiresIn, paths } = JSON.parse(body.toString() || '{}');
+          storageMock.lastExpiresIn = expiresIn;
+          return send(200, paths.map((p) => storageMock.objects.has(p)
+            ? { path: p, signedURL: `/object/sign/cart-images/${p}?token=t${expiresIn}`, error: null }
+            : { path: p, signedURL: null, error: 'Object not found' }));
+        }
+        if (req.method === 'POST' && up) {
+          const key = decodeURIComponent(up[1]);
+          if (key.includes('failfail')) return send(500, { error: 'boom' });
+          storageMock.objects.set(key, body);
+          return send(200, { Key: `cart-images/${key}` });
+        }
+        send(404, { error: 'not found' });
+      });
+    });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+}
+let STORAGE_MOCK_URL = '';
+
 /** PGlite serves one connection at a time, hence DB_POOL_MAX=1. */
 const envFor = (databaseUrl) => ({
   ...process.env,
@@ -27,6 +66,8 @@ const envFor = (databaseUrl) => ({
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   ADMIN_LOGIN_PASSWORD: 'smoke-admin-password-0123456789',
   LINE_LOGIN_CHANNEL_ID: '2011699944',
+  SUPABASE_URL: STORAGE_MOCK_URL,
+  SUPABASE_SERVICE_KEY: 'smoke-supabase-secret',
   // 綠界官方測試商店的參數不放進原始碼；這裡用假值，只驗「有沒有簽、簽出來的值
   // 有沒有外洩」，不驗綠界端是否接受 —— 那要真的打到綠界才算數。
   ECPAY_MERCHANT_ID: '3002607',
@@ -74,6 +115,8 @@ const login = async (id) =>
   (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id, password: ADMIN_PW } })).json.data.token;
 
 (async () => {
+  const storageSrv = await startStorageMock();
+  STORAGE_MOCK_URL = `http://127.0.0.1:${storageSrv.address().port}`;
   let harness = null;
   let databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
@@ -592,6 +635,51 @@ const login = async (id) =>
     check('底下的訂單一起變成已付款',
       (await B('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`)).json.data.paid === true);
 
+    section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
+    const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
+    const shot = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_abcd1234_202609231100001.jpg', data: jpgUrl } })).json.data;
+    check('照片存進 Storage 的私有空間，依客人分資料夾',
+      storageMock.objects.has('cart/U_buyer1/ocr_temp_abcd1234_202609231100001.jpg'), [...storageMock.objects.keys()]);
+    check('上傳時帶的是伺服器端的 service key',
+      storageMock.requests.some((r) => r.url.includes('/object/cart-images/') && r.apikey === 'smoke-supabase-secret'));
+    check('客人拿到的是短效簽名網址（15 分鐘），不是永久連結',
+      typeof shot.image_url === 'string' && shot.image_url.startsWith(STORAGE_MOCK_URL + '/storage/v1/object/sign/')
+      && storageMock.lastExpiresIn === 900, shot.image_url);
+    check('回應裡不含 service key', !JSON.stringify(shot).includes('smoke-supabase-secret'));
+
+    const before = (await B('GET', '/api/v1/cart/list')).json.data.length;
+    const upFail = await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_failfail_202609231100002.jpg', data: jpgUrl } });
+    check('Storage 掛了 → 503 讓前台重試，而且不會多出一筆卡住的品項',
+      upFail.status === 503 && upFail.json.error.code === 'UPLOAD_FAILED'
+      && (await B('GET', '/api/v1/cart/list')).json.data.length === before, upFail.json);
+    const noImg = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_abcd1234_202609231100003.jpg', data: 'not-a-data-url' } })).json.data;
+
+    check('n8n 沒帶金鑰領不到工作',
+      (await api('POST', '/api/v1/ocr/pending', { body: {} })).status === 401);
+    const jobs = (await api('POST', '/api/v1/ocr/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 10 } })).json.data;
+    const job = jobs.jobs.find((j) => j.cart_id === shot.cart_id);
+    check('n8n 領到剛拍的那張，附簽名網址', !!job && job.image_url.startsWith(STORAGE_MOCK_URL), jobs);
+    check('沒有圖的拍照品項不發給 n8n（辨識不了）', !jobs.jobs.some((j) => j.cart_id === noImg.cart_id));
+    const again = (await api('POST', '/api/v1/ocr/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 10 } })).json.data;
+    check('租約中，第二個 n8n 執行不會領到同一張', !again.jobs.some((j) => j.cart_id === shot.cart_id));
+
+    await api('POST', '/api/v1/ocr/result', { headers: { 'X-Notify-Token': 'smoke-notify-secret' },
+      body: { cart_id: shot.cart_id, name: 'Pigeon 奶瓶 240ml', jpy_taxed: 1089, ai_confidence: 'high' } });
+    const done = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === shot.cart_id);
+    check('辨識完成：品名、查表價（¥1089 → 400）、ocr_done 都到位',
+      done.name === 'Pigeon 奶瓶 240ml' && done.price_twd === 400 && done.ocr_done === true, done);
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [shot.cart_id] } });
+    const po = (await B('POST', '/api/v1/orders/checkout',
+      { body: { cart_ids: [shot.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const pod = (await api('GET', `/api/v1/orders/detail?order_id=${po.order_id}`, { token: owner })).json.data;
+    check('店主在後台訂單明細看得到客人拍的照片（簽名網址）',
+      typeof pod.items[0].image_url === 'string' && pod.items[0].image_url.startsWith(STORAGE_MOCK_URL), pod.items[0]);
+
     section('上線健檢 /api/v1/health');
     const hPublic = await api('GET', '/api/v1/health');
     check('不帶 token 也答得出話', hPublic.status === 200 && hPublic.json.ok, hPublic.json);
@@ -628,6 +716,7 @@ const login = async (id) =>
     failed++;
     console.error('\n測試中止：', e);
   } finally {
+    storageSrv.close();
     child.kill();
     if (harness) harness.child.kill();
   }
