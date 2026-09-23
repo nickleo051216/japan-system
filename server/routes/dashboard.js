@@ -159,6 +159,10 @@ const SHOP_FIELDS = [
     hint: '盒裝或大型物品的加價區間（台幣）' },
   { key: 'bulky_add_max',         label: '大型品加價上限',   type: 'int',    lo: 0, hi: 9999,
     hint: '' },
+  { key: 'ship_fee_cvs',          label: '運費：超商取貨',   type: 'int',    lo: 0, hi: 9999,
+    hint: '台幣。留空＝暫定 70 元；客人結帳頁與實際收費都照這裡' },
+  { key: 'ship_fee_home',         label: '運費：宅配到府',   type: 'int',    lo: 0, hi: 9999,
+    hint: '台幣。留空＝暫定 120 元' },
 ];
 
 /** Normalise one field for storage, or throw a 400 the owner can act on. */

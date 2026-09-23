@@ -11,18 +11,10 @@ const db = require('../lib/db');
 const config = require('../lib/config');
 const state = require('../lib/state');
 const { currentBatch } = require('../lib/batch');
+const { shipFee } = require('../lib/shipfee');
 const { ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const { orderShape, statementShape, bget, bpost, err, num, int } = require('./buyer');
-
-// 台灣端運費。合約 [待確認] #2 要求改由 settings 讀，所以這裡以 settings 優先，
-// 查不到才用合約寫死的數字 —— 業主日後在後台改，不用改程式。
-const SHIP_FEE_DEFAULT = { cvs: 70, home: 120 };
-async function shipFee(kind) {
-  const v = await db.setting(kind === 'home' ? 'ship_fee_home' : 'ship_fee_cvs', '');
-  const n = parseInt(v, 10);
-  return Number.isInteger(n) && n >= 0 ? n : SHIP_FEE_DEFAULT[kind];
-}
 
 async function myOrder(orderId, user) {
   const row = await db.one(
