@@ -688,6 +688,16 @@ const login = async (id) =>
     const done = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === shot.cart_id);
     check('辨識完成：品名、查表價（¥1089 → 400）、ocr_done 都到位',
       done.name === 'Pigeon 奶瓶 240ml' && done.price_twd === 400 && done.ocr_done === true, done);
+
+    const blurry = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_blurry00_202609231100004.jpg', data: jpgUrl } })).json.data;
+    await api('POST', '/api/v1/ocr/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 10 } });
+    await api('POST', '/api/v1/ocr/result', { headers: { 'X-Notify-Token': 'smoke-notify-secret' },
+      body: { cart_id: blurry.cart_id, jpy_taxed: null, ai_confidence: 'low' } });
+    const gaveUp = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === blurry.cart_id);
+    check('AI 認不出來也算辨識結束：前台不會永遠停在「辨識中」，並請客人自己填',
+      gaveUp.ocr_done === true && gaveUp.price_twd === null && /自行填寫/.test(gaveUp.note), gaveUp);
     await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [shot.cart_id] } });
     const po = (await B('POST', '/api/v1/orders/checkout',
       { body: { cart_ids: [shot.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
