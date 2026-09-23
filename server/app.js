@@ -49,6 +49,8 @@ function boot() {
   require('./routes/buyer-orders');
   // 後台「放東西進店裡」的入口：開團、喊單、許願報價、訂單報價、對帳單。
   require('./routes/admin-shop');
+  // 後台設定：價目表、成員與權限。
+  require('./routes/admin-config');
   booted = true;
   return true;
 }

@@ -149,6 +149,8 @@ const SHOP_FIELDS = [
     hint: '例：華南銀行' },
   { key: 'bank_code',             label: '銀行代碼',        type: 'digits', len: 3,  required: true,
     hint: '三碼數字' },
+  { key: 'bank_holder',           label: '收款戶名',        type: 'text',   max: 40,
+    hint: '客人匯款時看到的戶名；留空就不顯示' },
   { key: 'bank_account',          label: '收款帳號',        type: 'digits', minLen: 5, maxLen: 16, required: true,
     hint: '只有店主看得到，不會寫進稽核紀錄' },
   { key: 'payment_deadline_days', label: '付款期限（天）',   type: 'int',    lo: 1, hi: 30, required: true,
@@ -159,6 +161,10 @@ const SHOP_FIELDS = [
     hint: '盒裝或大型物品的加價區間（台幣）' },
   { key: 'bulky_add_max',         label: '大型品加價上限',   type: 'int',    lo: 0, hi: 9999,
     hint: '' },
+  { key: 'ship_fee_cvs',          label: '運費：超商取貨',   type: 'int',    lo: 0, hi: 9999,
+    hint: '台幣。留空＝暫定 70 元；客人結帳頁與實際收費都照這裡' },
+  { key: 'ship_fee_home',         label: '運費：宅配到府',   type: 'int',    lo: 0, hi: 9999,
+    hint: '台幣。留空＝暫定 120 元' },
 ];
 
 /** Normalise one field for storage, or throw a 400 the owner can act on. */

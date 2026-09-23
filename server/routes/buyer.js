@@ -17,6 +17,7 @@
  */
 const db = require('../lib/db');
 const price = require('../lib/price');
+const shipfee = require('../lib/shipfee');
 const { currentBatch } = require('../lib/batch');
 const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
@@ -141,12 +142,15 @@ bget('/api/v1/home/summary', async ({ me }) => {
     shop: {
       name: s.shop_name || '', bank_name: s.bank_name || '', bank_code: s.bank_code || '',
       bank_account: s.bank_account || '',
+      bank_holder: s.bank_holder || '',
       // 合約 v1.1 #5：缺值時前台改引導信用卡／ATM，所以直接給一個旗標，
       // 不要逼前台去判斷空字串。
       bank_ready: !!(s.bank_name && s.bank_code && s.bank_account),
       payment_deadline_days: int(s.payment_deadline_days),
       bulky_add_min: int(s.bulky_add_min), bulky_add_max: int(s.bulky_add_max),
       statement_days: s.statement_days || '',
+      // 前台結帳頁顯示的運費；跟結帳實際收的同一個來源（lib/shipfee）。
+      ship_fee: shipfee.fromSettings(s),
     },
     batch: batch ? {
       batch: batch.batch, name: batch.name, region: batch.region, close_at: batch.close_at,

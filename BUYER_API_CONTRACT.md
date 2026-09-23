@@ -122,7 +122,8 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 3. `GET /home/summary`
 ```json
-{ "shop": { "name", "bank_name", "bank_code", "bank_account", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days" },
+{ "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
+            "ship_fee": { "cvs": 70, "home": 120 } },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
@@ -131,6 +132,8 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ```
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
+- `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
+- `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
 
 ### 5. `POST /cart/add-text`
 請求 `{ name, jpy_taxed?, qty, note?, source?: "reorder" }` → 回 CartItem（pending）
@@ -187,7 +190,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
   "invoice": { "type": "carrier|donate|tax", "carrier": "/AB12+3C", "tax_id": "12345678" }, "note": "" }
 ```
 - 任一品項非 confirmed → `409 NOT_CONFIRMED`；統編非 8 碼 → `BAD_TAX_ID`
-- 台灣端運費：超商 70、宅配 120（`[待確認]` 改由 settings 讀取）
+- 台灣端運費：由店主在後台「店家與收款設定」填（`settings.ship_fee_cvs` / `ship_fee_home`），未填時暫定超商 70、宅配 120（金額 `[待確認]`，業主決定）
 - 取貨地址從會員資料帶入（前台不傳地址，避免竄改）
 - 成立：`status=待確認`、`payment_status=待付款`、品項 `item_status=待採買`、購物車品項移出
 - **同一 Idempotency-Key 重送只成立一張**

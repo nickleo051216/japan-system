@@ -108,9 +108,11 @@ function requirePassword(given, req, where) {
  */
 get('/api/v1/auth/personas', async ({ req }) => {
   requirePassword(req.headers['x-admin-password'], req, 'personas');
+  // 只列員工。客人第一次開 LINE 前台就會自動進 members —— 列出來等於把
+  // 全部客人的名字與 LINE userId 交給任何知道後台密碼的人。
   return ok(await db.all(
-    "SELECT line_user_id, nickname, display_name, role FROM members " +
-    "ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'helper' THEN 1 WHEN 'packer' THEN 2 ELSE 3 END, nickname"));
+    "SELECT line_user_id, nickname, display_name, role FROM members WHERE role <> 'buyer' " +
+    "ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'helper' THEN 1 ELSE 2 END, nickname"));
 });
 
 // 刻意不是冪等路由。冪等快取會把回應整包存起來，而這支的回應裡有 token ——

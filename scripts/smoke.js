@@ -140,6 +140,8 @@ const login = async (id) =>
     const helper2 = await login('U_helper2');
     const packer = await login('U_packer');
     const buyer = await login('U_buyer1');
+    // 先拿好：後面「登入的門」會把本機來源鎖住，之後不能再登入。成員權限那節用它驗升降級。
+    const buyer2 = await login('U_buyer2');
 
     section('F-21 權限（伺服器端強制）');
     check('店主可讀成本清單', (await api('GET', '/api/v1/procurement/expenses', { token: owner })).status === 200);
@@ -350,6 +352,8 @@ const login = async (id) =>
       (await api('GET', '/api/v1/auth/personas', { headers: { 'X-Admin-Password': 'wrong' } })).status === 401);
     const pl = await api('GET', '/api/v1/auth/personas', { headers: { 'X-Admin-Password': ADMIN_PW } });
     check('密碼正確才列出人員', pl.status === 200 && pl.json.data.length > 0);
+    check('後台登入名單只列員工，不列客人', pl.status === 200 && pl.json.data.every((p) => p.role !== 'buyer'),
+      pl.json.data.map((p) => p.role));
     check('沒帶密碼不發 token',
       (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner' } })).status === 401);
     check('密碼錯了不發 token',
@@ -737,6 +741,88 @@ const login = async (id) =>
       !hDump.includes('smoke-notify-secret') && !hDump.includes('smoke-test-signing-key')
       && !hDump.includes('smoke-test-session-key'));
     check('回應不含連線字串', !hDump.includes('postgres://') && !hDump.includes('postgresql://'));
+
+    section('後台設定 — 運費（結帳與首頁同一個來源）');
+    check('首頁回傳運費，未設定時為暫定 70／120',
+      JSON.stringify((await B('GET', '/api/v1/home/summary')).json.data.shop.ship_fee) === JSON.stringify({ cvs: 70, home: 120 }));
+    check('運費不能是負數',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_fee_cvs: -1 } })).status === 400);
+    check('小幫手不能改運費',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { ship_fee_cvs: 1 } })).status === 403);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_fee_cvs: 90, ship_fee_home: 150 } });
+    check('改了運費，首頁跟著變',
+      JSON.stringify((await B('GET', '/api/v1/home/summary')).json.data.shop.ship_fee) === JSON.stringify({ cvs: 90, home: 150 }));
+    const feeItem = (await B('POST', '/api/v1/cart/add-text', { body: { name: '運費測試品', jpy_taxed: 500, qty: 1 } })).json.data;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [feeItem.cart_id] } });
+    const feeOrder = (await B('POST', '/api/v1/orders/checkout',
+      { body: { cart_ids: [feeItem.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    check('改了運費，結帳實收也跟著變', feeOrder.ship_fee_twd === 90, feeOrder.ship_fee_twd);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_fee_cvs: '', ship_fee_home: '' } });
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { bank_holder: '冉冉國際企業有限公司' } });
+    check('首頁回傳收款戶名', (await B('GET', '/api/v1/home/summary')).json.data.shop.bank_holder === '冉冉國際企業有限公司');
+    check('清空運費回到暫定值',
+      (await B('GET', '/api/v1/home/summary')).json.data.shop.ship_fee.cvs === 70);
+
+    section('後台設定 — 價目表');
+    const pt0 = (await api('GET', '/api/v1/settings/price-table', { token: helper })).json.data.rows;
+    check('小幫手看得到價目表', pt0.length === 11);
+    const PT = (token, rows) => api('POST', '/api/v1/settings/price-table', { token, body: { rows } });
+    check('小幫手不能改價目表', (await PT(helper, pt0)).status === 403);
+    check('空的價目表被拒絕', (await PT(owner, [])).json.error?.code === 'BAD_PRICE_TABLE');
+    check('日幣上限重複被拒絕',
+      (await PT(owner, [{ jpy_taxed_max: 500, twd: 200 }, { jpy_taxed_max: 500, twd: 210 }])).json.error?.code === 'BAD_PRICE_TABLE');
+    check('日幣較高卻較便宜被拒絕（打錯字）',
+      (await PT(owner, [{ jpy_taxed_max: 500, twd: 200 }, { jpy_taxed_max: 1000, twd: 20 }])).json.error?.code === 'BAD_PRICE_TABLE');
+    check('小數售價被拒絕',
+      (await PT(owner, [{ jpy_taxed_max: 500, twd: 199.5 }])).json.error?.code === 'BAD_PRICE_TABLE');
+    check('被拒絕時原價目表一列都沒動',
+      JSON.stringify((await api('GET', '/api/v1/settings/price-table', { token: owner })).json.data.rows) === JSON.stringify(pt0));
+    const ptSaved = (await PT(owner, [{ jpy_taxed_max: 1000, twd: 400 }, { jpy_taxed_max: 300, twd: 150 }])).json.data;
+    check('店主可存，伺服器依日幣排序', ptSaved.rows.length === 2 && ptSaved.rows[0].jpy_taxed_max === 300, ptSaved.rows);
+    check('客人首頁的價目表立即更新',
+      JSON.stringify((await B('GET', '/api/v1/home/summary')).json.data.price_table) === JSON.stringify(ptSaved.rows));
+    check('新的報價照新價目表換算',
+      (await B('POST', '/api/v1/cart/add-text', { body: { name: '換價測試品', jpy_taxed: 500, qty: 1 } })).json.data.price_twd === 400);
+    check('已成立的訂單不跟著改價',
+      (await B('GET', '/api/v1/orders/list')).json.data.find((o) => o.order_id === feeOrder.order_id).total_twd === feeOrder.total_twd);
+    const ptAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
+    check('稽核軌跡記下改前改後', ptAudit.includes('settings.price_table'));
+    await PT(owner, pt0);
+    check('價目表還原', JSON.stringify((await api('GET', '/api/v1/settings/price-table', { token: owner })).json.data.rows) === JSON.stringify(pt0));
+
+    section('後台設定 — 成員與權限');
+    check('小幫手看不到成員管理', (await api('GET', '/api/v1/members/admin-list', { token: helper })).status === 403);
+    const ml = (await api('GET', '/api/v1/members/admin-list', { token: owner })).json.data;
+    check('員工清單不含客人、客人清單不含員工',
+      ml.staff.every((m) => m.role !== 'buyer') && ml.buyers.every((m) => m.role === 'buyer') && ml.staff.length === 4, ml.staff.length);
+    check('可用名稱搜尋客人',
+      (await api('GET', '/api/v1/members/admin-list?q=' + encodeURIComponent('Kiki'), { token: owner })).json.data.buyers.map((m) => m.line_user_id).join() === 'U_buyer3');
+    check('搜尋字串裡的 % 不會變成萬用字元',
+      (await api('GET', '/api/v1/members/admin-list?q=%25', { token: owner })).json.data.buyers.length === 0);
+    const SR = (token, line_user_id, role) => api('POST', '/api/v1/members/set-role', { token, body: { line_user_id, role } });
+    check('小幫手不能調整角色', (await SR(helper, 'U_buyer2', 'helper')).status === 403);
+    check('不能從後台給出店主權限', (await SR(owner, 'U_buyer2', 'owner')).json.error?.code === 'BAD_ROLE');
+    check('不能從後台拿走店主權限（連店主自己也不行）', (await SR(owner, 'U_owner', 'buyer')).json.error?.code === 'OWNER_LOCKED');
+    check('查無此人 → 404', (await SR(owner, 'U_nobody', 'helper')).status === 404);
+    const up = (await SR(owner, 'U_buyer2', 'packer')).json.data;
+    check('客人升為理貨', up.changed && up.member.role === 'packer');
+    check('升級後移到員工清單',
+      (await api('GET', '/api/v1/members/admin-list', { token: owner })).json.data.staff.some((m) => m.line_user_id === 'U_buyer2'));
+    const packer2 = buyer2;
+    check('新理貨進得了出貨、看不到價格',
+      (await api('GET', '/api/v1/packing/list', { token: packer2 })).status === 200
+      && (await api('GET', '/api/v1/settings/shop', { token: packer2 })).status === 403);
+    check('調回客人', (await SR(owner, 'U_buyer2', 'buyer')).json.data.member.role === 'buyer');
+    check('調回後就進不了出貨', (await api('GET', '/api/v1/packing/list', { token: packer2 })).status === 403);
+    const MA = (body) => api('POST', '/api/v1/members/add', { token: owner, body });
+    const NEW_ID = 'U' + 'a1'.repeat(16);
+    check('LINE userId 格式錯被拒絕', (await MA({ line_user_id: '@heeehababy', nickname: '新人', role: 'helper' })).json.error?.code === 'BAD_LINE_USER_ID');
+    check('不能直接新增店主', (await MA({ line_user_id: NEW_ID, nickname: '新人', role: 'owner' })).json.error?.code === 'BAD_ROLE');
+    check('稱呼重複被拒絕', (await MA({ line_user_id: NEW_ID, nickname: '小美', role: 'helper' })).json.error?.code === 'NICKNAME_TAKEN');
+    check('新增日本小幫手', (await MA({ line_user_id: NEW_ID, nickname: '新人', role: 'helper' })).json.data?.member.role === 'helper');
+    check('重複新增被拒絕', (await MA({ line_user_id: NEW_ID, nickname: '新人2', role: 'helper' })).json.error?.code === 'MEMBER_EXISTS');
+    const mAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
+    check('角色異動都記在稽核軌跡', mAudit.includes('members.role') && mAudit.includes('members.add'));
   } catch (e) {
     failed++;
     console.error('\n測試中止：', e);

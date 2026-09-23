@@ -1,6 +1,6 @@
 import { GET, POST, h, dt, toast, fail, session } from '/app.js';
 
-/** F-23 匯率管理 + 團別切換 + 店家收款設定。 */
+/** F-23 匯率管理 + 價目表 + 團別切換 + 店家收款設定（含運費）。 */
 export async function render(root) {
   const canWrite = session.can('settings.write');
   const [fx, batches] = await Promise.all([GET('/api/v1/settings/fx'), GET('/api/v1/settings/batches')]);
@@ -33,6 +33,8 @@ export async function render(root) {
       h('div', { class: 'small muted', style: 'margin-top:16px' }, '變更紀錄'),
       h('div', { class: 'table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, '時間'), h('th', {}, '匯率'), h('th', {}, '變更者'))), history)))));
+
+  await priceCard(root, canWrite);
 
   const batchSel = h('select', { style: 'width:220px', disabled: !canWrite },
     ...batches.batches.map((b) => h('option', { value: b.batch, selected: b.batch === batches.current_batch }, `${b.batch}　${b.name}`)));
@@ -126,4 +128,68 @@ async function shopCard(root) {
         '這幾筆不隨程式碼發布，換環境要重新填一次。收款帳號只有店主看得到，也不會寫進稽核紀錄 —— 紀錄裡只留「哪些欄位被改過」。'),
       h('div', { class: 'grid cols-2' }, ...data.fields.map(fieldNode)),
       h('div', { class: 'row', style: 'margin-top:14px' }, save))));
+}
+
+/**
+ * 價目表：日幣税込級距 → 台幣售價。客人首頁、喊單、許願與訂單報價都照這張換算。
+ * 整張一起存 —— 伺服器會排序、擋重複與「日幣越貴台幣越便宜」的打錯字。
+ */
+async function priceCard(root, canWrite) {
+  const { rows } = await GET('/api/v1/settings/price-table');
+  const tbody = h('tbody', {});
+  const numInput = (v, ph) => h('input', { type: 'number', min: '1', step: '1', value: v == null ? '' : String(v),
+    placeholder: ph, style: 'width:130px', disabled: !canWrite });
+
+  const addRow = (r = {}) => {
+    const jpyIn = numInput(r.jpy_taxed_max, '日幣上限');
+    const twdIn = numInput(r.twd, '台幣');
+    const prev = h('td', { class: 'tiny muted' }, '');
+    const tr = h('tr', {},
+      h('td', {}, '¥', jpyIn, h('span', { class: 'tiny muted' }, '　以下')),
+      h('td', {}, 'NT$', twdIn),
+      prev,
+      canWrite ? h('td', {}, h('button', { class: 'btn ghost sm', onClick: () => { tr.remove(); paintRanges(); } }, '刪除')) : null);
+    tr._get = () => ({ jpy_taxed_max: Number(jpyIn.value), twd: Number(twdIn.value) });
+    tr._prev = prev;
+    jpyIn.addEventListener('input', paintRanges);
+    tbody.append(tr);
+  };
+  // 每列旁邊寫出它實際涵蓋的日幣區間，免得店主要自己心算上一列加一。
+  function paintRanges() {
+    const trs = [...tbody.children].filter((t) => t._get);
+    const sorted = trs.map((t) => t._get().jpy_taxed_max).filter((n) => n > 0).sort((a, b) => a - b);
+    for (const t of trs) {
+      const v = t._get().jpy_taxed_max;
+      const i = sorted.indexOf(v);
+      t._prev.textContent = v > 0 ? `¥${i > 0 ? sorted[i - 1] + 1 : 1}–¥${v}` : '';
+    }
+  }
+  rows.forEach(addRow);
+  paintRanges();
+
+  const max = rows.length ? rows[rows.length - 1].jpy_taxed_max : null;
+  root.append(h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, '價目表（日幣税込 → 台幣售價）'), h('div', { class: 'spacer' }),
+      h('span', { class: 'muted tiny' }, canWrite ? '僅店主可改' : '僅店主可改，唯讀')),
+    h('div', { class: 'card-body' },
+      h('div', { class: 'banner info' },
+        `售價照級距對照，不是用匯率乘。超過最高級距${max ? `（¥${max}）` : ''}的商品不會自動定價，要在報價時直接填台幣。`
+        + '改價目表只影響之後的報價，已報價的訂單不會跟著變。'),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, '日幣上限'), h('th', {}, '台幣售價'), h('th', {}, '涵蓋區間'), canWrite ? h('th', {}) : null)),
+        tbody)),
+      canWrite ? h('div', { class: 'row', style: 'margin-top:12px;gap:8px' },
+        h('button', { class: 'btn', onClick: () => { addRow(); paintRanges(); } }, '新增一列'),
+        h('button', { class: 'btn primary', onClick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            const r = await POST('/api/v1/settings/price-table', { rows: [...tbody.children].filter((t) => t._get).map((t) => t._get()) });
+            tbody.innerHTML = '';
+            r.rows.forEach(addRow);
+            paintRanges();
+            toast(`價目表已儲存（${r.rows.length} 級）。${r.note}`);
+          } catch (err) { fail(err); }
+          finally { btn.disabled = false; }
+        } }, '儲存價目表')) : null)));
 }
