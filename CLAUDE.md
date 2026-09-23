@@ -13,4 +13,4 @@
 - 程式碼裡不要建表或改表。
 
 ## 驗收
-`npm run smoke`（後端 265 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。
+`npm run smoke`（後端 279 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。

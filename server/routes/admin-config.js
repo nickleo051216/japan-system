@@ -87,9 +87,13 @@ get('/api/v1/members/admin-list', async ({ actor, query }) => {
   auth.requireCap(actor, 'settings.write');
   const q = String(query.q || '').trim().slice(0, 40);
   const order = "ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'helper' THEN 1 WHEN 'packer' THEN 2 ELSE 3 END, created_at DESC";
-  const staff = await db.all(`SELECT * FROM members WHERE role <> 'buyer' ${order}`);
   // 客人可能上千人：預設只列最近 50 位，要找特定的人用搜尋。
+  // 搜尋同時套用在員工與客人 —— 用會員編號找自己（HB-00001）或某位員工也要找得到。
   const like = '%' + q.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
+  const match = '(nickname ILIKE ? OR display_name ILIKE ? OR member_no ILIKE ? OR line_user_id ILIKE ?)';
+  const staff = q
+    ? await db.all(`SELECT * FROM members WHERE role <> 'buyer' AND ${match} ${order}`, like, like, like, like)
+    : await db.all(`SELECT * FROM members WHERE role <> 'buyer' ${order}`);
   const buyers = q
     ? await db.all(`SELECT * FROM members WHERE role = 'buyer'
         AND (nickname ILIKE ? OR display_name ILIKE ? OR member_no ILIKE ? OR line_user_id ILIKE ?) ${order} LIMIT 50`,

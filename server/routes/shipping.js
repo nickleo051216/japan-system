@@ -135,8 +135,44 @@ get('/api/v1/labels/data', async ({ actor, query }) => {
 // F-19 出貨稽核軌跡
 get('/api/v1/audit/list', async ({ actor, query }) => {
   auth.requireCap(actor, 'audit.read');
-  return ok(await audit.list({ from: query.from, to: query.to, actor: query.actor, result: query.result, limit: Number(query.limit) || 200 }));
+  const rows = await audit.list({ from: query.from, to: query.to, actor: query.actor, result: query.result, limit: Number(query.limit) || 200 });
+  return ok(await labelAudit(rows));
 });
+
+/**
+ * 稽核軌跡要給人看，不是給工程師看：把紀錄裡的內部編號換成看得懂的名字。
+ *   人   → 「稱呼（會員編號）」，系統自動的操作 → 「系統自動」
+ *   對象 → 採購項目、許願、喊單、團次換成品名／團名；訂單與對帳單編號本身就看得懂
+ * 查不到的保持原樣（例如已刪除的資料），畫面上至少還有線索。
+ */
+async function labelAudit(rows) {
+  const ids = new Set();
+  for (const r of rows) {
+    if (r.actor) ids.add(r.actor);
+    if (r.target) ids.add(r.target);
+    if (r.detail && r.detail.line_user_id) ids.add(r.detail.line_user_id);
+  }
+  const list = [...ids];
+  const names = new Map();
+  if (list.length) {
+    const lookups = [
+      ["SELECT line_user_id AS id, nickname || '（' || member_no || '）' AS label FROM members WHERE line_user_id = ANY(?::text[])"],
+      ["SELECT p.proc_id AS id, coalesce(pr.name_zh, p.sku) AS label FROM procurements p LEFT JOIN products pr ON pr.sku = p.sku WHERE p.proc_id = ANY(?::text[])"],
+      ['SELECT wish_id AS id, item_name AS label FROM wishlist WHERE wish_id = ANY(?::text[])'],
+      ['SELECT send_id AS id, name AS label FROM broadcast WHERE send_id = ANY(?::text[])'],
+      ["SELECT batch AS id, coalesce(name, batch) AS label FROM batches WHERE batch = ANY(?::text[])"],
+    ];
+    for (const [sql] of lookups) for (const x of await db.all(sql, list)) names.set(x.id, x.label);
+  }
+  names.set('n8n', '系統自動');
+  const nameOf = (id) => (id ? names.get(id) || null : null);
+  return rows.map((r) => ({
+    ...r,
+    actor_label: nameOf(r.actor) || (r.actor ? '（已移除的成員）' : '系統自動'),
+    target_label: nameOf(r.target),
+    subject_label: r.detail && r.detail.line_user_id ? nameOf(r.detail.line_user_id) : null,
+  }));
+}
 
 get('/api/v1/shipments/list', async ({ actor, query }) => {
   auth.requireCap(actor, 'order.read');

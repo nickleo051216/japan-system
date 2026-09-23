@@ -17,7 +17,8 @@ const notify = require('../lib/notify');
 const { currentBatch } = require('../lib/batch');
 const { STATUS, transition } = require('../lib/state');
 const { get, post, ok } = require('../lib/http');
-const { now, uid } = require('../lib/ids');
+const { now, uid, nextOrderId } = require('../lib/ids');
+const { shipFee } = require('../lib/shipfee');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -343,3 +344,100 @@ post('/api/v1/statements/reconcile', async ({ actor, body }) => {
     detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
   return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff });
 });
+// ---- 代客下單 ---------------------------------------------------------------
+//
+// 客人在 LINE 私訊或電話裡說要買什麼，店家直接在後台替他建單。同類的代購／團購
+// 系統幾乎都有這個入口（「代客下單」「批次建單」）：不是每位客人都會自己開前台。
+//
+// 跟客人自己結帳走同一條路：訂單一律從「待確認」開始、品項從「待採買」開始、
+// 台幣售價照價目表換算；店家已經談好價錢的品項才直接填台幣。沒有價錢的品項
+// 以 0 元先記著，之後在「訂單報價」補上 —— 狀態機會擋住「還有 0 元品項就報價」。
+
+const MEMBER_NO = /^HB-\d{5,}$/;
+
+/** 用會員編號、稱呼或 LINE 名稱找客人。只回畫面需要的欄位，不回 LINE userId。 */
+get('/api/v1/members/lookup', async ({ actor, query }) => {
+  auth.requireCap(actor, 'order.write');
+  const q = String(query.q || '').trim().slice(0, 40);
+  if (!q) return ok([]);
+  const like = '%' + q.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
+  const rows = await db.all(
+    `SELECT member_no, nickname, display_name, role, cvs_brand, cvs_store_name, cvs_addr, home_addr
+       FROM members
+      WHERE status <> '停用' AND (member_no ILIKE ? OR nickname ILIKE ? OR display_name ILIKE ?)
+      ORDER BY created_at DESC LIMIT 10`, like, like, like);
+  return ok(rows.map((m) => ({
+    member_no: m.member_no, nickname: m.nickname, display_name: m.display_name, role: m.role,
+    cvs: [m.cvs_brand, m.cvs_store_name].filter(Boolean).join(' ') || null,
+    home_addr: m.home_addr || null,
+  })));
+});
+
+post('/api/v1/orders/create', async ({ actor, body }) => {
+  auth.requireCap(actor, 'order.write');
+  const memberNo = String(body.member_no || '').trim().toUpperCase();
+  if (!MEMBER_NO.test(memberNo)) throw err('BAD_MEMBER_NO', '請先選擇客人（會員編號）');
+  const member = await db.one('SELECT * FROM members WHERE member_no = ?', memberNo);
+  if (!member) throw err('MEMBER_NOT_FOUND', `找不到會員編號 ${memberNo}`, 404);
+  if (member.status === '停用') throw err('MEMBER_DISABLED', '這位會員已停用', 409);
+
+  const raw = Array.isArray(body.items) ? body.items : [];
+  if (!raw.length) throw err('NO_ITEMS', '至少要有一個品項');
+  if (raw.length > 50) throw err('TOO_MANY_ITEMS', '一張訂單最多 50 個品項');
+  const items = [];
+  for (const [i, it] of raw.entries()) {
+    const n = i + 1;
+    const name = String((it && it.name) || '').trim();
+    if (!name || name.length > 80) throw err('BAD_ITEM', `第 ${n} 項：請填品名（80 字以內）`);
+    const qty = Number(it.qty ?? 1);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 99) throw err('BAD_QTY', `第 ${n} 項：數量要是 1–99 的整數`);
+    const jpy = num(it.jpy_taxed);
+    if (jpy !== null && (!Number.isInteger(jpy) || jpy < 1 || jpy > 10_000_000)) {
+      throw err('BAD_JPY', `第 ${n} 項：日幣含稅價要是正整數`);
+    }
+    const manual = num(it.price_twd);
+    if (manual !== null && (!Number.isInteger(manual) || manual < 0 || manual > 1_000_000)) {
+      throw err('BAD_PRICE', `第 ${n} 項：台幣售價要是 0 以上的整數`);
+    }
+    // 台幣售價：店家直接填的優先（已經跟客人談好的價錢），否則照價目表換算。
+    const twd = manual !== null ? manual : (jpy !== null ? await price.twdOf(jpy) : null);
+    items.push({ name, qty, jpy, twd, note: String(it.note || '').trim().slice(0, 200) || null });
+  }
+
+  const pickupType = String(body.pickup_type || 'cvs');
+  if (!['cvs', 'home'].includes(pickupType)) throw err('BAD_PICKUP', '取貨方式只能是超商或宅配');
+  const pickup = pickupType === 'cvs'
+    ? [member.cvs_brand, member.cvs_store_name].filter(Boolean).join(' ') || '超商取貨'
+    : '宅配到府';
+  const pickupAddr = pickupType === 'cvs' ? (member.cvs_addr || '') : (member.home_addr || '');
+  const fee = await shipFee(pickupType);
+  const subtotal = items.reduce((a, i) => a + (i.twd || 0) * i.qty, 0);
+  const note = ['代客下單', String(body.note || '').trim().slice(0, 300)].filter(Boolean).join('：');
+
+  const orderId = await db.tx(async () => {
+    await db.setLocal('app.actor', actor.line_user_id);
+    const id = await nextOrderId(db);
+    await db.run(
+      `INSERT INTO orders (order_id, line_user_id, batch, status, payment_status, total_twd,
+                           ship_fee_twd, pickup, pickup_addr, note, created_at)
+       VALUES (?,?,?,'待確認','待付款',?,?,?,?,?,?)`,
+      id, member.line_user_id, await currentBatch(), subtotal + fee, fee, pickup, pickupAddr, note, now());
+    for (const i of items) {
+      await db.run(
+        `INSERT INTO order_items (item_id, order_id, name, qty, jpy_taxed, unit_price_twd, item_status, source)
+         VALUES (?,?,?,?,?,?,'待採買','text')`,
+        uid('IT'), id, i.note ? `${i.name}（${i.note}）` : i.name, i.qty, i.jpy, i.twd || 0);
+    }
+    return id;
+  });
+
+  const unpriced = items.filter((i) => i.twd === null).length;
+  await audit.record({ actor: actor.line_user_id, action: 'order.create', target: orderId,
+    detail: { line_user_id: member.line_user_id, items: items.length, total_twd: subtotal + fee, unpriced }, result: 'ok' });
+  return ok({
+    order_id: orderId, member_no: member.member_no, nickname: member.nickname,
+    total_twd: subtotal + fee, ship_fee_twd: fee, items: items.length, unpriced,
+    next: unpriced ? `還有 ${unpriced} 個品項沒有價錢，請到訂單報價補上` : '訂單已成立，確認後即可報價',
+  });
+});
+
