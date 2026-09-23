@@ -63,9 +63,15 @@ export function toast(msg, kind = '') {
 }
 export const fail = (e) => toast(e.message || '操作失敗', 'err');
 
+function closeModal() {
+  const host = document.getElementById('modal');
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+}
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
 export function modal(title, bodyNode, actions = []) {
   const host = document.getElementById('modal');
-  const close = () => { host.hidden = true; host.innerHTML = ''; };
+  const close = closeModal;
   const sheet = h('div', { class: 'sheet' },
     h('div', { class: 'card-head' }, h('h2', {}, title), h('div', { class: 'spacer' }),
       h('button', { class: 'btn ghost sm', onClick: close }, '✕')),
@@ -93,6 +99,9 @@ export const statusTag = (s) => h('span', { class: 'tag ' + (STATUS_TONE[s] || '
 const ROUTES = [
   { path: 'dashboard', title: '營運儀表板', icon: '◎', cap: 'order.read', mod: () => import('/views/dashboard.js') },
   { path: 'orders', title: '訂單管理', icon: '▤', cap: 'order.read', mod: () => import('/views/orders.js') },
+  { path: 'statements', title: '對帳單', icon: '$', cap: 'payment.reconcile', mod: () => import('/views/statements.js') },
+  { path: 'shop', title: '開團與喊單', icon: '✦', cap: 'broadcast', mod: () => import('/views/shop.js'), group: '上架' },
+  { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('/views/wishes.js') },
   { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('/views/board.js'), group: '採購' },
   { path: 'expense', title: '拍照請款', icon: '¥', cap: 'procurement.write', mod: () => import('/views/expense.js') },
   { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('/views/packing.js'), group: '出貨' },
@@ -239,6 +248,8 @@ export async function boot() {
 
 async function route() {
   if (!session.member) return;
+  // 換頁時把上一頁開著的視窗收掉 —— 不然它會蓋在新頁面上，按什麼都沒反應。
+  closeModal();
   const { path, query } = parseHash();
   const r = ROUTES.find((x) => x.path === path) || ROUTES[0];
   if (!session.can(r.cap)) {

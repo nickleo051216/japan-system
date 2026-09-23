@@ -17,6 +17,45 @@ const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.join(__dirname, '..');
 
+/**
+ * 假的 Supabase Storage：照 Supabase 的 REST 介面回應（上傳、批次簽名網址），
+ * 讓驗收真的走過 lib/storage.js 的程式路徑。路徑含 failfail 的上傳會回 500，
+ * 用來驗「照片存不下來時不建品項」。
+ */
+const http = require('node:http');
+const storageMock = { objects: new Map(), requests: [] };
+function startStorageMock() {
+  return new Promise((resolve) => {
+    const srv = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        storageMock.requests.push({ method: req.method, url: req.url, apikey: req.headers.apikey, auth: req.headers.authorization });
+        const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        const sign = /^\/storage\/v1\/object\/sign\/cart-images$/.exec(req.url);
+        const up = /^\/storage\/v1\/object\/cart-images\/(.+)$/.exec(req.url);
+        if (req.method === 'POST' && sign) {
+          const { expiresIn, paths } = JSON.parse(body.toString() || '{}');
+          storageMock.lastExpiresIn = expiresIn;
+          return send(200, paths.map((p) => storageMock.objects.has(p)
+            ? { path: p, signedURL: `/object/sign/cart-images/${p}?token=t${expiresIn}`, error: null }
+            : { path: p, signedURL: null, error: 'Object not found' }));
+        }
+        if (req.method === 'POST' && up) {
+          const key = decodeURIComponent(up[1]);
+          if (key.includes('failfail')) return send(500, { error: 'boom' });
+          storageMock.objects.set(key, body);
+          return send(200, { Key: `cart-images/${key}` });
+        }
+        send(404, { error: 'not found' });
+      });
+    });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+}
+let STORAGE_MOCK_URL = '';
+
 /** PGlite serves one connection at a time, hence DB_POOL_MAX=1. */
 const envFor = (databaseUrl) => ({
   ...process.env,
@@ -27,6 +66,8 @@ const envFor = (databaseUrl) => ({
   SESSION_SIGNING_KEY: 'smoke-test-session-key',
   ADMIN_LOGIN_PASSWORD: 'smoke-admin-password-0123456789',
   LINE_LOGIN_CHANNEL_ID: '2011699944',
+  SUPABASE_URL: STORAGE_MOCK_URL,
+  SUPABASE_SERVICE_KEY: 'smoke-supabase-secret',
   // 綠界官方測試商店的參數不放進原始碼；這裡用假值，只驗「有沒有簽、簽出來的值
   // 有沒有外洩」，不驗綠界端是否接受 —— 那要真的打到綠界才算數。
   ECPAY_MERCHANT_ID: '3002607',
@@ -74,6 +115,8 @@ const login = async (id) =>
   (await api('POST', '/api/v1/auth/login', { body: { line_user_id: id, password: ADMIN_PW } })).json.data.token;
 
 (async () => {
+  const storageSrv = await startStorageMock();
+  STORAGE_MOCK_URL = `http://127.0.0.1:${storageSrv.address().port}`;
   let harness = null;
   let databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
@@ -471,6 +514,21 @@ const login = async (id) =>
     check('未出貨不能按「我已收到」→ 409 ILLEGAL_TRANSITION',
       (await B('POST', '/api/v1/orders/received', { body: { order_id: order.order_id } }))
         .json.error?.code === 'ILLEGAL_TRANSITION');
+    // 走完一張單：已報價 → 已到貨 → 出貨 → 客人按已收到 → 查物流。
+    // /shipments/track 在已送達時要讀狀態紀錄，欄位名錯過一次（changed_at），正式站回 500。
+    const tr = (await B('POST', '/api/v1/orders/checkout', { body: {
+      cart_ids: [(await B('POST', '/api/v1/cart/update', { body: {
+        cart_id: (await B('POST', '/api/v1/cart/add-text', { body: { name: '物流測試品', jpy_taxed: 500, qty: 1 } })).json.data.cart_id,
+        name: '物流測試品' } })).json.data.cart_id],
+      pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: tr.order_id, to: '已報價' } });
+    await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: tr.order_id, to: '已到貨' } });
+    await api('POST', '/api/v1/orders/ship', { token: owner, body: { order_id: tr.order_id, override_reason: '測試', verified_by_scan: false } });
+    check('已出貨 → 客人按「我已收到」→ 已送達',
+      (await B('POST', '/api/v1/orders/received', { body: { order_id: tr.order_id } })).json.data?.status === '已送達');
+    const trk = await B('GET', `/api/v1/shipments/track?order_id=${tr.order_id}`);
+    check('已送達的單查物流：含出貨與送達兩筆事件',
+      trk.status === 200 && trk.json.data[0].events.map((e) => e.status).join('>') === '已出貨>已送達', trk.json);
     check('別人的訂單一律 404',
       (await B('POST', '/api/v1/orders/received', { body: { order_id: 'HB2608-005' } })).status === 404);
 
@@ -495,6 +553,147 @@ const login = async (id) =>
       pay.json.data.flow === 'redirect' && !!pay.json.data.action && !!pay.json.data.fields.CheckMacValue, pay.json.error);
     check('回應不含綠界金鑰',
       !JSON.stringify(pay.json).includes(process.env.SMOKE_ECPAY_HASH_KEY || 'smokeEcpayHashKey00'));
+
+    section('後台 — 開團');
+    check('小幫手不能開團',
+      (await api('POST', '/api/v1/settings/batch/create', { token: helper, body: { batch: 'T-SMOKE', name: 'x' } })).status === 403);
+    const nb = await api('POST', '/api/v1/settings/batch/create',
+      { token: owner, body: { batch: 'T-SMOKE-01', name: '10/15 大阪採買', region: '大阪' } });
+    check('店主開團成功', nb.status === 200 && nb.json.data.batch === 'T-SMOKE-01', nb.json);
+    check('重複團號 → 409',
+      (await api('POST', '/api/v1/settings/batch/create', { token: owner, body: { batch: 'T-SMOKE-01', name: 'x' } })).status === 409);
+    check('新開的團自動成為目前團別，客人首頁看得到',
+      (await B('GET', '/api/v1/home/summary')).json.data.batch?.batch === 'T-SMOKE-01');
+
+    section('後台 — 開喊單');
+    check('小幫手不能開喊單（僅店主）',
+      (await api('POST', '/api/v1/broadcast/create', { token: helper, body: { name: 'x', jpy_taxed: 500, quantity: 1 } })).status === 403);
+    check('超出級距又沒填台幣 → BAD_PRICE',
+      (await api('POST', '/api/v1/broadcast/create', { token: owner, body: { name: 'x', jpy_taxed: 99999, quantity: 1 } }))
+        .json.error?.code === 'BAD_PRICE');
+    const inHour = new Date(Date.now() + 3600_000).toISOString();
+    const bc = (await api('POST', '/api/v1/broadcast/create',
+      { token: owner, body: { name: '西松屋 紗布巾', jpy_taxed: 1639, quantity: 4, deadline_at: inHour } })).json.data;
+    check('開喊單 → 售價查表（¥1639 → 600）、歸入目前團', bc.price_twd === 600 && bc.batch === 'T-SMOKE-01', bc);
+    const seen = (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((b) => b.send_id === bc.send_id);
+    check('客人首頁立刻看到新喊單、可以搶', !!seen && seen.open === true);
+    await B('POST', '/api/v1/broadcast/shout', { body: { send_id: bc.send_id, qty: 3 } });
+    check('減量不能扣到已被搶走的份 → 409',
+      (await api('POST', '/api/v1/broadcast/adjust', { token: owner, body: { send_id: bc.send_id, delta: -2 } })).status === 409);
+    check('現場多找到 2 件 → 加量',
+      (await api('POST', '/api/v1/broadcast/adjust', { token: owner, body: { send_id: bc.send_id, delta: 2 } })).json.data.remaining === 3);
+    check('提前截止後，客人首頁顯示不可搶',
+      (await api('POST', '/api/v1/broadcast/close', { token: owner, body: { send_id: bc.send_id } })).status === 200
+      && (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((b) => b.send_id === bc.send_id).open === false);
+
+    section('後台 — 許願報價');
+    const aw = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: 'Combi 吸乳器', quantity: 1 } })).json.data;
+    check('店主看得到待處理的許願',
+      (await api('GET', '/api/v1/wishes/admin-list', { token: owner })).json.data.some((w) => w.wish_id === aw.wish_id));
+    const qw = (await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: aw.wish_id, jpy_taxed: 2519 } })).json.data;
+    check('報價 → 已報價、查表 890', qw.wish_status === '已報價' && Number(qw.quote_twd) === 890, qw);
+    check('報價後客人就能加入購物車',
+      (await B('POST', '/api/v1/wishes/to-cart', { body: { wish_id: aw.wish_id } })).json.data.cart_item.price_twd === 890);
+    check('已下單的許願不能再改價 → 409',
+      (await api('POST', '/api/v1/wishes/quote', { token: owner, body: { wish_id: aw.wish_id, quote_twd: 1 } })).status === 409);
+
+    section('後台 — 訂單報價（0 元品項不能漏）');
+    const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
+    check('沒填日幣的文字品項價格為 null', nx.price_twd === null);
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [nx.cart_id] } });
+    const qo = (await B('POST', '/api/v1/orders/checkout',
+      { body: { cart_ids: [nx.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    check('結帳成立，但這一項以 0 元入單', qo.items[0].unit_price_twd === 0 && qo.total_twd === 70, qo);
+    const blocked = await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: qo.order_id, to: '已報價' } });
+    check('有 0 元品項時，直接轉「已報價」被擋 → 409 UNPRICED_ITEMS', blocked.json.error?.code === 'UNPRICED_ITEMS', blocked.json);
+    check('店主強制轉換也一樣擋',
+      (await api('POST', '/api/v1/orders/transition',
+        { token: owner, body: { order_id: qo.order_id, to: '已報價', force: true, reason: 'x' } })).json.error?.code === 'UNPRICED_ITEMS');
+    check('理貨不能報價', (await api('POST', '/api/v1/orders/quote',
+      { token: packer, body: { order_id: qo.order_id, items: [] } })).status === 403);
+    const quoted = (await api('POST', '/api/v1/orders/quote', { token: helper,
+      body: { order_id: qo.order_id, items: [{ item_id: qo.items[0].item_id, jpy_taxed: 979 }] } })).json.data;
+    check('報價 → 查表 350 × 2 + 運費 70 = 770，並轉為已報價',
+      quoted.status === '已報價' && quoted.total_twd === 770 && quoted.items[0].unit_price_twd === 350, quoted);
+    const adminView = (await api('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`, { token: owner })).json.data;
+    check('店主在後台看得到客人從前台下的品項（沒有 SKU 也不會消失）',
+      adminView.items.length === 1 && adminView.items[0].name_zh === '藥妝店限定面膜', adminView.items);
+    check('客人看到的訂單同步更新',
+      (await B('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`)).json.data.total_twd === 770);
+
+    section('後台 — 對帳單');
+    check('沒帶身分不能結算 → 401',
+      (await api('POST', '/api/v1/statements/generate', { body: {} })).status === 401);
+    check('小幫手不能結算',
+      (await api('POST', '/api/v1/statements/generate', { token: helper, body: {} })).status === 401);
+    const gen = (await api('POST', '/api/v1/statements/generate', { token: owner, body: { line_user_id: 'U_buyer1' } })).json.data;
+    const mine1 = gen.created.find((c) => c.line_user_id === 'U_buyer1');
+    check('結算：已報價的單歸進一張新對帳單', !!mine1 && mine1.total_amount >= 770, gen);
+    check('重跑不會重複開單',
+      (await api('POST', '/api/v1/statements/generate', { token: owner, body: { line_user_id: 'U_buyer1' } })).json.data.created.length === 0);
+    check('n8n 帶機器金鑰也能結算（排程用）',
+      (await api('POST', '/api/v1/statements/generate',
+        { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { line_user_id: 'U_nobody' } })).status === 200);
+    const cst = (await B('GET', '/api/v1/statements/list')).json.data.statements.find((x) => x.statement_id === mine1.statement_id);
+    check('客人看得到這張對帳單與底下的訂單',
+      !!cst && cst.payment_status === '待付款' && cst.order_ids.includes(qo.order_id), cst);
+    const pend = (await api('POST', '/api/v1/notify/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 50 } })).json.data.notifications;
+    check('對帳單通知已排入佇列，等 n8n 發 LINE',
+      pend.some((n) => n.kind === 'statement' && n.statement_id === mine1.statement_id), pend.map((n) => n.kind));
+    check('金額對不上不自動認列 → 409',
+      (await api('POST', '/api/v1/statements/reconcile',
+        { token: owner, body: { statement_id: mine1.statement_id, amount_twd: 1 } })).json.error?.code === 'AMOUNT_MISMATCH');
+    const rec = (await api('POST', '/api/v1/statements/reconcile',
+      { token: owner, body: { statement_id: mine1.statement_id, amount_twd: mine1.total_amount } })).json.data;
+    check('核帳 → 對帳單已核對', rec.payment_status === '已核對', rec);
+    check('底下的訂單一起變成已付款',
+      (await B('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`)).json.data.paid === true);
+
+    section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
+    const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
+    const shot = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_abcd1234_202609231100001.jpg', data: jpgUrl } })).json.data;
+    check('照片存進 Storage 的私有空間，依客人分資料夾',
+      storageMock.objects.has('cart/U_buyer1/ocr_temp_abcd1234_202609231100001.jpg'), [...storageMock.objects.keys()]);
+    check('上傳時帶的是伺服器端的 service key',
+      storageMock.requests.some((r) => r.url.includes('/object/cart-images/') && r.apikey === 'smoke-supabase-secret'));
+    check('客人拿到的是短效簽名網址（15 分鐘），不是永久連結',
+      typeof shot.image_url === 'string' && shot.image_url.startsWith(STORAGE_MOCK_URL + '/storage/v1/object/sign/')
+      && storageMock.lastExpiresIn === 900, shot.image_url);
+    check('回應裡不含 service key', !JSON.stringify(shot).includes('smoke-supabase-secret'));
+
+    const before = (await B('GET', '/api/v1/cart/list')).json.data.length;
+    const upFail = await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_failfail_202609231100002.jpg', data: jpgUrl } });
+    check('Storage 掛了 → 503 讓前台重試，而且不會多出一筆卡住的品項',
+      upFail.status === 503 && upFail.json.error.code === 'UPLOAD_FAILED'
+      && (await B('GET', '/api/v1/cart/list')).json.data.length === before, upFail.json);
+    const noImg = (await B('POST', '/api/v1/cart/add-image',
+      { body: { file_name: 'ocr_temp_abcd1234_202609231100003.jpg', data: 'not-a-data-url' } })).json.data;
+
+    check('n8n 沒帶金鑰領不到工作',
+      (await api('POST', '/api/v1/ocr/pending', { body: {} })).status === 401);
+    const jobs = (await api('POST', '/api/v1/ocr/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 10 } })).json.data;
+    const job = jobs.jobs.find((j) => j.cart_id === shot.cart_id);
+    check('n8n 領到剛拍的那張，附簽名網址', !!job && job.image_url.startsWith(STORAGE_MOCK_URL), jobs);
+    check('沒有圖的拍照品項不發給 n8n（辨識不了）', !jobs.jobs.some((j) => j.cart_id === noImg.cart_id));
+    const again = (await api('POST', '/api/v1/ocr/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 10 } })).json.data;
+    check('租約中，第二個 n8n 執行不會領到同一張', !again.jobs.some((j) => j.cart_id === shot.cart_id));
+
+    await api('POST', '/api/v1/ocr/result', { headers: { 'X-Notify-Token': 'smoke-notify-secret' },
+      body: { cart_id: shot.cart_id, name: 'Pigeon 奶瓶 240ml', jpy_taxed: 1089, ai_confidence: 'high' } });
+    const done = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === shot.cart_id);
+    check('辨識完成：品名、查表價（¥1089 → 400）、ocr_done 都到位',
+      done.name === 'Pigeon 奶瓶 240ml' && done.price_twd === 400 && done.ocr_done === true, done);
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [shot.cart_id] } });
+    const po = (await B('POST', '/api/v1/orders/checkout',
+      { body: { cart_ids: [shot.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const pod = (await api('GET', `/api/v1/orders/detail?order_id=${po.order_id}`, { token: owner })).json.data;
+    check('店主在後台訂單明細看得到客人拍的照片（簽名網址）',
+      typeof pod.items[0].image_url === 'string' && pod.items[0].image_url.startsWith(STORAGE_MOCK_URL), pod.items[0]);
 
     section('上線健檢 /api/v1/health');
     const hPublic = await api('GET', '/api/v1/health');
@@ -532,6 +731,7 @@ const login = async (id) =>
     failed++;
     console.error('\n測試中止：', e);
   } finally {
+    storageSrv.close();
     child.kill();
     if (harness) harness.child.kill();
   }

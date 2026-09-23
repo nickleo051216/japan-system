@@ -17,6 +17,7 @@
  */
 const db = require('../lib/db');
 const price = require('../lib/price');
+const { currentBatch } = require('../lib/batch');
 const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
 
@@ -119,7 +120,7 @@ bpost('/api/v1/me/update', async ({ me, body }) => {
 bget('/api/v1/home/summary', async ({ me }) => {
   const [shopRows, batch, priceTable, broadcast, watch, todo] = await Promise.all([
     db.all('SELECT key, value FROM settings'),
-    db.one('SELECT * FROM batches ORDER BY created_at DESC LIMIT 1'),
+    currentBatch().then((b) => (b ? db.one('SELECT * FROM batches WHERE batch = ?', b) : null)),
     price.table(),
     db.all('SELECT * FROM broadcast ORDER BY created_at DESC'),
     db.all("SELECT item_ref FROM restock_watch WHERE line_user_id = ? AND kind = 'waitlist'", me.line_user_id),

@@ -74,6 +74,10 @@ module.exports = {
   // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
   notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),
   notifyHookUrl: (process.env.NOTIFY_HOOK_URL || '').trim(),
+  // Supabase Storage：客人照片的私有存放處。service key 只在伺服器端。
+  supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
+  supabaseServiceKey: (process.env.SUPABASE_SERVICE_KEY || '').trim(),
+  supabaseBucket: (process.env.SUPABASE_BUCKET || 'cart-images').trim(),
   // 綠界（ECPay）。HashKey／HashIV 只在伺服器端，永遠不進 API 回應或前端。
   // 沒設就不開放線上刷卡（回 503），不會退化成不驗簽。
   ecpayMerchantId: (process.env.ECPAY_MERCHANT_ID || '').trim(),

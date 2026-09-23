@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const db = require('../lib/db');
 const config = require('../lib/config');
 const state = require('../lib/state');
+const { currentBatch } = require('../lib/batch');
 const { ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const { orderShape, statementShape, bget, bpost, err, num, int } = require('./buyer');
@@ -73,12 +74,12 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
 
   const orderId = await db.tx(async () => {
     const id = await nextOrderId(db);
-    const batch = await db.one('SELECT batch FROM batches ORDER BY created_at DESC LIMIT 1');
+    const batch = await currentBatch();
     await db.run(
       `INSERT INTO orders (order_id, line_user_id, batch, status, payment_status, total_twd,
                            ship_fee_twd, pickup, pickup_addr, invoice, note, created_at)
        VALUES (?,?,?,'待確認','待付款',?,?,?,?,?,?,?)`,
-      id, me.line_user_id, batch ? batch.batch : null, subtotal + fee, fee,
+      id, me.line_user_id, batch, subtotal + fee, fee,
       pickup, pickupAddr, invoice, body.note || null, now());
     for (const i of items) {
       await db.run(
@@ -146,12 +147,13 @@ bget('/api/v1/shipments/track', async ({ me, query }) => {
   const order = await myOrder(String(query.order_id || ''), me.line_user_id);
   const rows = await db.all(
     'SELECT * FROM shipments WHERE order_id = ? ORDER BY shipped_at', order.order_id);
+  // 欄位名以 004_japan_compat 之後為準：ts，不是 001 原本的 at。
   const delivered = await db.one(
-    "SELECT changed_at FROM order_status_log WHERE order_id = ? AND to_status = '已送達' ORDER BY changed_at DESC LIMIT 1",
+    "SELECT ts FROM order_status_log WHERE order_id = ? AND to_status = '已送達' ORDER BY ts DESC LIMIT 1",
     order.order_id);
   return ok(rows.map((s) => {
     const events = [{ ts: s.shipped_at, status: '已出貨', place: s.carrier || '' }];
-    if (delivered) events.push({ ts: delivered.changed_at, status: '已送達', place: order.pickup || '' });
+    if (delivered) events.push({ ts: delivered.ts, status: '已送達', place: order.pickup || '' });
     return {
       shipment_id: s.shipment_id, carrier: s.carrier, tracking_no: s.tracking_no,
       shipped_at: s.shipped_at, eta: s.eta, events,
