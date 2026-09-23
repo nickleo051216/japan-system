@@ -216,4 +216,13 @@ tr:last-child td { border-bottom: 0; }
   .modal .sheet { max-height: 92vh; border-radius: 14px 14px 10px 10px; }
   .login { padding: 16px; }
   button.btn { min-height: 38px; }
+  /* 窄螢幕上一列一張小卡：時間與結果在上，誰和做了什麼在中間，說明在最下面。 */
+  table.stack thead { display: none; }
+  table.stack tr { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 11px 14px; border-bottom: 1px solid #f0ede8; }
+  table.stack td { display: block; border: 0; padding: 0; white-space: normal !important; }
+  table.stack td:nth-child(1) { grid-column: 1; grid-row: 1; }
+  table.stack td:nth-child(4) { grid-column: 2; grid-row: 1; }
+  table.stack td:nth-child(2), table.stack td:nth-child(3), table.stack td:nth-child(5) { grid-column: 1 / -1; }
+  table.stack td:nth-child(3) { font-weight: 600; }
+  table.stack td.empty { grid-column: 1 / -1; }
 }

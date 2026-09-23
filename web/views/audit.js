@@ -36,7 +36,7 @@ export async function render(root) {
       '這裡記下後台每一個會影響訂單、金額、權限的操作。「例外放行」是有人填了原因、跳過系統的檢查；「被擋下」是系統拒絕了這次操作。'))));
 
   root.append(h('div', { class: 'card' }, filters,
-    h('div', { class: 'table-wrap' }, h('table', {},
+    h('div', { class: 'table-wrap' }, h('table', { class: 'stack' },
       h('thead', {}, h('tr', {}, h('th', {}, '時間'), h('th', {}, '誰'), h('th', {}, '做了什麼'), h('th', {}, '結果'), h('th', {}, '說明'))),
       tbody))));
 
@@ -60,7 +60,7 @@ export async function render(root) {
         h('td', { class: 'small', style: 'white-space:nowrap' }, x.who),
         h('td', {}, x.what),
         h('td', {}, h('span', { class: 'tag ' + x.result.tone }, x.result.text)),
-        h('td', { class: 'small muted' }, x.note || '—')));
+        h('td', { class: 'small muted' }, x.note || '')));
     }
 
     shipBody.innerHTML = '';
