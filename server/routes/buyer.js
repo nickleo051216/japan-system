@@ -142,6 +142,7 @@ bget('/api/v1/home/summary', async ({ me }) => {
     shop: {
       name: s.shop_name || '', bank_name: s.bank_name || '', bank_code: s.bank_code || '',
       bank_account: s.bank_account || '',
+      bank_holder: s.bank_holder || '',
       // 合約 v1.1 #5：缺值時前台改引導信用卡／ATM，所以直接給一個旗標，
       // 不要逼前台去判斷空字串。
       bank_ready: !!(s.bank_name && s.bank_code && s.bank_account),

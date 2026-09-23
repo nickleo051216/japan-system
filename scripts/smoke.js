@@ -758,6 +758,8 @@ const login = async (id) =>
       { body: { cart_ids: [feeItem.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
     check('改了運費，結帳實收也跟著變', feeOrder.ship_fee_twd === 90, feeOrder.ship_fee_twd);
     await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_fee_cvs: '', ship_fee_home: '' } });
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { bank_holder: '冉冉國際企業有限公司' } });
+    check('首頁回傳收款戶名', (await B('GET', '/api/v1/home/summary')).json.data.shop.bank_holder === '冉冉國際企業有限公司');
     check('清空運費回到暫定值',
       (await B('GET', '/api/v1/home/summary')).json.data.shop.ship_fee.cvs === 70);
 

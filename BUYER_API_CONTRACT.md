@@ -122,7 +122,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 3. `GET /home/summary`
 ```json
-{ "shop": { "name", "bank_name", "bank_code", "bank_account", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
+{ "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
             "ship_fee": { "cvs": 70, "home": 120 } },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
@@ -132,6 +132,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ```
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
+- `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
 
 ### 5. `POST /cart/add-text`

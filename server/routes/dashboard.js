@@ -149,6 +149,8 @@ const SHOP_FIELDS = [
     hint: '例：華南銀行' },
   { key: 'bank_code',             label: '銀行代碼',        type: 'digits', len: 3,  required: true,
     hint: '三碼數字' },
+  { key: 'bank_holder',           label: '收款戶名',        type: 'text',   max: 40,
+    hint: '客人匯款時看到的戶名；留空就不顯示' },
   { key: 'bank_account',          label: '收款帳號',        type: 'digits', minLen: 5, maxLen: 16, required: true,
     hint: '只有店主看得到，不會寫進稽核紀錄' },
   { key: 'payment_deadline_days', label: '付款期限（天）',   type: 'int',    lo: 1, hi: 30, required: true,
