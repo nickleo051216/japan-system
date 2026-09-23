@@ -28,7 +28,9 @@ async function resolve(token) {
   let claims;
   try { claims = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch { return null; }
   if (!claims.exp || claims.exp < Date.now()) return null;
-  return await db.one('SELECT line_user_id, nickname, display_name, role FROM members WHERE line_user_id = ?', claims.sub);
+  // 整列都要。actor 代表「這位使用者」，半截的資料會讓下游默默拿到 undefined ——
+  // 例如結帳時取不到取貨門市，訂單就會帶著空地址成立。
+  return await db.one('SELECT * FROM members WHERE line_user_id = ?', claims.sub);
 }
 
 /** Capability matrix — README F-21. Server-side source of truth. */

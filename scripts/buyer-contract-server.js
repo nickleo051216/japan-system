@@ -94,6 +94,9 @@ const stmtOf = (sid) => { const s = S.statements.find((x) => x.statement_id === 
 const pub = (b) => ({ ...b, open: b.remaining > 0 && new Date(b.deadline_at) > new Date(), waitlisted: S.waitlist.has(b.send_id) });
 
 const routes = {
+  // ---- 公開：健康檢查（不需 token）----
+  'GET /api/v1/health': () => ok({ status: 'ok', checked_at: now(), db: { up: true, latency_ms: 12 }, detail: null }),
+
   // ---- 身分與首頁 ----
   'GET /api/v1/me/profile': () => ok(S.me),
   'POST /api/v1/me/update': ({ body }) => {
@@ -124,11 +127,18 @@ const routes = {
   },
   'POST /api/v1/cart/add-image': ({ body }) => {
     need(body.file_name && body.data, 'BAD_IMAGE', '沒有收到圖片');
-    need(/^ocr_temp_[0-9a-f]{8}_\d{15}\.(jpg|png|webp|heic)$/.test(body.file_name), 'BAD_FILE_NAME', '檔名格式不符');
+    need(/^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$/.test(body.file_name), 'BAD_FILE_NAME', '檔名格式不符');
     const c = { cart_id: id('C'), source: 'image', ref: body.file_name, name: '辨識中的商品', name_ja: '', jpy_taxed: null,
       price_twd: null, qty: 1, ai_confidence: 'low', status: 'pending', note: 'AI 辨識中，完成後自動更新',
       file_name: body.file_name, image_url: null, created_at: now() };
-    S.cart.push(c); return ok(c);
+    S.cart.push(c);
+    // 辨識是非同步的：完成後由前台輪詢 /cart/list 取回（參考實作以 OCR_DELAY_MS 模擬）
+    setTimeout(() => {
+      if (c.status === 'removed') return;
+      c.name = 'EDWIN 嬰兒牛仔吊帶褲'; c.name_ja = 'EDWIN ベビーデニムオーバーオール';
+      c.jpy_taxed = 2519; c.price_twd = twdOf(2519); c.ai_confidence = 'high'; c.note = '';
+    }, Number(process.env.OCR_DELAY_MS || 5000));
+    return ok(c);
   },
   'POST /api/v1/cart/confirm': ({ body }) => {
     const ids = Array.isArray(body.cart_ids) ? body.cart_ids : [];
@@ -313,7 +323,7 @@ function handler(req, res) {
   if (!fn) return send(404, { ok: false, data: null, error: { code: 'NOT_FOUND', message: '找不到這個 API' } });
   (async () => {
     const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!auth) return send(401, { ok: false, data: null, error: { code: 'UNAUTHENTICATED', message: '尚未登入' } });
+    if (!auth && url.pathname !== '/api/v1/health') return send(401, { ok: false, data: null, error: { code: 'UNAUTHENTICATED', message: '尚未登入' } });
     const key = req.headers['idempotency-key'];
     if (req.method === 'POST' && key && idem.has(key)) return send(200, idem.get(key));
     const body = req.method === 'POST' ? await readJson(req) : {};

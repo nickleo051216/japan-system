@@ -7,6 +7,8 @@ const { STATUS, transition } = require('../lib/state');
 const { uid, now } = require('../lib/ids');
 const { round2 } = require('../lib/money');
 const notify = require('../lib/notify');
+// 買家合約的資料形狀。共用同一份，後台改欄位時買家端不會悄悄跟著跑掉。
+const buyerShape = require('./buyer');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 
@@ -31,6 +33,15 @@ async function procurementCoverage(orderId) {
 
 // F-03 訂單查詢 — a buyer only ever sees their own orders.
 get('/api/v1/orders/list', async ({ actor, query }) => {
+  // 買家看到的是買家合約的形狀（BUYER_API_CONTRACT §3 Order），後台看到的是
+  // 後台的形狀。同一條路徑兩種輸出是刻意的 —— 合約把它列為「既有端點」，
+  // 而這裡本來就已經依角色過濾了，再開一支只會多一份權限判斷要維護。
+  if (actor.role === 'buyer') {
+    const rows = await db.all(
+      'SELECT * FROM orders WHERE line_user_id = ? ORDER BY created_at DESC, order_id DESC',
+      actor.line_user_id);
+    return ok(await Promise.all(rows.map(buyerShape.orderShape)));
+  }
   const where = [];
   const params = [];
   if (actor.role === 'buyer') { where.push('o.line_user_id = ?'); params.push(actor.line_user_id); }
@@ -54,6 +65,7 @@ get('/api/v1/orders/detail', async ({ actor, query }) => {
       WHERE o.order_id = ?`, query.order_id);
   if (!order) throw err('ORDER_NOT_FOUND', '查無此訂單', 404);
   if (actor.role === 'buyer' && order.line_user_id !== actor.line_user_id) throw err('FORBIDDEN', '權限不足', 403);
+  if (actor.role === 'buyer') return ok(await buyerShape.orderShape(order));
   const data = {
     ...order,
     paid: !!order.paid,

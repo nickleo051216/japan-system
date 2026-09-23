@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.1
+# 買家 API 合約（Buyer API Contract）v1.2
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -15,7 +15,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 路徑 | `/api/v1/{resource}/{action}`，只用 GET（讀）與 POST（寫） |
 | 網域 | 前台部署在 `japan-front-end-system.vercel.app`，以相對路徑呼叫 `/api/v1`，由前台的 `vercel.json` rewrites **反向代理**到後端。瀏覽器視為同網域，**後端不需開 CORS** |
 | 回應 | 一律 `{ "ok": bool, "data": any, "error": { "code", "message" } \| null }` |
-| 身分 | `Authorization: Bearer <liff.getIDToken()>`，後端向 LINE 驗證後取 `sub` 當 `line_user_id`。**前端不傳 userId** |
+| 身分 | `Authorization: Bearer <liff.getIDToken()>`（`/health` 除外，公開），後端向 LINE 驗證後取 `sub` 當 `line_user_id`。**前端不傳 userId** |
 | 冪等 | 所有 POST 帶 `Idempotency-Key`；同一把 key 重送回傳第一次的結果，不重複執行 |
 | 錯誤 | `message` 是可直接顯示給客人的繁中句子；5xx 一律「系統忙碌中，稍後再試」，不外露技術細節 |
 | 時間 | ISO 8601 字串（UTC） |
@@ -34,7 +34,12 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ---
 
-## 2. 端點一覽（26 個）
+## 2. 端點一覽（27 個）
+
+| # | 方法 | 路徑 | 用途 | 備註 |
+|---|---|---|---|---|
+| 0 | GET | `/health` | 後端健康狀態 | **公開、不需 token**。回 `{ status: "ok\|degraded\|down", db:{up,latency_ms}, detail }`；前台啟動時先打，`down` 顯示維護畫面不再打其他 API。`detail` 對外應為 `null` |
+
 
 | # | 方法 | 路徑 | 用途 | 對應資料表 |
 |---|---|---|---|---|
@@ -130,11 +135,19 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 5. `POST /cart/add-text`
 請求 `{ name, jpy_taxed?, qty, note?, source?: "reorder" }` → 回 CartItem（pending）
 
+### 0. `GET /health`
+公開端點。前台在 `boot()` 第一步呼叫；`status==="down"` 時顯示維護畫面並中止其餘請求。
+**`detail` 對外必須為 `null`**——它會揭露「後台密碼未設定」「尚無成員」等內部狀態。
+
 ### 6. `POST /cart/add-image`
 請求 `{ file_name, orig_name, mime, data }`（data 為 base64 data URL）
 - `file_name` 必須符合 `^ocr_temp_[0-9a-f]{8}_\d{15}\.(jpg|png|webp|heic)$`（userId 末 8 碼＋15 碼時間戳），否則 `BAD_FILE_NAME`
 - 後端存 Drive、交給 n8n 辨識；**先回 pending、低信心、價格 null 的 CartItem**，辨識完成由 n8n 回寫
-- `[待確認]` 辨識完成後前台如何得知（輪詢 `/cart/list` 或 LINE 推播）
+- **辨識完成的通知方式：輪詢（已定案 2026-09-22，前端已實作）**
+  - 前台在收到回應後，若 `price_twd == null`，每 **4 秒**重打 `GET /cart/list`，最多 **15 次（約 1 分鐘）**
+  - 判定完成：`price_twd != null` 或 `ai_confidence != "low"`
+  - 頁面切到背景時暫停輪詢；品項被移除或已下單則停止；超過上限提示客人自行填寫，不再輪詢
+  - 後端不需要推播管線。若後端願意多回一個布林欄位 `ocr_done`，前台會優先採用（非必要）
 
 ### 7. `POST /cart/confirm`
 請求 `{ cart_ids: [] }` → 回 `{ confirmed: [] }`（只有 pending 的會被改）
@@ -223,7 +236,16 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 
 ---
 
-## 6. v1.1 變更（2026-09-22）
+## 6. v1.2 變更（2026-09-22 晚）
+
+| # | 變更 | 後端影響 |
+|---|---|---|
+| 1 | 新增 `GET /health`（公開） | 已上線。請確認 `detail` 對外收斂為 `null` |
+| 2 | 拍照辨識採輪詢，規格見第 4 節第 6 項 | 不需推播管線；辨識完成時把 `price_twd`、`ai_confidence`、`name` 寫回該筆 cart_item 即可 |
+| 3 | 參考實作新增 `/health` 與「延遲 5 秒完成辨識」模擬（可用 `OCR_DELAY_MS` 調整） | 便於雙方測輪詢 |
+| 4 | 檔名規則放寬為 `ocr_temp_[0-9a-z]{8}_\d{15}.(jpg\|png\|webp\|heic)` | 原本只收十六進位，示範帳號會被擋 |
+
+## 7. v1.1 變更（2026-09-22）
 
 | # | 變更 | 後端影響 |
 |---|---|---|
@@ -233,11 +255,11 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | 4 | 訂單 `items` 可為空陣列 | 前台會顯示「品項整理中」，不會當機 |
 | 5 | `home.shop.bank_account` 為空時，前台顯示「匯款帳號暫時無法顯示」並引導改用信用卡／ATM | 仍建議後端在缺值時於 `/home/summary` 回 `shop.bank_ready: false`，方便日後前台判斷 |
 
-## 7. 待確認事項
+## 8. 待確認事項
 
 | # | 事項 | 影響端點 |
 |---|---|---|
-| 1 | 拍照辨識完成後前台如何得知（輪詢或推播） | 6 |
+| 1 | ~~拍照辨識完成通知方式~~ **已定案：輪詢**，前端已實作 | 6 |
 | 2 | 台灣端運費改由 settings 讀取 | 18 |
 | 3 | 物流貨態來源（物流商 API 或人工） | 23 |
 | 4 | 綠界付款回調端點與付款後前台返回頁 | 26 |
