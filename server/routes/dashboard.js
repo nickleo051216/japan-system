@@ -105,7 +105,12 @@ get('/api/v1/settings/fx', async ({ actor }) => {
   auth.requireCap(actor, 'order.read');
   return ok({
     fx_jpy_twd: await money.currentFxRate(),
-    history: await db.all('SELECT * FROM fx_history ORDER BY changed_at DESC LIMIT 50'),
+    // 變更者給「稱呼（會員編號）」，畫面上不出現 LINE userId。
+    history: await db.all(
+      `SELECT f.*, CASE WHEN m.line_user_id IS NULL THEN f.changed_by
+                        ELSE m.nickname || '（' || m.member_no || '）' END AS changed_by_label
+         FROM fx_history f LEFT JOIN members m ON m.line_user_id = f.changed_by
+        ORDER BY f.changed_at DESC LIMIT 50`),
   });
 });
 
@@ -252,7 +257,7 @@ get('/api/v1/products/list', async ({ actor, query }) => {
 
 get('/api/v1/members/list', async ({ actor }) => {
   auth.requireCap(actor, 'order.read');
-  return ok(await db.all('SELECT line_user_id, nickname, display_name, role, bound_at FROM members ORDER BY role, nickname'));
+  return ok(await db.all('SELECT line_user_id, member_no, nickname, display_name, role, bound_at FROM members ORDER BY role, nickname'));
 });
 
 // 健檢要知道「哪幾個必填欄位還空著」，但不能碰值 —— 只借欄位定義出去。

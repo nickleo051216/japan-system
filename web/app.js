@@ -306,7 +306,7 @@ function renderPersonas(pw, personas) {
               },
             },
               h('div', { class: 'avatar' }, p.nickname.slice(0, 1)),
-              h('div', {}, h('div', {}, p.nickname), h('div', { class: 'tiny muted' }, `${roleLabel(p.role)} · ${p.line_user_id}`)),
+              h('div', {}, h('div', {}, p.nickname), h('div', { class: 'tiny muted' }, `${roleLabel(p.role)}${p.member_no ? ' · ' + p.member_no : ''}`)),
               h('div', { class: 'spacer', style: 'flex:1' }),
               h('span', { class: 'tag' }, roleLabel(p.role)))),
             h('button', { class: 'btn', onClick: () => renderLogin() }, '返回'))))));

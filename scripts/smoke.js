@@ -357,6 +357,8 @@ const login = async (id) =>
     check('密碼正確才列出人員', pl.status === 200 && pl.json.data.length > 0);
     check('後台登入名單只列員工，不列客人', pl.status === 200 && pl.json.data.every((p) => p.role !== 'buyer'),
       pl.json.data.map((p) => p.role));
+    check('後台登入名單帶會員編號（畫面上顯示它，不顯示 LINE userId）',
+      pl.json.data.every((p) => /^HB-\d{5,}$/.test(p.member_no)), pl.json.data.map((p) => p.member_no));
     check('沒帶密碼不發 token',
       (await api('POST', '/api/v1/auth/login', { body: { line_user_id: 'U_owner' } })).status === 401);
     check('密碼錯了不發 token',
@@ -827,6 +829,23 @@ const login = async (id) =>
     const mAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
     check('角色異動都記在稽核軌跡', mAudit.includes('members.role') && mAudit.includes('members.add'));
 
+    section('會員編號 HB-00001（007）');
+    const HB = /^HB-\d{5,}$/;
+    check('/me/profile 帶會員編號，照加入順序編（示範資料第 5 位 → HB-00005）',
+      (await api('GET', '/api/v1/me/profile', { token: buyer })).json.data.member_no === 'HB-00005');
+    const ml2 = (await api('GET', '/api/v1/members/admin-list', { token: owner })).json.data;
+    check('成員管理每一位都有會員編號', [...ml2.staff, ...ml2.buyers].every((m) => HB.test(m.member_no)),
+      [...ml2.staff, ...ml2.buyers].map((m) => m.member_no));
+    check('店主是第 1 號', ml2.staff.find((m) => m.line_user_id === 'U_owner').member_no === 'HB-00001');
+    check('可以用會員編號搜尋客人',
+      (await api('GET', '/api/v1/members/admin-list?q=HB-00007', { token: owner })).json.data.buyers.map((m) => m.nickname).join() === 'Kiki');
+    const added = ml2.staff.find((m) => m.line_user_id === NEW_ID);
+    check('後來新增的成員由資料庫自動配下一個號碼', added && added.member_no === 'HB-00009', added);
+    const fxH = (await api('GET', '/api/v1/settings/fx', { token: owner })).json.data.history;
+    check('匯率變更者顯示成「稱呼（會員編號）」', fxH.some((r) => r.changed_by_label === '周方（HB-00001）'), fxH.map((r) => r.changed_by_label));
+    const loginMe = (await api('POST', '/api/v1/auth/line', { body: { id_token: 'mock-idtoken:U_helper2' } })).json.data;
+    check('登入回應的 member 帶會員編號', loginMe.member.member_no === 'HB-00003', loginMe.member);
+
     section('後台 LINE 登入（白名單就是 members）');
     const cfg = (await api('GET', '/api/v1/auth/config')).json.data;
     check('登入頁拿得到 LIFF ID，兩扇門都開著（過渡期）',
@@ -845,10 +864,13 @@ const login = async (id) =>
     const buyerLine = await LL('mock-idtoken:U_buyer1');
     check('客人用 LINE 登入後台 → 403 NOT_STAFF',
       buyerLine.status === 403 && buyerLine.json.error.code === 'NOT_STAFF', buyerLine.json);
-    check('擋下時附上他自己的 LINE userId，店主才知道要加誰',
-      /U_buyer1/.test(buyerLine.json.error.message), buyerLine.json.error.message);
+    check('客人被擋下時，請他把會員編號告訴店家（不附 LINE userId）',
+      /HB-00005/.test(buyerLine.json.error.message) && !/U_buyer1/.test(buyerLine.json.error.message), buyerLine.json.error.message);
     const STRANGER = 'U' + 'b2'.repeat(16);
-    check('陌生的 LINE 帳號 → 403', (await LL(`mock-idtoken:${STRANGER}:路人`)).status === 403);
+    const strangerLine = await LL(`mock-idtoken:${STRANGER}:路人`);
+    check('陌生的 LINE 帳號 → 403，請他先開一次買家頁面（不附 LINE userId）',
+      strangerLine.status === 403 && /先用這個 LINE 帳號打開一次買家頁面/.test(strangerLine.json.error.message)
+      && !strangerLine.json.error.message.includes(STRANGER), strangerLine.json.error.message);
     check('陌生人不會被順手建成會員（後台不自動建檔）',
       (await api('GET', `/api/v1/members/admin-list?q=${STRANGER}`, { token: owner })).json.data.buyers.length === 0);
     check('假造或過期的 ID Token → 401', (await LL('eyJhbGciOi.forged.token')).status === 401);

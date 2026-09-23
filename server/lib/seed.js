@@ -206,6 +206,8 @@ const RESET_TABLES = [
 
 async function reset() {
   for (const t of RESET_TABLES) await db.run(`DELETE FROM ${t}`);
+  // 示範資料的會員編號每次都從 HB-00001 開始，驗收才對得上號。只有 --reset 會走到這裡。
+  await db.run("SELECT setval('member_no_seq', 1, false)");
   await db.run(`DELETE FROM settings WHERE key IN (${DEMO_SETTINGS.map(() => '?').join(',')})`, ...DEMO_SETTINGS);
   return seed();
 }
