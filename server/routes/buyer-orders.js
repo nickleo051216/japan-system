@@ -147,12 +147,13 @@ bget('/api/v1/shipments/track', async ({ me, query }) => {
   const order = await myOrder(String(query.order_id || ''), me.line_user_id);
   const rows = await db.all(
     'SELECT * FROM shipments WHERE order_id = ? ORDER BY shipped_at', order.order_id);
+  // 欄位名以 004_japan_compat 之後為準：ts，不是 001 原本的 at。
   const delivered = await db.one(
-    "SELECT changed_at FROM order_status_log WHERE order_id = ? AND to_status = '已送達' ORDER BY changed_at DESC LIMIT 1",
+    "SELECT ts FROM order_status_log WHERE order_id = ? AND to_status = '已送達' ORDER BY ts DESC LIMIT 1",
     order.order_id);
   return ok(rows.map((s) => {
     const events = [{ ts: s.shipped_at, status: '已出貨', place: s.carrier || '' }];
-    if (delivered) events.push({ ts: delivered.changed_at, status: '已送達', place: order.pickup || '' });
+    if (delivered) events.push({ ts: delivered.ts, status: '已送達', place: order.pickup || '' });
     return {
       shipment_id: s.shipment_id, carrier: s.carrier, tracking_no: s.tracking_no,
       shipped_at: s.shipped_at, eta: s.eta, events,

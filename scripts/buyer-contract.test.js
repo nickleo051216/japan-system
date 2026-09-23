@@ -1,6 +1,7 @@
 // 合約測試：之後把 BASE 換成真正的 japan-system，同一份測試再跑一次
 const BASE = process.env.BASE || 'http://127.0.0.1:4011/api/v1';
-const H = { 'Content-Type':'application/json', Authorization:'Bearer test-idtoken' };
+// 對參考實作用 test-idtoken；對真後端由 scripts/contract-run.js 注入一張真的 token。
+const H = { 'Content-Type':'application/json', Authorization:'Bearer ' + (process.env.BUYER_TOKEN || 'test-idtoken') };
 let pass=0, fail=0;
 const ok=(n,c,d='')=>{c?pass++:fail++;console.log(`  ${c?'✓':'✗'} ${n}${d?' — '+d:''}`)};
 const call=async(m,p,b,extra={})=>{const r=await fetch(BASE+p,{method:m,headers:{...H,...extra},body:b?JSON.stringify(b):undefined});

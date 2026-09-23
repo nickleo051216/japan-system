@@ -514,6 +514,21 @@ const login = async (id) =>
     check('未出貨不能按「我已收到」→ 409 ILLEGAL_TRANSITION',
       (await B('POST', '/api/v1/orders/received', { body: { order_id: order.order_id } }))
         .json.error?.code === 'ILLEGAL_TRANSITION');
+    // 走完一張單：已報價 → 已到貨 → 出貨 → 客人按已收到 → 查物流。
+    // /shipments/track 在已送達時要讀狀態紀錄，欄位名錯過一次（changed_at），正式站回 500。
+    const tr = (await B('POST', '/api/v1/orders/checkout', { body: {
+      cart_ids: [(await B('POST', '/api/v1/cart/update', { body: {
+        cart_id: (await B('POST', '/api/v1/cart/add-text', { body: { name: '物流測試品', jpy_taxed: 500, qty: 1 } })).json.data.cart_id,
+        name: '物流測試品' } })).json.data.cart_id],
+      pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: tr.order_id, to: '已報價' } });
+    await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: tr.order_id, to: '已到貨' } });
+    await api('POST', '/api/v1/orders/ship', { token: owner, body: { order_id: tr.order_id, override_reason: '測試', verified_by_scan: false } });
+    check('已出貨 → 客人按「我已收到」→ 已送達',
+      (await B('POST', '/api/v1/orders/received', { body: { order_id: tr.order_id } })).json.data?.status === '已送達');
+    const trk = await B('GET', `/api/v1/shipments/track?order_id=${tr.order_id}`);
+    check('已送達的單查物流：含出貨與送達兩筆事件',
+      trk.status === 200 && trk.json.data[0].events.map((e) => e.status).join('>') === '已出貨>已送達', trk.json);
     check('別人的訂單一律 404',
       (await B('POST', '/api/v1/orders/received', { body: { order_id: 'HB2608-005' } })).status === 404);
 
