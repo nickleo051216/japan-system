@@ -52,6 +52,8 @@ const cartShape = (r) => ({
 });
 
 const memberShape = (m) => ({
+  // 會員編號是客人看得到、可以報給店家的號碼；line_user_id 只在系統內部用。
+  member_no: m.member_no || null,
   line_user_id: m.line_user_id, nickname: m.nickname, display_name: m.display_name,
   status: m.status, role: m.role, phone: m.phone,
   cvs_brand: m.cvs_brand, cvs_store_id: m.cvs_store_id, cvs_store_name: m.cvs_store_name,

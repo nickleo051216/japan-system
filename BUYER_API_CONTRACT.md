@@ -111,7 +111,8 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ## 4. 逐項規格
 
 ### 1. `GET /me/profile`
-回 members 一列：`line_user_id nickname display_name status role phone cvs_brand cvs_store_id cvs_store_name cvs_addr home_addr carrier shout_drops bound_at created_at`
+回 members 一列：`member_no line_user_id nickname display_name status role phone cvs_brand cvs_store_id cvs_store_name cvs_addr home_addr carrier shout_drops bound_at created_at`
+- `member_no` = 會員編號，格式 `HB-` 加 5 位數字（例：`HB-00012`），照加入順序由資料庫自動配號，超過 99999 照樣往上長（`HB-100000`）。**畫面上顯示會員編號，不要顯示 `line_user_id`**（2026-09-24 新增）
 
 ### 2. `POST /me/update`
 可更新欄位：`nickname phone cvs_brand cvs_store_id cvs_store_name cvs_addr home_addr carrier`（未帶的不動）

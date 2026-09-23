@@ -47,6 +47,7 @@ const REQUIRED_TABLES = [
  */
 const REQUIRED_COLUMNS = [
   { table: 'cart_items', column: 'ocr_attempts', migration: '006_ocr_pipeline.sql', feature: '拍照辨識領不到工作' },
+  { table: 'members', column: 'member_no', migration: '007_member_no.sql', feature: '會員編號與後台成員管理' },
 ];
 
 /** 值得數一數的表。數量本身就是診斷：規則表空了，每一次狀態轉換都會失敗。 */

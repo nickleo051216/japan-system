@@ -31,7 +31,12 @@ export async function render(root) {
       h('thead', {}, h('tr', {}, h('th', {}, '時間'), h('th', {}, '操作者'), h('th', {}, '動作'), h('th', {}, '對象'), h('th', {}, '結果'), h('th', {}, '細節'))),
       tbody))));
 
-  const nick = (id) => { const m = members.find((x) => x.line_user_id === id); return m ? m.nickname : (id || '—'); };
+  // 人一律顯示成「稱呼（會員編號）」，畫面上不出現 LINE userId。
+  const label = (m) => `${m.nickname}（${m.member_no || roleLabel(m.role)}）`;
+  const byId = new Map(members.map((m) => [m.line_user_id, m]));
+  const nick = (id) => { const m = byId.get(id); return m ? label(m) : (id || '—'); };
+  // 細節裡若帶著某位成員的 userId（例如角色異動），也換成稱呼與會員編號。
+  const detailText = (d) => JSON.stringify(d).replace(/U[0-9a-f]{32}|U_[A-Za-z0-9]+/g, (id) => (byId.has(id) ? label(byId.get(id)) : id));
 
   async function load() {
     const qs = new URLSearchParams({ limit: '300' });
@@ -57,9 +62,9 @@ export async function render(root) {
         h('td', { class: 'tiny muted' }, dt(l.ts)),
         h('td', {}, nick(l.actor)),
         h('td', { class: 'mono tiny' }, l.action),
-        h('td', { class: 'mono tiny' }, l.target || '—'),
+        h('td', { class: 'mono tiny' }, l.target ? nick(l.target) : '—'),
         h('td', {}, h('span', { class: 'tag ' + (l.result === 'ok' ? 'green' : l.result === 'warn' ? 'amber' : 'red') }, l.result)),
-        h('td', { class: 'tiny muted' }, l.detail ? JSON.stringify(l.detail) : '')));
+        h('td', { class: 'tiny muted' }, l.detail ? detailText(l.detail) : '')));
     }
   }
   await load();

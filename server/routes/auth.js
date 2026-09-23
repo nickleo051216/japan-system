@@ -115,7 +115,7 @@ get('/api/v1/auth/personas', async ({ req }) => {
   // 只列員工。客人第一次開 LINE 前台就會自動進 members —— 列出來等於把
   // 全部客人的名字與 LINE userId 交給任何知道後台密碼的人。
   return ok(await db.all(
-    "SELECT line_user_id, nickname, display_name, role FROM members WHERE role <> 'buyer' " +
+    "SELECT line_user_id, member_no, nickname, display_name, role FROM members WHERE role <> 'buyer' " +
     "ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'helper' THEN 1 ELSE 2 END, nickname"));
 });
 
@@ -129,7 +129,7 @@ post('/api/v1/auth/login', async ({ body, req }) => {
   await audit.record({ actor: member.line_user_id, action: 'auth.login', result: 'ok' });
   return ok({
     token: auth.issue(member.line_user_id),
-    member: { line_user_id: member.line_user_id, nickname: member.nickname, display_name: member.display_name, role: member.role },
+    member: { line_user_id: member.line_user_id, member_no: member.member_no, nickname: member.nickname, display_name: member.display_name, role: member.role },
     capabilities: Object.keys(auth.CAPABILITIES).filter((c) => auth.can(member, c)),
   });
 }, { idempotent: false });
@@ -160,16 +160,21 @@ post('/api/v1/auth/line', async ({ body }) => {
   if (!idToken) throw err('BAD_REQUEST', '缺少 id_token');
   const { sub } = await liff.verifyIdToken(idToken);
   const member = await db.one('SELECT * FROM members WHERE line_user_id = ?', sub);
-  if (!member || member.role === 'buyer') {
-    console.warn(`[auth] 非員工嘗試以 LINE 登入後台：${sub}`);
-    // 附上他自己的 userId：店主要用它在「成員與權限」把人加進來。這不是機密。
-    throw err('NOT_STAFF', `這個 LINE 帳號沒有後台權限。請店主到「成員與權限」加入你（你的 LINE userId：${sub}）`, 403);
+  if (!member) {
+    console.warn(`[auth] 非會員嘗試以 LINE 登入後台：${sub}`);
+    // 員工的建檔流程是「先開一次買家頁面 → 店家用名字或會員編號把角色改成員工」。
+    // 訊息不附 LINE userId：那串 33 碼不該出現在任何人看得到的畫面上。
+    throw err('NOT_STAFF', '請先用這個 LINE 帳號打開一次買家頁面，再請店家把你加入。', 403);
+  }
+  if (member.role === 'buyer') {
+    console.warn(`[auth] 客人嘗試以 LINE 登入後台：${member.member_no || sub}`);
+    throw err('NOT_STAFF', `這個 LINE 帳號沒有後台權限。請把你的會員編號 ${member.member_no} 告訴店家。`, 403);
   }
   if (member.status === '停用') throw err('FORBIDDEN', '帳號已停用，請聯絡店主', 403);
   await audit.record({ actor: member.line_user_id, action: 'auth.login', detail: { via: 'line' }, result: 'ok' });
   return ok({
     token: auth.issue(member.line_user_id),
-    member: { line_user_id: member.line_user_id, nickname: member.nickname, display_name: member.display_name, role: member.role },
+    member: { line_user_id: member.line_user_id, member_no: member.member_no, nickname: member.nickname, display_name: member.display_name, role: member.role },
     capabilities: Object.keys(auth.CAPABILITIES).filter((c) => auth.can(member, c)),
   });
 }, { idempotent: false });

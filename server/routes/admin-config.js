@@ -79,7 +79,7 @@ const STAFF_ADDABLE = ['helper', 'packer'];
 const LINE_USER_ID = /^U[0-9a-f]{32}$/;
 
 const memberShape = (m) => ({
-  line_user_id: m.line_user_id, nickname: m.nickname, display_name: m.display_name,
+  member_no: m.member_no, line_user_id: m.line_user_id, nickname: m.nickname, display_name: m.display_name,
   role: m.role, status: m.status, bound_at: m.bound_at, created_at: m.created_at,
 });
 
@@ -92,7 +92,8 @@ get('/api/v1/members/admin-list', async ({ actor, query }) => {
   const like = '%' + q.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
   const buyers = q
     ? await db.all(`SELECT * FROM members WHERE role = 'buyer'
-        AND (nickname ILIKE ? OR display_name ILIKE ? OR line_user_id ILIKE ?) ${order} LIMIT 50`, like, like, like)
+        AND (nickname ILIKE ? OR display_name ILIKE ? OR member_no ILIKE ? OR line_user_id ILIKE ?) ${order} LIMIT 50`,
+      like, like, like, like)
     : await db.all(`SELECT * FROM members WHERE role = 'buyer' ${order} LIMIT 50`);
   return ok({ staff: staff.map(memberShape), buyers: buyers.map(memberShape), me: actor.line_user_id });
 });
@@ -115,8 +116,11 @@ post('/api/v1/members/set-role', async ({ actor, body }) => {
 });
 
 /**
- * 員工還沒開過 LINE 前台、名單裡找不到時，用 LINE userId 直接加。
- * 開過前台的人請用 set-role 升級，不要重複建。
+ * 系統管理者專用：員工還沒開過 LINE 前台、名單裡找不到時，用 LINE userId 直接加。
+ *
+ * 後台畫面已經拿掉這個入口（2026-09-24）。正常流程是員工先用自己的 LINE 打開一次
+ * 買家頁面自動建檔，店家再用名字或會員編號找到人、用 set-role 改角色 —— 店家
+ * 不必接觸那串 33 碼的 userId。這支 API 留著給系統管理者處理例外情況。
  */
 post('/api/v1/members/add', async ({ actor, body }) => {
   auth.requireCap(actor, 'settings.write');

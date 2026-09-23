@@ -10,7 +10,7 @@ export async function render(root) {
 
   const rate = h('input', { type: 'number', step: '0.001', value: String(fx.fx_jpy_twd), disabled: !canWrite });
   const history = h('tbody', {}, ...fx.history.map((r) => h('tr', {},
-    h('td', { class: 'tiny muted' }, dt(r.changed_at)), h('td', {}, r.rate), h('td', { class: 'tiny muted' }, r.changed_by || '—'))));
+    h('td', { class: 'tiny muted' }, dt(r.changed_at)), h('td', {}, r.rate), h('td', { class: 'tiny muted' }, r.changed_by_label || r.changed_by || '—'))));
 
   root.append(h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h2', {}, '匯率（JPY → TWD）'), h('div', { class: 'spacer' }),
@@ -26,7 +26,7 @@ export async function render(root) {
             try {
               const r = await POST('/api/v1/settings/fx', { fx_jpy_twd: Number(rate.value) });
               toast(`匯率已由 ${r.previous} 改為 ${r.fx_jpy_twd}，既有紀錄不受影響`);
-              history.prepend(h('tr', {}, h('td', { class: 'tiny muted' }, dt(new Date().toISOString())), h('td', {}, r.fx_jpy_twd), h('td', { class: 'tiny muted' }, session.member.line_user_id)));
+              history.prepend(h('tr', {}, h('td', { class: 'tiny muted' }, dt(new Date().toISOString())), h('td', {}, r.fx_jpy_twd), h('td', { class: 'tiny muted' }, `${session.member.nickname}（${session.member.member_no || ''}）`)));
             } catch (e) { fail(e); }
           },
         }, '更新匯率') : null),
