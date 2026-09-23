@@ -1,0 +1,383 @@
+{
+  "name": "HEEEHABABY｜通知收集器（LINE OA 推播）",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## HEEEHABABY 通知收集器\n後端只負責**排隊**，這條流程負責**取件、用 LINE OA 推播、回報結果**。\n\n- 每分鐘輪詢一次；後端出貨時也會打 Webhook 叫醒它（有設 NOTIFY_HOOK_URL 的話）\n- 失敗會照 1→5→15→60→360 分鐘退避重試，6 次都失敗會變成店主待辦\n- 同一則通知重試時用同一把 X-Line-Retry-Key，LINE 不會重複推播\n\n**要選的憑證（Header Auth）**\n1. 領取通知、回報結果 → `HEEEHABABY 機器金鑰`（X-Notify-Token）\n2. LINE 推播 → `LINE OA 推播`（Authorization: Bearer …）",
+        "width": 520,
+        "height": 300
+      },
+      "id": "2d41c01f-4d57-54bd-aec5-ca5b39d94dea",
+      "name": "說明",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "15633ec2-797a-5fc9-aab8-cf2c27d43633",
+      "name": "每分鐘",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "heeehababy-notify",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "f143c613-c392-5549-8aff-cb3b28e17d34",
+      "name": "後端叫醒",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        320
+      ],
+      "webhookId": "4fe3bb37-3168-577a-b9f1-ab95fc827f79"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e58b4af5-af47-55e1-a56b-72d2e124cc44",
+              "name": "api_base",
+              "value": "https://japan-system-lilac.vercel.app",
+              "type": "string"
+            },
+            {
+              "id": "c848afe3-28bd-5a31-9b80-6639899bfffd",
+              "name": "liff_url",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0fdc44c5-9e2f-5b8e-aed8-63920a0bccdd",
+      "name": "設定",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('設定').first().json.api_base }}/api/v1/notify/pending",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"limit\": 20\n}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "ad4f9596-3fe3-5835-b6fb-c24895f97abe",
+      "name": "領取通知",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data.notifications",
+        "options": {}
+      },
+      "id": "acfbf1a0-e38f-5728-8521-60275b38bfef",
+      "name": "拆成單筆",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 把後端佇列裡的一筆通知，變成 LINE push 要的格式。\n// 文案在後端已經寫好的（出貨）直接用；對帳單在這裡組。\nconst n = $json;\nconst p = typeof n.payload === 'string' ? JSON.parse(n.payload) : (n.payload || {});\nconst liff = String($('設定').first().json.liff_url || '').trim();\n\nconst ntd = (v) => 'NT$' + Math.round(Number(v) || 0).toLocaleString('en-US');\nconst md = (iso) => {\n  const d = new Date(new Date(iso).getTime() + 8 * 3600e3); // 台灣時間\n  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;\n};\n\nlet text = null;\nif (n.kind === 'shipped') {\n  text = p.text || null;\n} else if (n.kind === 'statement') {\n  const count = (p.order_ids || []).length;\n  text = `🧾 對帳單通知\\n\\n您的本期對帳單 ${p.statement_id} 已產生\\n`\n    + `共 ${count} 筆訂單，合計 ${ntd(p.total_amount)}\\n`\n    + (p.pay_by ? `請於 ${md(p.pay_by)} 前完成付款\\n` : '')\n    + (liff ? `\\n查看明細與付款 👉 ${liff}\\n` : '')\n    + `\\n有任何問題歡迎直接回覆這則訊息 🙌`;\n} else {\n  text = p.text || null; // 之後新增的種類，只要後端附上 text 就能發\n}\n\n// LINE 的 X-Line-Retry-Key 要 UUID 格式。用 notif_id 算出固定的一組：\n// 同一則通知不論重試幾次都是同一把鑰匙，LINE 會擋掉重複的推播。\nconst h = (seed) => {\n  let x = seed >>> 0;\n  for (const ch of String(n.notif_id)) { x ^= ch.charCodeAt(0); x = Math.imul(x, 16777619) >>> 0; }\n  return x.toString(16).padStart(8, '0');\n};\nconst hex = h(2166136261) + h(84696351) + h(3735928559) + h(305419896);\nconst retryKey = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-`\n  + `${((parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;\n\nreturn { json: {\n  notif_id: n.notif_id,\n  kind: n.kind,\n  to: n.line_user_id,\n  retry_key: retryKey,\n  messages: text ? [{ type: 'text', text: text.slice(0, 5000) }] : [],\n} };\n"
+      },
+      "id": "cd4242e9-e04a-5299-805f-c20fb8e05687",
+      "name": "組訊息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "5bb38873-175e-51a9-bee2-fffa12d7f763",
+              "leftValue": "={{ $json.messages.length }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "954242f7-3ccd-5a58-82f4-d93dca03fc1a",
+      "name": "有文案？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/push",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Line-Retry-Key",
+              "value": "={{ $json.retry_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ to: $json.to, messages: $json.messages }) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "48fce360-e899-5b47-b645-3cae0f04e552",
+      "name": "LINE 推播",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        120
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// LINE 的回應 → 後端 /notify/result 要的格式。\n// 409 ＋ x-line-accepted-request-id 代表「這把 retry key 之前已經送成功」，算成功。\nconst src = $('組訊息').item.json;\nconst r = $json;\nconst status = r.statusCode;\nconst headers = r.headers || {};\nconst sent = status === 200 || (status === 409 && !!headers['x-line-accepted-request-id']);\n\nlet error = null;\nif (!sent) {\n  error = status\n    ? `LINE 回 ${status}`\n    : `連不上 LINE：${(r.error && r.error.message) || JSON.stringify(r.error || r).slice(0, 300)}`;\n}\nreturn { json: {\n  notif_id: src.notif_id,\n  ok: sent,\n  error,\n  // 額度用完時 LINE 的原話在這裡，後端會原樣存進 last_error。\n  line_response: sent ? null : (r.body ?? null),\n} };\n"
+      },
+      "id": "819b2b79-a88b-5f11-870f-c8471ade7863",
+      "name": "整理結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// 沒有文案可發：回報失敗，後端會照退避重試，重試用完變成店主儀表板上的待辦。\nreturn { json: {\n  notif_id: $json.notif_id,\n  ok: false,\n  error: `沒有可發送的文案（種類：${$json.kind}）`,\n  line_response: null,\n} };\n"
+      },
+      "id": "34df8d45-1348-5a8d-8a7e-7fe03ab7d177",
+      "name": "標記無法發送",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('設定').first().json.api_base }}/api/v1/notify/result",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ notif_id: $json.notif_id, ok: $json.ok, error: $json.error, line_response: $json.line_response }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "2515cbe3-5668-5493-a16b-751693905f6c",
+      "name": "回報結果",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        220
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "每分鐘": {
+      "main": [
+        [
+          {
+            "node": "設定",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "後端叫醒": {
+      "main": [
+        [
+          {
+            "node": "設定",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "設定": {
+      "main": [
+        [
+          {
+            "node": "領取通知",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "領取通知": {
+      "main": [
+        [
+          {
+            "node": "拆成單筆",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "拆成單筆": {
+      "main": [
+        [
+          {
+            "node": "組訊息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "組訊息": {
+      "main": [
+        [
+          {
+            "node": "有文案？",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "有文案？": {
+      "main": [
+        [
+          {
+            "node": "LINE 推播",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "標記無法發送",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LINE 推播": {
+      "main": [
+        [
+          {
+            "node": "整理結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "整理結果": {
+      "main": [
+        [
+          {
+            "node": "回報結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "標記無法發送": {
+      "main": [
+        [
+          {
+            "node": "回報結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Taipei",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  }
+}

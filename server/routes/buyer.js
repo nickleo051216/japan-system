@@ -33,6 +33,10 @@ const int = (v) => (v === null || v === undefined || v === '' ? null : parseInt(
 
 // ---- 形狀 -----------------------------------------------------------------
 
+// 同一張圖最多辨識幾次。回寫過結果、或次數用完，都算「辨識結束」——
+// 否則 AI 認不出來的圖會讓前台永遠停在「辨識中」。
+const OCR_MAX_ATTEMPTS = 5;
+
 const cartShape = (r) => ({
   cart_id: r.cart_id, source: r.source, ref: r.ref,
   name: r.name, name_ja: r.name_ja || '',
@@ -42,7 +46,8 @@ const cartShape = (r) => ({
   created_at: r.created_at,
   // 合約 v1.2 #2：前台每 4 秒輪詢等辨識結果，這個旗標讓它不必自己拼湊判斷式。
   // 非拍照來源一律 true —— 沒有什麼好等的。
-  ocr_done: r.source !== 'image' || r.price_twd !== null || r.ai_confidence !== 'low',
+  ocr_done: r.source !== 'image' || r.price_twd !== null || r.ai_confidence !== 'low'
+    || Number(r.ocr_attempts) >= OCR_MAX_ATTEMPTS,
 });
 
 const memberShape = (m) => ({
@@ -159,4 +164,4 @@ bget('/api/v1/home/summary', async ({ me }) => {
   });
 });
 
-module.exports = { cartShape, orderShape, memberShape, statementShape, bget, bpost, err, num, int };
+module.exports = { OCR_MAX_ATTEMPTS, cartShape, orderShape, memberShape, statementShape, bget, bpost, err, num, int };

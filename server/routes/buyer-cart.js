@@ -12,7 +12,7 @@ const storage = require('../lib/storage');
 const { ok, post } = require('../lib/http');
 const notify = require('../lib/notify');
 const { now, uid } = require('../lib/ids');
-const { cartShape, bget, bpost, err, num } = require('./buyer');
+const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
 const IMAGE_NAME = /^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$/i;
@@ -348,7 +348,6 @@ bpost('/api/v1/wishes/remove', async ({ me, body }) => {
 // 同一張圖最多試 5 次，壞圖不會被無限重試。沒有圖的拍照品項不發出去 ——
 // 那種品項辨識不了，前台輪詢一分鐘後會請客人自己填。
 const OCR_LEASE_MINUTES = 10;
-const OCR_MAX_ATTEMPTS = 5;
 
 post('/api/v1/ocr/pending', async ({ body, req }) => {
   notify.requireMachine(req);
@@ -397,12 +396,14 @@ post('/api/v1/ocr/result', async ({ body, req }) => {
   const confidence = ['high', 'medium', 'low'].includes(body.ai_confidence) ? body.ai_confidence : 'medium';
 
   // 售價一律後端查表換算。n8n 送來的 price_twd 不採信 —— 價格只有一個來源。
+  // 回寫過就離開佇列（次數直接記滿）：AI 說「認不出來」也是一個答案，
+  // 再送去辨識只會花錢得到同一句話，前台也會一直停在「辨識中」。
   await db.run(
     `UPDATE cart_items SET name = ?, name_ja = ?, jpy_taxed = ?, price_twd = ?,
-                           ai_confidence = ?, note = ?
+                           ai_confidence = ?, note = ?, ocr_attempts = GREATEST(ocr_attempts, ?)
       WHERE cart_id = ?`,
     name, body.name_ja || row.name_ja, jpy, await price.twdOf(jpy), confidence,
-    jpy === null ? '無法辨識金額，請自行填寫' : null, cartId);
+    jpy === null ? '無法辨識金額，請自行填寫' : null, OCR_MAX_ATTEMPTS, cartId);
   return ok({ cart_id: cartId, applied: true,
     cart_item: await shapeOne(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)) });
 }, { idempotent: false });

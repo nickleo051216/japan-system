@@ -12,7 +12,8 @@
     "reset": "node server/index.js --reset",
     "smoke": "node scripts/smoke.js",
     "test:db": "node scripts/pg-harness.mjs",
-    "test:contract": "node scripts/contract-run.js"
+    "test:contract": "node scripts/contract-run.js",
+    "test:n8n": "node scripts/n8n-workflows.test.js"
   },
   "dependencies": {
     "pg": "^8.13.1",
