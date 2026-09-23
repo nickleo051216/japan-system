@@ -12,10 +12,16 @@ const buyerShape = require('./buyer');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 
+/**
+ * LEFT JOIN 是刻意的：買家從前台下的單（文字、拍照、許願）沒有 SKU。
+ * 用 INNER JOIN 的話，這些品項會整個從後台消失 —— 店主打開訂單看到零個品項，
+ * 連報價都無從報起。沒有型錄資料時，品名與圖片退回訂單當下的快照。
+ */
 function itemsOf(orderId) {
   return db.all(
-    `SELECT oi.*, p.name_zh, p.name_local, p.brand, p.image_url
-       FROM order_items oi JOIN products p ON p.sku = oi.sku
+    `SELECT oi.*, coalesce(p.name_zh, oi.name) AS name_zh, p.name_local, p.brand,
+            coalesce(p.image_url, oi.source_image_url) AS image_url
+       FROM order_items oi LEFT JOIN products p ON p.sku = oi.sku
       WHERE oi.order_id = ? ORDER BY oi.item_id`, orderId);
 }
 

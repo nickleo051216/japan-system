@@ -68,6 +68,19 @@ async function transition(orderId, to, { actor, reason = null, force = false } =
     throw Object.assign(new Error('狀態修正必須填寫原因'), { code: 'REASON_REQUIRED', status: 400 });
   }
 
+  // 「已報價」的意思是「客人要付的錢定了」。文字、拍照下單沒有日幣價時，
+  // 品項是以 0 元入單的；讓它帶著 0 元變成已報價，總額就會少算，而且不會報錯。
+  // 所以不論從哪條路徑（報價、收款認列、手動轉換、店主強制）都在這裡擋。
+  if (to === STATUS.QUOTED) {
+    const unpriced = await db.all(
+      'SELECT name FROM order_items WHERE order_id = ? AND (unit_price_twd IS NULL OR unit_price_twd <= 0)', orderId);
+    if (unpriced.length) {
+      throw Object.assign(
+        new Error(`還有 ${unpriced.length} 個品項沒有定價（${unpriced.map((i) => i.name).slice(0, 3).join('、')}），請先報價`),
+        { code: 'UNPRICED_ITEMS', status: 409 });
+    }
+  }
+
   try {
     await db.tx(async () => {
       // Read back by trg_order_status_log; app.override by trg_order_status_check.

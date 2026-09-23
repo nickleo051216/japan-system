@@ -47,6 +47,8 @@ function boot() {
   require('./routes/buyer');
   require('./routes/buyer-cart');
   require('./routes/buyer-orders');
+  // 後台「放東西進店裡」的入口：開團、喊單、許願報價、訂單報價、對帳單。
+  require('./routes/admin-shop');
   booted = true;
   return true;
 }
@@ -76,7 +78,7 @@ async function handleApi(req, res) {
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。
     const isPublic = pathname === '/api/v1/auth/login' || pathname === '/api/v1/auth/personas'
       || pathname === '/api/v1/health' || pathname.startsWith('/api/v1/notify/')
-      || pathname === '/api/v1/ocr/result';
+      || pathname === '/api/v1/ocr/result' || pathname === '/api/v1/statements/generate';
 
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
     let actor = null;

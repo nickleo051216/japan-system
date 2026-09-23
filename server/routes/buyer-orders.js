@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const db = require('../lib/db');
 const config = require('../lib/config');
 const state = require('../lib/state');
+const { currentBatch } = require('../lib/batch');
 const { ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const { orderShape, statementShape, bget, bpost, err, num, int } = require('./buyer');
@@ -73,12 +74,12 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
 
   const orderId = await db.tx(async () => {
     const id = await nextOrderId(db);
-    const batch = await db.one('SELECT batch FROM batches ORDER BY created_at DESC LIMIT 1');
+    const batch = await currentBatch();
     await db.run(
       `INSERT INTO orders (order_id, line_user_id, batch, status, payment_status, total_twd,
                            ship_fee_twd, pickup, pickup_addr, invoice, note, created_at)
        VALUES (?,?,?,'待確認','待付款',?,?,?,?,?,?,?)`,
-      id, me.line_user_id, batch ? batch.batch : null, subtotal + fee, fee,
+      id, me.line_user_id, batch, subtotal + fee, fee,
       pickup, pickupAddr, invoice, body.note || null, now());
     for (const i of items) {
       await db.run(

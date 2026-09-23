@@ -55,9 +55,11 @@ export async function render(root, ctx) {
 
     body.append(h('table', {}, h('tbody', {}, ...o.items.map((i) => h('tr', {},
       h('td', { style: 'width:60px' }, h('img', { class: 'thumb', src: i.source_image_url || i.image_url, alt: i.name_zh })),
-      h('td', {}, i.name_zh, h('div', { class: 'tiny muted' }, `${i.sku}　${i.name_local || ''}`)),
+      h('td', {}, i.name_zh, h('div', { class: 'tiny muted' }, `${i.sku || '型錄外品項'}　${i.name_local || ''}`)),
       h('td', {}, `×${i.qty}`),
-      session.can('order.read.price') ? h('td', {}, nt(i.unit_price_twd * i.qty)) : null)))));
+      session.can('order.read.price')
+        ? h('td', {}, Number(i.unit_price_twd) > 0 ? nt(i.unit_price_twd * i.qty) : h('span', { class: 'tag red' }, '未定價'))
+        : null)))));
 
     if (!o.coverage.complete && o.coverage.total) {
       body.append(h('div', { class: 'banner warn', style: 'margin-top:12px' }, `尚有品項未採購完成：${o.coverage.missing.join('、')}`));
@@ -73,6 +75,10 @@ export async function render(root, ctx) {
       h('td', { class: 'tiny muted' }, l.reason || ''))))));
 
     const actions = [];
+    if (session.can('order.write') && ['待確認', '已報價'].includes(o.status)) {
+      actions.push({ label: o.status === '待確認' ? '報價' : '修改報價', primary: o.status === '待確認',
+        onClick: (close) => { close(); quoteDialog(o); } });
+    }
     if (session.can('order.write') && session.member.role === 'owner' && o.status === '已報價') {
       actions.push({ label: '拆單', onClick: (close) => { close(); splitDialog(o); } });
     }
@@ -80,6 +86,47 @@ export async function render(root, ctx) {
       actions.push({ label: '手動出貨（未經掃碼）', onClick: (close) => { close(); shipDialog(o); } });
     }
     modal(`訂單 ${o.order_id}`, body, actions);
+  }
+
+  /**
+   * 報價：每個品項填日幣（照價目表換算）或直接填台幣（超出級距、大型品加價時用）。
+   * 還有未定價的品項時，後端會擋住「已報價」—— 這裡只是讓店主一眼看出還差哪幾項。
+   */
+  function quoteDialog(o) {
+    const rows = o.items.map((i) => ({
+      item: i,
+      jpy: h('input', { type: 'number', min: '1', placeholder: '日幣税込', value: i.jpy_taxed ?? '', style: 'width:110px' }),
+      twd: h('input', { type: 'number', min: '1', placeholder: '或直接填台幣', value: '', style: 'width:120px' }),
+    }));
+    const fee = h('input', { type: 'number', min: '0', value: String(o.ship_fee_twd ?? 0), style: 'width:110px' });
+    const body = h('div', {},
+      h('p', { class: 'small muted', style: 'margin-top:0' },
+        '填日幣就好，售價照價目表換算。超出級距或要加大型品費用時，才直接填台幣（會蓋過日幣換算）。'),
+      h('table', {}, h('tbody', {}, ...rows.map((r) => h('tr', {},
+        h('td', {}, r.item.name_zh, h('div', { class: 'tiny muted' },
+          Number(r.item.unit_price_twd) > 0 ? `目前 ${nt(r.item.unit_price_twd)} / 件` : '尚未定價')),
+        h('td', { class: 'tiny muted' }, `×${r.item.qty}`),
+        h('td', {}, r.jpy), h('td', {}, r.twd))))),
+      h('label', { class: 'field', style: 'margin-top:12px' }, h('span', {}, '台灣端運費 (TWD)'), fee));
+    modal(`報價 ${o.order_id}`, body, [{
+      label: o.status === '待確認' ? '儲存並轉為已報價' : '儲存報價', primary: true,
+      onClick: async (close) => {
+        const items = [];
+        for (const r of rows) {
+          const e = { item_id: r.item.item_id };
+          // 只送有變動的：日幣沒改、而且原本就有價格的品項不重算，
+          // 免得把之前手動填的台幣加價蓋回查表價。
+          const priced = Number(r.item.unit_price_twd) > 0;
+          if (r.twd.value) e.unit_price_twd = Number(r.twd.value);
+          else if (r.jpy.value && (!priced || Number(r.jpy.value) !== Number(r.item.jpy_taxed))) e.jpy_taxed = Number(r.jpy.value);
+          if (Object.keys(e).length > 1) items.push(e);
+        }
+        const res = await POST('/api/v1/orders/quote', { order_id: o.order_id, items, ship_fee_twd: Number(fee.value) });
+        close();
+        toast(`${res.order_id} 報價完成：${nt(res.total_twd)}（${res.status}）`);
+        load();
+      },
+    }]);
   }
 
   function splitDialog(o) {
