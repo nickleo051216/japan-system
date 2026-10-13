@@ -18,7 +18,8 @@ const { currentBatch } = require('../lib/batch');
 const { STATUS, transition } = require('../lib/state');
 const { get, post, ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
-const { shipFee } = require('../lib/shipfee');
+const shipfee = require('../lib/shipfee');
+const drops = require('../lib/drops');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -220,23 +221,28 @@ post('/api/v1/orders/quote', async ({ actor, body }) => {
     if (twd !== null && !(twd > 0)) throw err('BAD_PRICE', `「${it.name}」的售價必須大於 0`);
     planned.push({ it, jpy, twd: twd === null ? num(it.unit_price_twd) : twd, name: e.name ? String(e.name).trim() : null });
   }
-  const shipFee = body.ship_fee_twd !== undefined ? num(body.ship_fee_twd) : num(order.ship_fee_twd);
-  if (!(shipFee >= 0)) throw err('BAD_PRICE', '運費不正確');
+  // 運費：店主有填就照填的（例如跟客人談好的優惠）；沒填（null 或不送）就照
+  // 取貨方式與滿額免運重算 —— 文字、拍照下單結帳時常是 0 元，補上價錢後才知道有沒有到門檻。
+  const manualFee = body.ship_fee_twd === undefined || body.ship_fee_twd === null || body.ship_fee_twd === ''
+    ? null : num(body.ship_fee_twd);
+  if (manualFee !== null && !(manualFee >= 0)) throw err('BAD_PRICE', '運費不正確');
 
   const advance = body.advance !== false && order.status === STATUS.PENDING;
+  let shipFee;
   await db.tx(async () => {
     for (const p of planned) {
       await db.run('UPDATE order_items SET jpy_taxed = ?, unit_price_twd = ?, name = coalesce(?, name) WHERE item_id = ?',
         p.jpy, p.twd, p.name, p.it.item_id);
     }
     const sum = await db.one('SELECT coalesce(sum(qty * unit_price_twd), 0) AS s FROM order_items WHERE order_id = ?', order.order_id);
+    shipFee = manualFee !== null ? manualFee : await shipfee.feeFor(shipfee.pickupTypeOf(order), Number(sum.s));
     await db.run('UPDATE orders SET total_twd = ?, ship_fee_twd = ? WHERE order_id = ?',
       round(Number(sum.s) + shipFee), shipFee, order.order_id);
     // 推到「已報價」時 state.transition 會再檢查一次沒有 0 元品項。
     if (advance) await transition(order.order_id, STATUS.QUOTED, { actor: actor.line_user_id, reason: '報價' });
   });
   await audit.record({ actor: actor.line_user_id, action: 'order.quote', target: order.order_id,
-    detail: { items: planned.map((p) => ({ item_id: p.it.item_id, unit_price_twd: p.twd })), ship_fee_twd: shipFee },
+    detail: { items: planned.map((p) => ({ item_id: p.it.item_id, unit_price_twd: p.twd })), ship_fee_twd: shipFee, ship_fee_auto: manualFee === null },
     result: 'ok' });
   const fresh = await db.one('SELECT * FROM orders WHERE order_id = ?', order.order_id);
   return ok({
@@ -342,7 +348,9 @@ post('/api/v1/statements/reconcile', async ({ actor, body }) => {
   });
   await audit.record({ actor: actor.line_user_id, action: 'statement.reconcile', target: s.statement_id,
     detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
-  return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff });
+  // 業主確認單：對帳單付款完成就恢復喊單資格（還有別張沒付清的不算）。
+  const shoutRestored = await drops.restoreIfPaidUp(s.line_user_id, actor.line_user_id);
+  return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff, shout_restored: shoutRestored });
 });
 // ---- 代客下單 ---------------------------------------------------------------
 //
@@ -408,10 +416,10 @@ post('/api/v1/orders/create', async ({ actor, body }) => {
   if (!['cvs', 'home'].includes(pickupType)) throw err('BAD_PICKUP', '取貨方式只能是超商或宅配');
   const pickup = pickupType === 'cvs'
     ? [member.cvs_brand, member.cvs_store_name].filter(Boolean).join(' ') || '超商取貨'
-    : '宅配到府';
+    : shipfee.HOME_PICKUP;
   const pickupAddr = pickupType === 'cvs' ? (member.cvs_addr || '') : (member.home_addr || '');
-  const fee = await shipFee(pickupType);
   const subtotal = items.reduce((a, i) => a + (i.twd || 0) * i.qty, 0);
+  const fee = await shipfee.feeFor(pickupType, subtotal);
   const note = ['代客下單', String(body.note || '').trim().slice(0, 300)].filter(Boolean).join('：');
 
   const orderId = await db.tx(async () => {

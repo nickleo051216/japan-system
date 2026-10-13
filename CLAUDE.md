@@ -9,8 +9,8 @@
 
 ## 不能碰的
 - repo 是公開的：不要 commit 金鑰、連線字串或 token。交接檔裡只寫變數名稱。
-- `supabase/migrations/001`～`006` 已經在正式庫執行過，不要修改。要改 schema 就新增 `007_…`。
+- `supabase/migrations/001`～`007` 已經在正式庫執行過，不要修改（`008` 等 Nick 執行）。要改 schema 就新增下一號（`009_…`）。
 - 程式碼裡不要建表或改表。
 
 ## 驗收
-`npm run smoke`（後端 279 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。
+`npm run smoke`（後端 304 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。

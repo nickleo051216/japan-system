@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.2
+# 買家 API 合約（Buyer API Contract）v1.3
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -27,7 +27,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 |---|---|---|
 | 400 | 輸入格式錯 | `BAD_NAME` `BAD_QTY` `BAD_IMAGE` `BAD_FILE_NAME` `BAD_SRC` `BAD_URL` `BAD_INVOICE` `BAD_TAX_ID` `BAD_PICKUP` `BAD_LAST5` `BAD_PAYWAY` `BAD_PHONE` `BAD_CARRIER` `BAD_NICKNAME` `EMPTY_CART` `BAD_JSON` |
 | 401 | 未登入／token 失效 | `UNAUTHENTICATED` |
-| 403 | 無權限 | `SUSPENDED`（棄單達 3 次）`FORBIDDEN` |
+| 403 | 無權限 | `SUSPENDED`（棄單達上限，預設 1 次）`FORBIDDEN` |
 | 404 | 找不到 | `NOT_FOUND` `CART_NOT_FOUND` `ORDER_NOT_FOUND` `STATEMENT_NOT_FOUND` |
 | 409 | 業務規則不允許 | `SOLD_OUT` `DEADLINE_PASSED` `NOT_EDITABLE` `NOT_CONFIRMED` `NOT_QUOTED` `NOT_SPLITTABLE` `ILLEGAL_TRANSITION` `ALREADY_PAID` |
 | 5xx | 伺服器錯誤 | `INTERNAL`（前台只對 5xx 與網路錯誤自動重試） |
@@ -113,6 +113,11 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 1. `GET /me/profile`
 回 members 一列：`member_no line_user_id nickname display_name status role phone cvs_brand cvs_store_id cvs_store_name cvs_addr home_addr carrier shout_drops bound_at created_at`
 - `member_no` = 會員編號，格式 `HB-` 加 5 位數字（例：`HB-00012`），照加入順序由資料庫自動配號，超過 99999 照樣往上長（`HB-100000`）。**畫面上顯示會員編號，不要顯示 `line_user_id`**（2026-09-24 新增）
+- 另外回兩個喊單資格欄位（v1.3，2026-10-13 新增）：
+  - `drops_limit` = 目前的棄單上限，店主在後台設定，預設 `1`。前台「喊單信用」頁照這個數字寫，**不要寫死次數**
+  - `shout_suspended` = `shout_drops >= drops_limit`，`true` 時喊單會被 `403 SUSPENDED` 擋下
+  - 恢復資格：客人的對帳單**全部付清**時，後端自動把 `shout_drops` 歸零；店主也可以在後台手動恢復。原本「連續兩團正常完成結帳，紀錄自動歸零」的規則**已不存在**
+- `POST /me/update` 的回傳也帶這兩個欄位
 
 ### 2. `POST /me/update`
 可更新欄位：`nickname phone cvs_brand cvs_store_id cvs_store_name cvs_addr home_addr carrier`（未帶的不動）
@@ -124,7 +129,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 3. `GET /home/summary`
 ```json
 { "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "bank_ready", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
-            "ship_fee": { "cvs": 70, "home": 120 } },
+            "ship_fee": { "cvs": 70, "home": 120 }, "ship_free": { "cvs": 2500, "home": null } },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
@@ -136,6 +141,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
 - `bank_ready` = 銀行名稱、代碼、帳號三者都有值才是 `true`；`false` 時前台引導改用信用卡／ATM（見 §8 #5）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
+- `ship_free` = 滿額免運門檻（台幣，v1.3 新增）。**看單張訂單的商品小計（不含運費）**，小計 ≥ 門檻就免運；`null` = 這種取貨方式沒有免運。前台可用 `門檻 − 小計` 顯示「再買 NT$xxx 免運」；實收運費以結帳回傳的 `ship_fee_twd` 為準
 
 ### 5. `POST /cart/add-text`
 請求 `{ name, jpy_taxed?, qty, note?, source?: "reorder" }` → 回 CartItem（pending）
@@ -166,13 +172,14 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 請求 `{ cart_id, qty }`；喊單品項增量需扣 `broadcast.remaining`（不足 → `409 SOLD_OUT`），減量回補
 
 ### 10. `POST /cart/remove`
-請求 `{ cart_id }` → 回 `{ cart_id, shout_drops }`
+請求 `{ cart_id }` → 回 `{ cart_id, shout_drops, drops_limit, shout_suspended }`
 - 喊單品項：餘量回補 ＋ `members.shout_drops + 1`（同一交易）
+- 取消喊單前，前台可以提醒客人「取消後會暫停喊單資格」（`shout_drops + 1 >= drops_limit` 時）
 
 ### 11. `POST /broadcast/shout`
 請求 `{ send_id, qty }` → 回 `{ granted, remaining, rank, cart_item }`
 - **必須呼叫資料庫函式 `shout()`**（列鎖＋原子扣量），不得在程式端讀→算→寫
-- 餘量 0 → `409 SOLD_OUT`；過截止 → `409 DEADLINE_PASSED`；棄單 ≥ 3 → `403 SUSPENDED`
+- 餘量 0 → `409 SOLD_OUT`；過截止 → `409 DEADLINE_PASSED`；棄單達上限（`drops_limit`，預設 1）→ `403 SUSPENDED`，訊息會寫實際次數與恢復方式
 - 同一會員同一喊單已在購物車 → 數量累加到同一筆
 
 ### 12. `POST /broadcast/waitlist`
@@ -194,6 +201,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ```
 - 任一品項非 confirmed → `409 NOT_CONFIRMED`；統編非 8 碼 → `BAD_TAX_ID`
 - 台灣端運費：由店主在後台「店家與收款設定」填（`settings.ship_fee_cvs` / `ship_fee_home`），未填時暫定超商 70、宅配 120（金額 `[待確認]`，業主決定）
+- 滿額免運：商品小計（不含運費）≥ `settings.ship_free_cvs` / `ship_free_home` 時運費為 0（v1.3）。還沒定價的品項以 0 計；之後店家報價補上價錢，運費會照同一規則重算
 - 取貨地址從會員資料帶入（前台不傳地址，避免竄改）
 - 成立：`status=待確認`、`payment_status=待付款`、品項 `item_status=待採買`、購物車品項移出
 - **同一 Idempotency-Key 重送只成立一張**
@@ -241,6 +249,14 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.5 v1.3 變更（2026-10-13，業主確認單）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 滿額免運：`/home/summary` 的 `shop.ship_free`；結帳照單張訂單的商品小計判斷 | 3、18 |
+| 2 | 喊單棄單上限可設定（預設 1 次）；`/me/profile`、`/cart/remove` 多回 `drops_limit`、`shout_suspended` | 1、10、11 |
+| 3 | 對帳單全部付清 → 棄單次數自動歸零 | 1 |
 
 ## 6. v1.2 變更（2026-09-22 晚）
 

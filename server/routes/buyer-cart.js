@@ -11,6 +11,7 @@ const price = require('../lib/price');
 const storage = require('../lib/storage');
 const { ok, post } = require('../lib/http');
 const notify = require('../lib/notify');
+const drops = require('../lib/drops');
 const { now, uid } = require('../lib/ids');
 const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
 
@@ -168,7 +169,7 @@ bpost('/api/v1/cart/set-qty', async ({ me, body }) => {
 
 bpost('/api/v1/cart/remove', async ({ me, body }) => {
   const row = await mine(String(body.cart_id ?? ''), me.line_user_id);
-  let drops = me.shout_drops;
+  let dropCount = me.shout_drops;
   await db.tx(async () => {
     if (row.source === 'broadcast' && row.ref) {
       // 餘量回補與棄單計數必須同一筆交易：只回補不計次，等於讓人無限佔位。
@@ -176,18 +177,21 @@ bpost('/api/v1/cart/remove', async ({ me, body }) => {
       const r = await db.run(
         'UPDATE members SET shout_drops = shout_drops + 1 WHERE line_user_id = ? RETURNING shout_drops',
         me.line_user_id);
-      drops = r.rows[0].shout_drops;
+      dropCount = r.rows[0].shout_drops;
     }
     await db.run("UPDATE cart_items SET status = 'removed' WHERE cart_id = ?", row.cart_id);
   });
-  return ok({ cart_id: row.cart_id, shout_drops: drops });
+  const lim = await drops.limit();
+  return ok({ cart_id: row.cart_id, shout_drops: dropCount, drops_limit: lim, shout_suspended: dropCount >= lim });
 });
 
 // ---- 11 喊單 ---------------------------------------------------------------
 
 /** shout() 內部用 raise exception 表達業務錯誤，這裡翻成合約的錯誤碼。 */
-function mapShoutError(e) {
-  if (e && e.code === 'P0002') return err('SUSPENDED', '棄單已達 3 次，暫停喊單資格', 403);
+function mapShoutError(e, lim) {
+  if (e && e.code === 'P0002') {
+    return err('SUSPENDED', `棄單已達 ${lim} 次，暫停喊單資格；對帳單付清後會自動恢復`, 403);
+  }
   if (e && e.code === 'P0001') {
     if (/NOT_FOUND/.test(e.message || '')) return err('NOT_FOUND', '找不到這個喊單', 404);
     if (/BAD_QTY/.test(e.message || '')) return err('BAD_QTY', '數量不正確');
@@ -222,7 +226,7 @@ bpost('/api/v1/broadcast/shout', async ({ me, body }) => {
       const id = r.granted > 0 ? await mergeRows(me.line_user_id, sendId) : null;
       return { result: r, cartId: id };
     }));
-  } catch (e) { throw mapShoutError(e); }
+  } catch (e) { throw mapShoutError(e, e && e.code === 'P0002' ? await drops.limit() : null); }
 
   if (result.granted === 0) {
     // shout() 對「過期」和「搶完」都回 granted=0。到這裡才分辨是哪一種 ——

@@ -46,13 +46,13 @@ export async function render(root, ctx) {
         h('button', { class: 'btn sm primary', onClick: async () => {
           try {
             const r = await POST('/api/v1/statements/reconcile', { statement_id: s.statement_id, amount_twd: Number(amount.value) });
-            toast(`${r.statement_id} 已核對，底下訂單一併標為已付款`); ctx.reload();
+            toast(`${r.statement_id} 已核對，底下訂單一併標為已付款${r.shout_restored ? '；客人的喊單資格已恢復' : ''}`); ctx.reload();
           } catch (e) {
             // 金額對不上時不自動認列；店主確認差額後再送一次。
             if (e.code === 'AMOUNT_MISMATCH' && window.confirm(`${e.message}\n\n確定照這個金額認列？`)) {
               try {
-                await POST('/api/v1/statements/reconcile', { statement_id: s.statement_id, amount_twd: Number(amount.value), accept_difference: true });
-                toast('已認列（含差額）'); ctx.reload();
+                const r2 = await POST('/api/v1/statements/reconcile', { statement_id: s.statement_id, amount_twd: Number(amount.value), accept_difference: true });
+                toast(`已認列（含差額）${r2.shout_restored ? '；客人的喊單資格已恢復' : ''}`); ctx.reload();
               } catch (e2) { fail(e2); }
             } else fail(e);
           }

@@ -34,6 +34,7 @@ const SHOP_KEY = {
   bank_account: '收款帳號', payment_deadline_days: '付款期限', statement_days: '結算日',
   bulky_add_min: '大型品加價下限', bulky_add_max: '大型品加價上限',
   ship_fee_cvs: '超商運費', ship_fee_home: '宅配運費',
+  ship_free_cvs: '超商免運門檻', ship_free_home: '宅配免運門檻', shout_drop_limit: '喊單棄單上限',
 };
 
 /**
@@ -46,7 +47,9 @@ const SAY = {
   'order.create': (t, d, l) => [`替 ${l.subject_label || '客人'} 代客下單：訂單 ${t}`,
     d ? `${d.items || 0} 個品項，合計 ${ntd(d.total_twd)}` : ''],
   'order.quote': (t, d) => [`替訂單 ${t} 報價`,
-    d ? `${(d.items || []).length} 個品項定價${d.ship_fee_twd != null ? `，運費 ${ntd(d.ship_fee_twd)}` : ''}` : ''],
+    d ? `${(d.items || []).length} 個品項定價${d.ship_fee_twd != null
+      ? `，運費 ${ntd(d.ship_fee_twd)}${d.ship_fee_auto ? '（照取貨方式與免運門檻自動計算）' : '（手動填寫）'}`
+      : ''}` : ''],
   'order.transition': (t, d, l) => (l.result === 'blocked'
     ? [`想把訂單 ${t} 從${q(d.from)}改成${q(d.to)}，但不符合訂單流程`, '訂單只能照流程往下走，要倒退請由店主修正']
     : [`把訂單 ${t} 從${q(d.from)}改成${q(d.to)}`, d.reason ? `原因：${d.reason}` : '']),
@@ -92,6 +95,8 @@ const SAY = {
 
   'members.role': (t, d, l) => [`把 ${l.subject_label || '一位成員'} 的角色從${q(role(d.from))}改成${q(role(d.to))}`, ''],
   'members.add': (t, d, l) => [`新增員工 ${l.subject_label || ''}，角色為${q(role(d.role))}`, ''],
+  'members.drops_reset': (t, d, l) => [`恢復 ${l.subject_label || '客人'} 的喊單資格`,
+    `棄單 ${d.from} 次歸零；${d.reason === 'paid' ? '對帳單都付清了，系統自動恢復' : '店主手動恢復'}`],
 };
 
 /** 一筆紀錄 → { who, what, note, result: { text, tone } } */

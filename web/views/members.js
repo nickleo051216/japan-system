@@ -46,16 +46,32 @@ export async function render(root, ctx) {
     return sel;
   };
 
+  // 喊單資格：有棄單紀錄才顯示。對帳單付清會自動恢復；這顆按鈕給店主通融用。
+  const dropsCell = (m) => {
+    if (!(m.shout_drops > 0)) return h('span', { class: 'tiny muted' }, '正常');
+    const btn = h('button', { class: 'btn sm', onClick: async () => {
+      if (!confirm(`恢復 ${m.nickname} 的喊單資格？棄單 ${m.shout_drops} 次會歸零，這個動作會記在稽核軌跡。`)) return;
+      btn.disabled = true;
+      try {
+        await POST('/api/v1/members/reset-drops', { line_user_id: m.line_user_id });
+        toast(`${m.nickname} 的喊單資格已恢復`);
+        ctx.reload();
+      } catch (e) { fail(e); btn.disabled = false; }
+    } }, '恢復資格');
+    return h('div', {}, h('span', { class: 'tag amber' }, `棄單 ${m.shout_drops} 次`), ' ', btn);
+  };
+
   const table = (rows, empty) => h('div', { class: 'table-wrap' }, h('table', {},
     h('thead', {}, h('tr', {}, h('th', {}, '稱呼'), h('th', {}, 'LINE 名稱'), h('th', {}, '會員編號'),
-      h('th', {}, '加入時間'), h('th', {}, '角色'))),
+      h('th', {}, '加入時間'), h('th', {}, '喊單'), h('th', {}, '角色'))),
     h('tbody', {}, ...(rows.length ? rows.map((m) => h('tr', {},
       h('td', {}, m.nickname, m.line_user_id === data.me ? h('span', { class: 'tiny muted' }, '（你）') : null),
       h('td', { class: 'small muted' }, m.display_name || '—'),
       h('td', { class: 'mono small' }, m.member_no || '—'),
       h('td', { class: 'tiny muted' }, dt(m.created_at)),
+      h('td', {}, dropsCell(m)),
       h('td', {}, roleSelect(m))))
-      : [h('tr', {}, h('td', { colspan: '5', class: 'empty' }, empty))]))));
+      : [h('tr', {}, h('td', { colspan: '6', class: 'empty' }, empty))]))));
 
   // ---- 搜尋：員工與客人一起找（用會員編號找自己也要找得到）----
   const search = h('input', { id: 'member-search', type: 'search', value: q, placeholder: '稱呼、LINE 名稱或會員編號（例：HB-00001）', style: 'width:320px' });

@@ -50,6 +50,11 @@ const REQUIRED_COLUMNS = [
   { table: 'members', column: 'member_no', migration: '007_member_no.sql', feature: '會員編號與後台成員管理' },
 ];
 
+/** 後來的 migration 建的資料庫函式。函式只在被呼叫時才會發現不存在，一樣先列出來。 */
+const REQUIRED_FUNCTIONS = [
+  { name: 'shout_drop_limit', migration: '008_shout_drop_limit.sql', feature: '喊單棄單上限照後台設定（沒跑的話仍是舊的 3 次）' },
+];
+
 /** 值得數一數的表。數量本身就是診斷：規則表空了，每一次狀態轉換都會失敗。 */
 const COUNTED_TABLES = [
   'members', 'orders', 'order_items', 'price_table',
@@ -132,6 +137,9 @@ async function readSchema() {
   const cols = await db.all(
     "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'");
   const haveCol = new Set(cols.map((c) => `${c.table_name}.${c.column_name}`));
+  const fns = await db.all(
+    "SELECT routine_name FROM information_schema.routines WHERE routine_schema = 'public'");
+  const haveFn = new Set(fns.map((f) => f.routine_name));
   return {
     present,
     report: {
@@ -140,7 +148,9 @@ async function readSchema() {
       missing: REQUIRED_TABLES.filter((t) => !present.has(t)),
       missing_migrations: REQUIRED_COLUMNS
         .filter((c) => present.has(c.table) && !haveCol.has(`${c.table}.${c.column}`))
-        .map((c) => ({ migration: c.migration, feature: c.feature })),
+        .map((c) => ({ migration: c.migration, feature: c.feature }))
+        .concat(REQUIRED_FUNCTIONS.filter((f) => !haveFn.has(f.name))
+          .map((f) => ({ migration: f.migration, feature: f.feature }))),
     },
   };
 }

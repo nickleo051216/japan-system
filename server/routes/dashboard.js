@@ -170,6 +170,12 @@ const SHOP_FIELDS = [
     hint: '台幣。留空＝暫定 70 元；客人結帳頁與實際收費都照這裡' },
   { key: 'ship_fee_home',         label: '運費：宅配到府',   type: 'int',    lo: 0, hi: 9999,
     hint: '台幣。留空＝暫定 120 元' },
+  { key: 'ship_free_cvs',         label: '超商滿額免運門檻', type: 'int',    lo: 0, hi: 1000000,
+    hint: '單張訂單商品小計（不含運費）滿多少免運。留空或 0＝不免運' },
+  { key: 'ship_free_home',        label: '宅配滿額免運門檻', type: 'int',    lo: 0, hi: 1000000,
+    hint: '同上，宅配到府用' },
+  { key: 'shout_drop_limit',      label: '喊單棄單上限（次）', type: 'int',    lo: 1, hi: 99,
+    hint: '客人取消喊單累積到這個次數就暫停喊單，對帳單付清後自動恢復。留空＝1 次' },
 ];
 
 /** Normalise one field for storage, or throw a 400 the owner can act on. */

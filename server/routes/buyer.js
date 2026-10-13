@@ -18,6 +18,7 @@
 const db = require('../lib/db');
 const price = require('../lib/price');
 const shipfee = require('../lib/shipfee');
+const drops = require('../lib/drops');
 const { currentBatch } = require('../lib/batch');
 const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
@@ -99,7 +100,16 @@ async function orderShape(row) {
 
 // ---- 1–2 會員 --------------------------------------------------------------
 
-bget('/api/v1/me/profile', async ({ me }) => ok(memberShape(me)));
+/**
+ * 會員資料加上喊單資格：drops_limit 是目前的棄單上限（後台可改，預設 1），
+ * shout_suspended 是現在是否被暫停。前台「喊單信用」頁照這兩個欄位顯示，不要寫死次數。
+ */
+async function profileShape(m) {
+  const lim = await drops.limit();
+  return { ...memberShape(m), drops_limit: lim, shout_suspended: Number(m.shout_drops) >= lim };
+}
+
+bget('/api/v1/me/profile', async ({ me }) => ok(await profileShape(me)));
 
 const ME_FIELDS = ['nickname', 'phone', 'cvs_brand', 'cvs_store_id', 'cvs_store_name',
   'cvs_addr', 'home_addr', 'carrier'];
@@ -120,7 +130,7 @@ bpost('/api/v1/me/update', async ({ me, body }) => {
     await db.run(`UPDATE members SET ${sets} WHERE line_user_id = ?`,
       ...fields.map((f) => (body[f] === '' ? null : body[f])), me.line_user_id);
   }
-  return ok(memberShape(await db.one('SELECT * FROM members WHERE line_user_id = ?', me.line_user_id)));
+  return ok(await profileShape(await db.one('SELECT * FROM members WHERE line_user_id = ?', me.line_user_id)));
 });
 
 // ---- 3 首頁 ----------------------------------------------------------------
@@ -153,6 +163,9 @@ bget('/api/v1/home/summary', async ({ me }) => {
       statement_days: s.statement_days || '',
       // 前台結帳頁顯示的運費；跟結帳實際收的同一個來源（lib/shipfee）。
       ship_fee: shipfee.fromSettings(s),
+      // 滿額免運門檻（看單張訂單的商品小計）；null = 這種取貨方式沒有免運。
+      // 前台用它顯示「再買 NT$xxx 免運」，實際收費一樣由後端照同一份設定算。
+      ship_free: shipfee.freeFromSettings(s),
     },
     batch: batch ? {
       batch: batch.batch, name: batch.name, region: batch.region, close_at: batch.close_at,
