@@ -80,7 +80,7 @@ const LINE_USER_ID = /^U[0-9a-f]{32}$/;
 
 const memberShape = (m) => ({
   member_no: m.member_no, line_user_id: m.line_user_id, nickname: m.nickname, display_name: m.display_name,
-  role: m.role, status: m.status, bound_at: m.bound_at, created_at: m.created_at,
+  role: m.role, status: m.status, shout_drops: m.shout_drops, bound_at: m.bound_at, created_at: m.created_at,
 });
 
 get('/api/v1/members/admin-list', async ({ actor, query }) => {
@@ -117,6 +117,21 @@ post('/api/v1/members/set-role', async ({ actor, body }) => {
     detail: { line_user_id: target.line_user_id, from: target.role, to: role }, result: 'ok' });
   const fresh = await db.one('SELECT * FROM members WHERE line_user_id = ?', target.line_user_id);
   return ok({ member: memberShape(fresh), changed: true });
+});
+
+/**
+ * 手動恢復喊單資格：棄單次數歸零。正常情況是對帳單付清就自動恢復；
+ * 這個給沒有對帳單可付、或店主決定通融的情況，一律寫稽核。
+ */
+post('/api/v1/members/reset-drops', async ({ actor, body }) => {
+  auth.requireCap(actor, 'settings.write');
+  const target = await db.one('SELECT * FROM members WHERE line_user_id = ?', String(body.line_user_id || ''));
+  if (!target) throw err('MEMBER_NOT_FOUND', '找不到這位成員', 404);
+  if (!(target.shout_drops > 0)) return ok({ member: memberShape(target), changed: false });
+  await db.run('UPDATE members SET shout_drops = 0 WHERE line_user_id = ?', target.line_user_id);
+  await audit.record({ actor: actor.line_user_id, action: 'members.drops_reset',
+    detail: { line_user_id: target.line_user_id, from: target.shout_drops, reason: 'manual' }, result: 'ok' });
+  return ok({ member: memberShape(await db.one('SELECT * FROM members WHERE line_user_id = ?', target.line_user_id)), changed: true });
 });
 
 /**

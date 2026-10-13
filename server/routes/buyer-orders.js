@@ -11,7 +11,7 @@ const db = require('../lib/db');
 const config = require('../lib/config');
 const state = require('../lib/state');
 const { currentBatch } = require('../lib/batch');
-const { shipFee } = require('../lib/shipfee');
+const { feeFor, HOME_PICKUP } = require('../lib/shipfee');
 const { ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const { orderShape, statementShape, bget, bpost, err, num, int } = require('./buyer');
@@ -59,10 +59,10 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
   // 取貨地址一律從會員資料帶 —— 前台不傳、也不採信。
   const pickup = pickupType === 'cvs'
     ? [me.cvs_brand, me.cvs_store_name].filter(Boolean).join(' ') || '超商取貨'
-    : '宅配到府';
+    : HOME_PICKUP;
   const pickupAddr = pickupType === 'cvs' ? (me.cvs_addr || '') : (me.home_addr || '');
-  const fee = await shipFee(pickupType);
   const subtotal = items.reduce((a, i) => a + (num(i.price_twd) || 0) * i.qty, 0);
+  const fee = await feeFor(pickupType, subtotal);
 
   const orderId = await db.tx(async () => {
     const id = await nextOrderId(db);

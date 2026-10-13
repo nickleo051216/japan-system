@@ -102,7 +102,8 @@ export async function render(root, ctx) {
       jpy: h('input', { type: 'number', min: '1', placeholder: '日幣税込', value: i.jpy_taxed ?? '', style: 'width:110px' }),
       twd: h('input', { type: 'number', min: '1', placeholder: '或直接填台幣', value: '', style: 'width:120px' }),
     }));
-    const fee = h('input', { type: 'number', min: '0', value: String(o.ship_fee_twd ?? 0), style: 'width:110px' });
+    // 運費預設留空＝照取貨方式與滿額免運自動算；只有要給特別優惠時才手動填。
+    const fee = h('input', { type: 'number', min: '0', value: '', placeholder: '留空＝自動', style: 'width:110px' });
     const body = h('div', {},
       h('p', { class: 'small muted', style: 'margin-top:0' },
         '填日幣就好，售價照價目表換算。超出級距或要加大型品費用時，才直接填台幣（會蓋過日幣換算）。'),
@@ -111,7 +112,9 @@ export async function render(root, ctx) {
           Number(r.item.unit_price_twd) > 0 ? `目前 ${nt(r.item.unit_price_twd)} / 件` : '尚未定價')),
         h('td', { class: 'tiny muted' }, `×${r.item.qty}`),
         h('td', {}, r.jpy), h('td', {}, r.twd))))),
-      h('label', { class: 'field', style: 'margin-top:12px' }, h('span', {}, '台灣端運費 (TWD)'), fee));
+      h('label', { class: 'field', style: 'margin-top:12px' }, h('span', {}, '台灣端運費 (TWD)'), fee,
+        h('span', { class: 'tiny muted' },
+          `目前 ${nt(o.ship_fee_twd ?? 0)}。留空會照取貨方式重算，商品小計到了免運門檻就自動免運；要給特別優惠才手動填。`)));
     modal(`報價 ${o.order_id}`, body, [{
       label: o.status === '待確認' ? '儲存並轉為已報價' : '儲存報價', primary: true,
       onClick: async (close) => {
@@ -125,9 +128,10 @@ export async function render(root, ctx) {
           else if (r.jpy.value && (!priced || Number(r.jpy.value) !== Number(r.item.jpy_taxed))) e.jpy_taxed = Number(r.jpy.value);
           if (Object.keys(e).length > 1) items.push(e);
         }
-        const res = await POST('/api/v1/orders/quote', { order_id: o.order_id, items, ship_fee_twd: Number(fee.value) });
+        const res = await POST('/api/v1/orders/quote', {
+          order_id: o.order_id, items, ship_fee_twd: fee.value.trim() === '' ? null : Number(fee.value) });
         close();
-        toast(`${res.order_id} 報價完成：${nt(res.total_twd)}（${res.status}）`);
+        toast(`${res.order_id} 報價完成：${nt(res.total_twd)}，運費 ${nt(res.ship_fee_twd)}（${res.status}）`);
         load();
       },
     }]);

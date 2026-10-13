@@ -28,7 +28,8 @@ function seed() {
           cvs_addr: '新北市板橋區文化路188號', home_addr: '新北市板橋區文化路一段188號 5樓',
           carrier: '/AB12+3C', shout_drops: 0, bound_at: '2026-05-05T14:38:00.000Z', created_at: '2026-04-28T00:00:00.000Z' },
     shop: { name: 'HEEEHABABY', bank_name: '華南銀行', bank_code: '008', bank_account: '000000000000',
-            payment_deadline_days: 2, bulky_add_min: 30, bulky_add_max: 50, statement_days: [1, 16] },
+            payment_deadline_days: 2, bulky_add_min: 30, bulky_add_max: 50, statement_days: [1, 16],
+            ship_fee: { cvs: 70, home: 120 }, ship_free: { cvs: 2500, home: 4500 } },
     batch: { batch: 'T-260913', name: '9/13 大阪採買', region: '大阪・京都・神戶',
              close_at: new Date(Date.now() + 2 * 864e5).toISOString(),
              buy_at: '9/13–9/16', back_at: '9/22', ship_at: '9/25', stage: 1 },
@@ -93,19 +94,23 @@ const orderOf = (oid) => { const o = S.orders.find((x) => x.order_id === oid); n
 const stmtOf = (sid) => { const s = S.statements.find((x) => x.statement_id === sid); need(s, 'STATEMENT_NOT_FOUND', '查無此對帳單', 404); return s; };
 const pub = (b) => ({ ...b, open: b.remaining > 0 && new Date(b.deadline_at) > new Date(), waitlisted: S.waitlist.has(b.send_id) });
 
+// 喊單棄單上限（業主確認單 2026-10-12：1 次就暫停，對帳單付清才恢復）。真後端可在後台改。
+const DROPS_LIMIT = 1;
+const profile = () => ({ ...S.me, drops_limit: DROPS_LIMIT, shout_suspended: S.me.shout_drops >= DROPS_LIMIT });
+
 const routes = {
   // ---- 公開：健康檢查（不需 token）----
   'GET /api/v1/health': () => ok({ status: 'ok', checked_at: now(), db: { up: true, latency_ms: 12 }, detail: null }),
 
   // ---- 身分與首頁 ----
-  'GET /api/v1/me/profile': () => ok(S.me),
+  'GET /api/v1/me/profile': () => ok(profile()),
   'POST /api/v1/me/update': ({ body }) => {
     const allow = ['nickname', 'phone', 'cvs_brand', 'cvs_store_id', 'cvs_store_name', 'cvs_addr', 'home_addr', 'carrier'];
     if (body.nickname !== undefined) need(String(body.nickname).trim(), 'BAD_NICKNAME', '暱稱不能空白');
     if (body.phone) need(/^09\d{2}-?\d{3}-?\d{3}$/.test(body.phone), 'BAD_PHONE', '手機格式不正確');
     if (body.carrier) need(/^\/[0-9A-Z.+-]{7}$/.test(body.carrier), 'BAD_CARRIER', '載具格式不正確');
     for (const k of allow) if (body[k] !== undefined) S.me[k] = body[k];
-    return ok(S.me);
+    return ok(profile());
   },
   'GET /api/v1/home/summary': () => ok({
     shop: S.shop, batch: S.batch, price_table: PRICE_TABLE.map(([jpy_taxed_max, twd]) => ({ jpy_taxed_max, twd })),
@@ -175,14 +180,14 @@ const routes = {
       drops = ++S.me.shout_drops;
     }
     c.status = 'removed';
-    return ok({ cart_id: c.cart_id, shout_drops: drops });
+    return ok({ cart_id: c.cart_id, shout_drops: drops, drops_limit: DROPS_LIMIT, shout_suspended: drops >= DROPS_LIMIT });
   },
 
   // ---- 喊單 ----
   'POST /api/v1/broadcast/shout': ({ body }) => {
     const b = S.broadcast.find((x) => x.send_id === body.send_id);
     need(b, 'NOT_FOUND', '找不到這個喊單商品', 404);
-    need(S.me.shout_drops < 3, 'SUSPENDED', '棄單已達 3 次，暫停喊單資格', 403);
+    need(S.me.shout_drops < DROPS_LIMIT, 'SUSPENDED', `棄單已達 ${DROPS_LIMIT} 次，暫停喊單資格；對帳單付清後會自動恢復`, 403);
     need(new Date(b.deadline_at) > new Date(), 'DEADLINE_PASSED', '這項喊單已經截止', 409);
     const want = Math.max(1, parseInt(body.qty || 1, 10));
     need(b.remaining > 0, 'SOLD_OUT', '已經被搶完了', 409);
@@ -240,8 +245,9 @@ const routes = {
     if (inv.type === 'tax') need(/^\d{8}$/.test(inv.tax_id || ''), 'BAD_TAX_ID', '統一編號需為 8 碼數字');
     const pk = body.pickup || {};
     need(['cvs', 'home'].includes(pk.type), 'BAD_PICKUP', '取貨方式不正確');
-    const fee = pk.type === 'cvs' ? 70 : 120;
     const sub = items.reduce((a, c) => a + (c.price_twd || 0) * c.qty, 0);
+    const free = S.shop.ship_free[pk.type];
+    const fee = free && sub >= free ? 0 : S.shop.ship_fee[pk.type];   // 滿額免運看單張訂單的商品小計
     const o = { order_id: id('ORD'), batch: S.batch.batch, status: '待確認', payment_status: '待付款', paid: false,
       total_twd: sub + fee, ship_fee_twd: fee, split_shipped: false, statement_id: null,
       pickup: pk.type === 'cvs' ? `${S.me.cvs_brand} ${S.me.cvs_store_name}` : '宅配到府',

@@ -466,13 +466,50 @@ const login = async (id) =>
       (await B('GET', '/api/v1/home/summary')).json.data.broadcast
         .find((b) => b.send_id === 'BC-SEED-002').remaining === 3);
 
+    section('喊單棄單上限（業主確認單：1 次就暫停，付清才恢復）');
+    check('預設上限 1 次：棄單後立刻被暫停', drop.drops_limit === 1 && drop.shout_suspended === true, drop);
+    const susp = await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } });
+    check('被暫停時喊單 → 403 SUSPENDED，訊息照實際上限寫、告訴客人怎麼恢復',
+      susp.status === 403 && susp.json.error?.code === 'SUSPENDED' && /1 次/.test(susp.json.error.message)
+        && /付清/.test(susp.json.error.message), susp.json);
+    const prof1 = (await B('GET', '/api/v1/me/profile')).json.data;
+    check('/me/profile 回 drops_limit 與 shout_suspended，前台不用寫死次數',
+      prof1.drops_limit === 1 && prof1.shout_suspended === true && prof1.shout_drops === 1, prof1);
+    check('小幫手不能改棄單上限',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { shout_drop_limit: 5 } })).status === 403);
+    check('棄單上限不能是 0',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: 0 } })).status === 400);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: 3 } });
+    const prof3 = (await B('GET', '/api/v1/me/profile')).json.data;
+    const sh3 = await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } });
+    check('店主把上限改成 3 → 客人立刻恢復可喊（資料庫跟著同一個設定）',
+      prof3.drops_limit === 3 && prof3.shout_suspended === false && sh3.status === 200, { prof3, sh3: sh3.json });
+    await B('POST', '/api/v1/cart/remove', { body: { cart_id: sh3.json.data.cart_item.cart_id } });
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: '' } });
+    check('清空上限回到預設 1；棄單 2 次 → 暫停',
+      (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } })).json.error?.code === 'SUSPENDED');
+    const buyerRow = () => api('GET', '/api/v1/members/admin-list?q=HB-00005', { token: owner })
+      .then((r) => r.json.data.buyers.find((m) => m.member_no === 'HB-00005'));
+    check('成員與權限看得到客人的棄單次數', (await buyerRow())?.shout_drops === 2);
+    check('小幫手不能手動恢復喊單資格',
+      (await api('POST', '/api/v1/members/reset-drops', { token: helper, body: { line_user_id: 'U_buyer1' } })).status === 403);
+    const rd = await api('POST', '/api/v1/members/reset-drops', { token: owner, body: { line_user_id: 'U_buyer1' } });
+    check('店主手動恢復 → 棄單歸零、可以再喊',
+      rd.json.data?.changed === true && rd.json.data.member.shout_drops === 0
+        && (await B('GET', '/api/v1/me/profile')).json.data.shout_suspended === false, rd.json);
+    // 後面的對帳單段落會驗「付清就自動恢復」：先讓這位客人再棄單一次。
+    const reDrop = (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } })).json.data;
+    await B('POST', '/api/v1/cart/remove', { body: { cart_id: reDrop.cart_item.cart_id } });
+    // 下面的併發測試要真的能喊：暫時放寬上限，對帳單段落再改回預設。
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: 5 } });
+
     section('買家 API — 二十人搶五個名額');
     const race = await Promise.all(Array.from({ length: 20 }, () =>
       B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-003', qty: 1 } })));
     const granted = race.filter((r) => r.json.ok).reduce((a, r) => a + r.json.data.granted, 0);
     const left = (await B('GET', '/api/v1/home/summary')).json.data.broadcast
       .find((b) => b.send_id === 'BC-SEED-003').remaining;
-    check('二十次併發喊單不超賣', granted + left === 14 && left >= 0, { granted, left });
+    check('二十次併發喊單不超賣', granted + left === 14 && left >= 0 && granted > 0, { granted, left });
 
     section('買家 API — 許願');
     check('連結不完整 → BAD_URL',
@@ -659,6 +696,23 @@ const login = async (id) =>
     check('底下的訂單一起變成已付款',
       (await B('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`)).json.data.paid === true);
 
+    section('付清對帳單 → 自動恢復喊單資格');
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: '' } });
+    check('上限回到 1，前面棄單的客人目前是暫停狀態',
+      (await B('GET', '/api/v1/me/profile')).json.data.shout_suspended === true);
+    check('還有別張對帳單沒付清 → 這次核帳不恢復', rec.shout_restored === false, rec);
+    const seedStmt = (await api('GET', '/api/v1/statements/admin-list', { token: owner })).json.data
+      .find((x) => x.statement_id === 'STMT-SEED-001');
+    const rec2 = (await api('POST', '/api/v1/statements/reconcile',
+      { token: owner, body: { statement_id: 'STMT-SEED-001', amount_twd: Number(seedStmt.total_amount) } })).json.data;
+    const prof4 = (await B('GET', '/api/v1/me/profile')).json.data;
+    check('最後一張也付清 → 棄單歸零、恢復喊單資格',
+      rec2.shout_restored === true && prof4.shout_drops === 0 && prof4.shout_suspended === false, { rec2, prof4 });
+    const auditRows = (await api('GET', '/api/v1/audit/list?limit=20', { token: owner })).json.data;
+    check('自動恢復記在稽核軌跡，看得出是「付清」恢復的',
+      auditRows.some((l) => l.action === 'members.drops_reset' && l.detail?.reason === 'paid'
+        && l.subject_label && !/U_buyer1/.test(l.subject_label)));
+
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
     const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
     const shot = (await B('POST', '/api/v1/cart/add-image',
@@ -767,6 +821,41 @@ const login = async (id) =>
     check('首頁回傳收款戶名', (await B('GET', '/api/v1/home/summary')).json.data.shop.bank_holder === '冉冉國際企業有限公司');
     check('清空運費回到暫定值',
       (await B('GET', '/api/v1/home/summary')).json.data.shop.ship_fee.cvs === 70);
+
+    section('滿額免運（業主確認單：看單張訂單的商品小計）');
+    check('沒設門檻時首頁回 null（沒有免運）',
+      JSON.stringify((await B('GET', '/api/v1/home/summary')).json.data.shop.ship_free) === JSON.stringify({ cvs: null, home: null }));
+    check('免運門檻不能是負數',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_free_cvs: -1 } })).status === 400);
+    check('小幫手不能改免運門檻',
+      (await api('POST', '/api/v1/settings/shop', { token: helper, body: { ship_free_cvs: 2500 } })).status === 403);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_free_cvs: 2500, ship_free_home: 4500 } });
+    check('設了門檻，首頁回傳給前台顯示「再買多少免運」',
+      JSON.stringify((await B('GET', '/api/v1/home/summary')).json.data.shop.ship_free) === JSON.stringify({ cvs: 2500, home: 4500 }));
+    const checkoutOf = async (name, jpy, qty, type) => {
+      const it = (await B('POST', '/api/v1/cart/add-text', { body: { name, jpy_taxed: jpy, qty } })).json.data;
+      await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [it.cart_id] } });
+      return (await B('POST', '/api/v1/orders/checkout',
+        { body: { cart_ids: [it.cart_id], pickup: { type }, invoice: { type: 'carrier' } } })).json.data;
+    };
+    const under = await checkoutOf('免運測試：差一點', 2519, 2, 'cvs');      // 890 × 2 = 1780
+    check('超商小計 1,780 未滿 2,500 → 照收運費 70', under.ship_fee_twd === 70 && under.total_twd === 1850, under);
+    const reach = await checkoutOf('免運測試：剛好', 2519, 3, 'cvs');        // 890 × 3 = 2670
+    check('超商小計 2,670 滿 2,500 → 免運', reach.ship_fee_twd === 0 && reach.total_twd === 2670, reach);
+    const homeOrd = await checkoutOf('免運測試：宅配', 2519, 3, 'home');
+    check('同樣 2,670 走宅配，未滿 4,500 → 照收宅配運費 120', homeOrd.ship_fee_twd === 120 && homeOrd.total_twd === 2790, homeOrd);
+    const rq = (await api('POST', '/api/v1/orders/quote', { token: owner, body: {
+      order_id: under.order_id, items: [{ item_id: under.items[0].item_id, unit_price_twd: 1300 }] } })).json.data;
+    check('報價把小計補到 2,600 → 運費自動變 0', rq.ship_fee_twd === 0 && rq.total_twd === 2600, rq);
+    const rqm = (await api('POST', '/api/v1/orders/quote', { token: owner,
+      body: { order_id: under.order_id, items: [], ship_fee_twd: 30 } })).json.data;
+    check('店主手動填運費 → 照填的收（特別優惠用）', rqm.ship_fee_twd === 30 && rqm.total_twd === 2630, rqm);
+    const free = (await api('POST', '/api/v1/orders/create', { token: owner, body: {
+      member_no: 'HB-00005', pickup_type: 'cvs', items: [{ name: '代客下單免運測試', qty: 1, price_twd: 2500 }] } })).json.data;
+    check('代客下單一樣套用免運', free.ship_fee_twd === 0 && free.total_twd === 2500, free);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { ship_free_cvs: '', ship_free_home: '' } });
+    check('清空門檻 → 回到沒有免運',
+      (await B('GET', '/api/v1/home/summary')).json.data.shop.ship_free.cvs === null);
 
     section('後台設定 — 價目表');
     const pt0 = (await api('GET', '/api/v1/settings/price-table', { token: helper })).json.data.rows;
