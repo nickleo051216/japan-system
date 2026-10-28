@@ -90,7 +90,7 @@ button.btn.ghost { border-color: transparent; background: transparent; color: va
 button.btn:disabled { opacity: .45; cursor: not-allowed; }
 button.btn.sm { padding: 4px 9px; font-size: 13px; }
 
-input[type=text], input[type=number], input[type=search], select, textarea {
+input[type=text], input[type=number], input[type=search], input[type=password], select, textarea {
   border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; background: #fff; width: 100%;
 }
 input:focus, select:focus, textarea:focus { outline: 2px solid #d9c6bf; outline-offset: -1px; }

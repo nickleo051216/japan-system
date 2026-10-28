@@ -55,6 +55,12 @@ const REQUIRED_FUNCTIONS = [
   { name: 'shout_drop_limit', migration: '008_shout_drop_limit.sql', feature: '喊單棄單上限照後台設定（沒跑的話仍是舊的 3 次）' },
 ];
 
+/** 後來的 migration 新建的表。不放進 REQUIRED_TABLES，才能直接說出要跑哪一支。 */
+const LATER_TABLES = [
+  { table: 'ecpay_trades', migration: '009_ecpay.sql', feature: '綠界線上刷卡與付款回調' },
+  { table: 'payment_credentials', migration: '009_ecpay.sql', feature: '後台金流設定（金鑰存 Supabase Vault）' },
+];
+
 /** 值得數一數的表。數量本身就是診斷：規則表空了，每一次狀態轉換都會失敗。 */
 const COUNTED_TABLES = [
   'members', 'orders', 'order_items', 'price_table',
@@ -98,6 +104,9 @@ const ENV_CHECKS = [
   { key: 'NOTIFY_HOOK_URL', required: false,
     isSet: () => !!config.notifyHookUrl,
     note: '沒設也不會壞，通知會留在佇列等 n8n 排程來拿，只是慢一兩分鐘。' },
+  { key: 'ECPAY_RETURN_URL', required: false,
+    isSet: () => !!config.ecpayReturnUrl,
+    note: '綠界付款結果的回傳網址。沒設時用 Vercel 正式網域自動推出來；兩者都沒有，線上刷卡會回「尚未開通」。' },
 ];
 
 /** 把連線字串換算成模式描述。不含主機、帳號、密碼 —— 只夠判斷「接對地方沒」。 */
@@ -150,7 +159,11 @@ async function readSchema() {
         .filter((c) => present.has(c.table) && !haveCol.has(`${c.table}.${c.column}`))
         .map((c) => ({ migration: c.migration, feature: c.feature }))
         .concat(REQUIRED_FUNCTIONS.filter((f) => !haveFn.has(f.name))
-          .map((f) => ({ migration: f.migration, feature: f.feature }))),
+          .map((f) => ({ migration: f.migration, feature: f.feature })))
+        .concat(LATER_TABLES.filter((t) => !present.has(t.table))
+          .map((t) => ({ migration: t.migration, feature: t.feature })))
+        // 同一支 migration 只講一次
+        .filter((m, i, all) => all.findIndex((x) => x.migration === m.migration) === i),
     },
   };
 }

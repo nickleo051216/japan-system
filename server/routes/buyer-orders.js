@@ -6,9 +6,9 @@
  *   金額  —— 售價、運費、總額全由後端算。前台送來的數字一律忽略。
  *   地址  —— 取貨地址從會員資料帶，不從請求讀，否則等於讓人改寄送目的地。
  */
-const crypto = require('node:crypto');
 const db = require('../lib/db');
 const config = require('../lib/config');
+const ecpay = require('../lib/ecpay');
 const state = require('../lib/state');
 const { currentBatch } = require('../lib/batch');
 const { feeFor, HOME_PICKUP } = require('../lib/shipfee');
@@ -202,19 +202,6 @@ bpost('/api/v1/statements/report-transfer', async ({ me, body }) => {
 
 // ---- 26 線上付款 -----------------------------------------------------------
 
-/** 綠界 CheckMacValue。HashKey／HashIV 只在伺服器端，永遠不進回應。 */
-function checkMac(params, key, iv) {
-  const sorted = Object.keys(params).sort((a, b) => a.toLowerCase() < b.toLowerCase() ? -1 : 1)
-    .map((k) => `${k}=${params[k]}`).join('&');
-  const raw = `HashKey=${key}&${sorted}&HashIV=${iv}`;
-  const encoded = encodeURIComponent(raw).toLowerCase()
-    .replace(/%20/g, '+').replace(/%21/g, '!').replace(/%2a/g, '*')
-    .replace(/%28/g, '(').replace(/%29/g, ')').replace(/%27/g, "'");
-  return crypto.createHash('sha256').update(encoded).digest('hex').toUpperCase();
-}
-
-const ecpayReady = () => !!(config.ecpayMerchantId && config.ecpayHashKey && config.ecpayHashIv);
-
 bpost('/api/v1/statements/pay-init', async ({ me, body }) => {
   const s = await myStatement(String(body.statement_id ?? ''), me.line_user_id);
   const payway = String(body.payway ?? '');
@@ -233,27 +220,46 @@ bpost('/api/v1/statements/pay-init', async ({ me, body }) => {
       { code: 'NOT_CONFIGURED', status: 503 });
   }
 
-  if (!ecpayReady()) {
-    throw Object.assign(new Error('線上刷卡尚未開通，請改用銀行轉帳'),
-      { code: 'NOT_CONFIGURED', status: 503 });
+  // 信用卡：綠界 AIO。金鑰在 Supabase Vault，店主在後台「金流設定」填（lib/ecpay.js）。
+  const env = await ecpay.currentEnv();
+  const creds = await ecpay.credentials(env);
+  if (!creds || !creds.verified) {
+    throw Object.assign(new Error('線上刷卡尚未開通，請改用銀行轉帳'), { code: 'NOT_CONFIGURED', status: 503 });
   }
-  const tradeNo = (s.trade_no || `HB${Date.now()}${Math.floor(Math.random() * 1000)}`).slice(0, 20);
-  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19).replace(/-/g, '/');
+  // 測試環境不會真的扣款，公開的測試卡號誰都能刷 —— 只讓店家自己的帳號測試，
+  // 否則客人刷一張測試卡就把對帳單「付清」了。
+  if (env === 'stage' && me.role === 'buyer') {
+    throw Object.assign(new Error('線上刷卡測試中，暫時請改用銀行轉帳'), { code: 'NOT_CONFIGURED', status: 503 });
+  }
+  if (!config.ecpayReturnUrl) {
+    throw Object.assign(new Error('線上刷卡尚未開通，請改用銀行轉帳'), { code: 'NOT_CONFIGURED', status: 503 });
+  }
+  const amount = Math.round(num(s.total_amount));
+  if (!(amount > 0)) throw err('BAD_AMOUNT', '這張對帳單沒有需要付款的金額', 409);
+
+  // MerchantTradeNo 永久唯一：每按一次付款就開一筆新的交易，舊的那筆如果之後
+  // 還是付成功了，回調一樣找得回這張對帳單。
+  const tradeNo = ecpay.newTradeNo();
   const fields = {
-    MerchantID: config.ecpayMerchantId,
+    MerchantID: creds.merchantId,
     MerchantTradeNo: tradeNo,
-    MerchantTradeDate: stamp,
+    MerchantTradeDate: ecpay.taipeiStamp(),
     PaymentType: 'aio',
-    TotalAmount: String(Math.round(num(s.total_amount))),
-    TradeDesc: 'HEEEHABABY daigou',
+    TotalAmount: String(amount),
+    TradeDesc: 'HEEEHABABY',
     ItemName: `對帳單 ${s.statement_id}`,
-    ReturnURL: config.ecpayReturnUrl || '',
+    ReturnURL: config.ecpayReturnUrl,
     ChoosePayment: 'Credit',
     EncryptType: '1',
-    InvoiceMark: 'Y',
+    CustomField1: s.statement_id,
   };
-  fields.CheckMacValue = checkMac(fields, config.ecpayHashKey, config.ecpayHashIv);
-  await db.run('UPDATE statements SET payway = ?, trade_no = ? WHERE statement_id = ?',
-    payway, tradeNo, s.statement_id);
-  return ok({ flow: 'redirect', action: config.ecpayApiUrl, fields });
+  fields.CheckMacValue = ecpay.checkMac(fields, creds.hashKey, creds.hashIv);
+  await db.tx(async () => {
+    await db.run(
+      'INSERT INTO ecpay_trades (merchant_trade_no, statement_id, env, amount_twd, created_by) VALUES (?,?,?,?,?)',
+      tradeNo, s.statement_id, env, amount, me.line_user_id);
+    await db.run('UPDATE statements SET payway = ?, trade_no = ? WHERE statement_id = ?',
+      payway, tradeNo, s.statement_id);
+  });
+  return ok({ flow: 'redirect', action: ecpay.BASE[env] + ecpay.CHECKOUT_PATH, fields, test_mode: env === 'stage' });
 });

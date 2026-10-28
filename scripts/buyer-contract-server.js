@@ -304,8 +304,8 @@ const routes = {
                           s.v_expire_at = new Date(Date.now() + 3 * 864e5).toISOString(); }
       return ok({ flow: 'vacc', v_account: s.v_account, v_bank: s.v_bank, v_expire_at: s.v_expire_at });
     }
-    return ok({ flow: 'redirect', action: 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5',
-                fields: { MerchantID: '2000132', MerchantTradeNo: 'HB' + Date.now(), TotalAmount: String(s.total_amount), CheckMacValue: 'STUB' } });
+    return ok({ flow: 'redirect', action: 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5', test_mode: true,
+                fields: { MerchantID: '3002607', MerchantTradeNo: 'HB' + Date.now(), TotalAmount: String(Math.round(s.total_amount)), CheckMacValue: 'STUB' } });
   },
 };
 

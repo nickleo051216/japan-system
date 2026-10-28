@@ -14,6 +14,12 @@ const routes = [];
 const add = (method, path, handler, opts = {}) => routes.push({ method, path, handler, ...opts });
 
 const get = (path, handler, opts) => add('GET', path, handler, opts);
+/**
+ * 外部服務打進來的回調（例如綠界的 ReturnURL）：不走會員身分、不走 JSON、
+ * 回應格式由對方規定（綠界要純文字 1|OK）。handler 拿到 req／res 自己處理，
+ * 身分由 handler 自己驗簽。
+ */
+const raw = (method, path, handler) => add(method, path, handler, { raw: true });
 const post = (path, handler, opts) => add('POST', path, handler, { idempotent: true, ...opts });
 
 function match(method, pathname) {
@@ -55,6 +61,23 @@ async function readJson(req) {
   catch { throw Object.assign(new Error('請求格式錯誤'), { status: 400, code: 'BAD_JSON' }); }
 }
 
+/** application/x-www-form-urlencoded → 物件。回調的內容不大，上限 64 KB。 */
+async function readForm(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > 64 * 1024) throw Object.assign(new Error('payload too large'), { status: 413, code: 'PAYLOAD_TOO_LARGE' });
+    chunks.push(c);
+  }
+  return Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString('utf8')));
+}
+
+function sendText(res, status, text) {
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(text);
+}
+
 /**
  * Replay protection for writes — I-02 rule 4.
  *
@@ -78,4 +101,4 @@ async function idempotencyStore(key, payload, actorId) {
     scopedKey(key, actorId), JSON.stringify(payload), now());
 }
 
-module.exports = { get, post, add, match, ok, fail, send, readJson, idempotencyLookup, idempotencyStore, routes };
+module.exports = { get, post, raw, add, match, ok, fail, send, sendText, readJson, readForm, idempotencyLookup, idempotencyStore, routes };

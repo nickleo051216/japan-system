@@ -165,6 +165,7 @@ async function labelAudit(rows) {
     for (const [sql] of lookups) for (const x of await db.all(sql, list)) names.set(x.id, x.label);
   }
   names.set('n8n', '系統自動');
+  names.set('ecpay', '綠界（自動）');
   const nameOf = (id) => (id ? names.get(id) || null : null);
   return rows.map((r) => ({
     ...r,

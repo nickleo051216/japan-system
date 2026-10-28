@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.3
+# 買家 API 合約（Buyer API Contract）v1.4
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -227,10 +227,16 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 26. `POST /statements/pay-init`
 請求 `{ statement_id, payway: "credit|atm", invoice: { type, carrier, tax_id } }`（LINE Pay 不在綠界內，第二波另外串接，第一波不送）
 - ATM：回 `{ flow: "vacc", v_account, v_bank, v_expire_at }`，**同一張對帳單重複取號回同一組**
-- 信用卡／LINE Pay：回 `{ flow: "redirect", action, fields }`，前台以**表單 POST** 導向綠界
+- 信用卡：回 `{ flow: "redirect", action, fields, test_mode }`，前台以**表單 POST** 把 `fields` 原封不動送到 `action`（綠界付款頁）
+  - `test_mode: true` = 綠界測試環境（不會真的扣款），前台可以顯示「測試中」
+  - 每按一次都會開一筆新的交易編號（綠界的 `MerchantTradeNo` 永久唯一），前台不要快取上一次的 `fields`
 - 已核對 → `409 ALREADY_PAID`
-- 綠界 CheckMacValue 與發票參數在後端產生，**HashKey／HashIV 不得出現在前端**
-- `[待確認]` 付款成功後綠界回調端點（ReturnURL）
+- 線上刷卡還沒開通 → `503 NOT_CONFIGURED`，前台引導改用銀行轉帳。以下情況都會回這個（v1.4）：
+  - 店主還沒在後台「金流設定」填好並驗證綠界金鑰
+  - 目前是**測試環境，而且付款的人是客人**：測試環境只開放店家自己的帳號，避免客人用公開的測試卡號付清對帳單
+- 綠界 CheckMacValue 在後端產生，**HashKey／HashIV 不得出現在前端**（金鑰存 Supabase Vault，後端回應也只出末四碼）
+- 付款結果：綠界 Server 直接通知後端 `POST /api/v1/ecpay/return`（不是買家 API，前台不用呼叫）。付款成功後對帳單自動變「已核對」、底下訂單變已付款，並推 LINE「付款成功」通知
+- 前台回到對帳單頁時重新抓 `GET /statements/list` 即可看到最新狀態；通知可能比客人回到頁面晚幾秒
 
 ---
 
@@ -249,6 +255,14 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.4 v1.4 變更（2026-10-28，綠界線上刷卡）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 信用卡導轉多回 `test_mode`；每次開新交易編號；`MerchantTradeDate` 改台灣時間 | 26 |
+| 2 | 測試環境只有店家帳號能刷卡，客人回 `503 NOT_CONFIGURED` | 26 |
+| 3 | 付款結果由綠界直接通知後端，對帳單自動「已核對」並推 LINE 通知 | 26 |
 
 ## 5.5 v1.3 變更（2026-10-13，業主確認單）
 
@@ -284,5 +298,5 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | 1 | ~~拍照辨識完成通知方式~~ **已定案：輪詢**，前端已實作 | 6 |
 | 2 | 台灣端運費改由 settings 讀取 | 18 |
 | 3 | 物流貨態來源（物流商 API 或人工） | 23 |
-| 4 | 綠界付款回調端點與付款後前台返回頁 | 26 |
+| 4 | ~~綠界付款回調端點~~ 已完成：`POST /api/v1/ecpay/return`（v1.4）。付款後前台返回頁（`ClientBackURL`）仍待定 | 26 |
 | 5 | ~~LINE Login channel ID~~ 已取得：`2011699944`（LIFF ID `2011699944-c5n725TF` 的前段） | 全部 |
