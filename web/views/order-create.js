@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, toast, modal } from '/app.js';
+import { GET, POST, h, nt, toast, modal } from '../app.js';
 
 /**
  * 代客下單：客人在 LINE 私訊或電話裡說要買什麼，店家直接在後台替他建單。

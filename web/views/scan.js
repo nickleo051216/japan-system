@@ -1,4 +1,4 @@
-import { POST, h, dt, toast, fail, session } from '/app.js';
+import { POST, h, dt, toast, fail, session } from '../app.js';
 
 /**
  * F-17 掃碼核對工作站.

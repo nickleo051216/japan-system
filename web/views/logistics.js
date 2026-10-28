@@ -1,4 +1,4 @@
-import { GET, POST, h, dt, toast, fail } from '/app.js';
+import { GET, POST, h, dt, toast, fail } from '../app.js';
 
 /** F-20 進貨物流綁定 — 物流商條碼內容不可控，必須建立對照表。 */
 export async function render(root) {

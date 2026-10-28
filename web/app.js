@@ -3,7 +3,9 @@
  * The frontend holds no business rules — it renders what the API returns and
  * every guard it shows is also enforced server-side (README F-21 強制規則).
  */
-const TOKEN_KEY = 'hb.token';
+// 後台可能掛在前台網域的 /admin 底下（跟買家前台同一個網域），
+// localStorage 會跟前台共用，所以 key 要有自己的名字，不要跟前台撞在一起。
+const TOKEN_KEY = 'hb.admin.token';
 
 export const session = {
   token: localStorage.getItem(TOKEN_KEY) || null,
@@ -97,21 +99,21 @@ export const statusTag = (s) => h('span', { class: 'tag ' + (STATUS_TONE[s] || '
 
 // ---- routes --------------------------------------------------------------
 const ROUTES = [
-  { path: 'dashboard', title: '營運儀表板', icon: '◎', cap: 'order.read', mod: () => import('/views/dashboard.js') },
-  { path: 'orders', title: '訂單管理', icon: '▤', cap: 'order.read', mod: () => import('/views/orders.js') },
-  { path: 'statements', title: '對帳單', icon: '$', cap: 'payment.reconcile', mod: () => import('/views/statements.js') },
-  { path: 'shop', title: '開團與喊單', icon: '✦', cap: 'broadcast', mod: () => import('/views/shop.js'), group: '上架' },
-  { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('/views/wishes.js') },
-  { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('/views/board.js'), group: '採購' },
-  { path: 'expense', title: '拍照請款', icon: '¥', cap: 'procurement.write', mod: () => import('/views/expense.js') },
-  { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('/views/packing.js'), group: '出貨' },
-  { path: 'labels', title: 'QR 標籤列印', icon: '▩', cap: 'shipment.write', mod: () => import('/views/labels.js') },
-  { path: 'scan', title: '掃碼核對工作站', icon: '⌁', cap: 'shipment.write', mod: () => import('/views/scan.js') },
-  { path: 'logistics', title: '進貨物流綁定', icon: '⇄', cap: 'shipment.write', mod: () => import('/views/logistics.js') },
-  { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('/views/audit.js'), group: '設定' },
-  { path: 'settings', title: '匯率、價目表與團別', icon: '⚙', cap: 'order.read', mod: () => import('/views/settings.js') },
-  { path: 'members', title: '成員與權限', icon: '☺', cap: 'settings.write', mod: () => import('/views/members.js') },
-  { path: 'payments', title: '金流設定', icon: '¤', cap: 'settings.write', mod: () => import('/views/payments.js') },
+  { path: 'dashboard', title: '營運儀表板', icon: '◎', cap: 'order.read', mod: () => import('./views/dashboard.js') },
+  { path: 'orders', title: '訂單管理', icon: '▤', cap: 'order.read', mod: () => import('./views/orders.js') },
+  { path: 'statements', title: '對帳單', icon: '$', cap: 'payment.reconcile', mod: () => import('./views/statements.js') },
+  { path: 'shop', title: '開團與喊單', icon: '✦', cap: 'broadcast', mod: () => import('./views/shop.js'), group: '上架' },
+  { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('./views/wishes.js') },
+  { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('./views/board.js'), group: '採購' },
+  { path: 'expense', title: '拍照請款', icon: '¥', cap: 'procurement.write', mod: () => import('./views/expense.js') },
+  { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('./views/packing.js'), group: '出貨' },
+  { path: 'labels', title: 'QR 標籤列印', icon: '▩', cap: 'shipment.write', mod: () => import('./views/labels.js') },
+  { path: 'scan', title: '掃碼核對工作站', icon: '⌁', cap: 'shipment.write', mod: () => import('./views/scan.js') },
+  { path: 'logistics', title: '進貨物流綁定', icon: '⇄', cap: 'shipment.write', mod: () => import('./views/logistics.js') },
+  { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('./views/audit.js'), group: '設定' },
+  { path: 'settings', title: '匯率、價目表與團別', icon: '⚙', cap: 'order.read', mod: () => import('./views/settings.js') },
+  { path: 'members', title: '成員與權限', icon: '☺', cap: 'settings.write', mod: () => import('./views/members.js') },
+  { path: 'payments', title: '金流設定', icon: '¤', cap: 'settings.write', mod: () => import('./views/payments.js') },
 ];
 
 function parseHash() {
@@ -201,7 +203,7 @@ async function lineLogin(liffId, interactive) {
   const liff = await loadLiff();
   await liff.init({ liffId });
   if (!liff.isLoggedIn()) {
-    if (interactive) liff.login({ redirectUri: location.origin + '/' });
+    if (interactive) liff.login({ redirectUri: location.origin + location.pathname });
     return null;
   }
   const idToken = liff.getIDToken();

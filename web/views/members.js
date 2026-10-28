@@ -1,4 +1,4 @@
-import { GET, POST, h, dt, toast, fail, roleLabel } from '/app.js';
+import { GET, POST, h, dt, toast, fail, roleLabel } from '../app.js';
 
 /**
  * 成員與權限。店主在這裡把客人升為小幫手／理貨，或調回客人。

@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, statusTag, toast, fail, modal, session } from '/app.js';
+import { GET, POST, h, nt, statusTag, toast, fail, modal, session } from '../app.js';
 
 /** F-09 看圖理貨 — 對照客人原始圖片撿貨。 */
 export async function render(root) {

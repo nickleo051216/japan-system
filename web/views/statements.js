@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, dt, toast, fail } from '/app.js';
+import { GET, POST, h, nt, dt, toast, fail } from '../app.js';
 
 /**
  * 對帳單。「結算」把已報價以上、還沒付清的訂單依客人歸成對帳單，並排入 LINE 通知。

@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, dt, toast, fail } from '/app.js';
+import { GET, POST, h, nt, dt, toast, fail } from '../app.js';
 
 /**
  * 金流設定（綠界）。只有店主看得到。
