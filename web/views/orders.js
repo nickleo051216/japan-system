@@ -1,5 +1,5 @@
-import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '/app.js';
-import { openCreateOrder } from '/views/order-create.js';
+import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '../app.js';
+import { openCreateOrder } from './order-create.js';
 
 const STATUSES = ['待確認', '已報價', '已到貨', '已出貨', '已送達', '缺貨', '已取消'];
 

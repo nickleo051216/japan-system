@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, jpy, pct, toast, fail, modal, session } from '/app.js';
+import { GET, POST, h, nt, jpy, pct, toast, fail, modal, session } from '../app.js';
 
 const STATE_TAG = {
   open: ['', '未認領'], claimed: ['blue', '已認領'], got: ['green', '買足'],

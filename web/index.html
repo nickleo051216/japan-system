@@ -4,7 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>HEEEHABABY 代購後台</title>
-  <link rel="stylesheet" href="/style.css">
+  <script>
+    // 後台可能掛在前台網域的 /admin 底下。網址少了結尾的斜線時，下面的相對路徑
+    // （style.css、app.js）會指錯地方，所以先補上斜線再載入。
+    if (/\/admin$/.test(location.pathname)) location.replace(location.pathname + '/' + location.search + location.hash);
+  </script>
+  <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%93%A6%3C/text%3E%3C/svg%3E">
 </head>
 <body>
@@ -18,6 +23,6 @@
   <div class="drawer-mask" onclick="document.body.classList.remove('nav-open')"></div>
   <div id="toast" class="toast" hidden></div>
   <div id="modal" class="modal" hidden></div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

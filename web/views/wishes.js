@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, dt, toast, fail, session } from '/app.js';
+import { GET, POST, h, nt, dt, toast, fail, session } from '../app.js';
 
 const TABS = ['待處理', '已報價', '現場缺貨', '保留下團', '全部'];
 

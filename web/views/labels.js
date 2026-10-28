@@ -1,4 +1,4 @@
-import { GET, h, toast, fail } from '/app.js';
+import { GET, h, toast, fail } from '../app.js';
 
 /**
  * F-15 QR 出貨標籤產生器.

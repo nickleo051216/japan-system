@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, jpy, pct, toast, fail, session } from '/app.js';
+import { GET, POST, h, nt, jpy, pct, toast, fail, session } from '../app.js';
 
 /**
  * F-07 拍照請款.

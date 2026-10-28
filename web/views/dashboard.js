@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, pct, toast, fail, session } from '/app.js';
+import { GET, POST, h, nt, pct, toast, fail, session } from '../app.js';
 
 export async function render(root, ctx) {
   const d = await GET('/api/v1/dashboard/summary' + (ctx.query.batch ? `?batch=${ctx.query.batch}` : ''));

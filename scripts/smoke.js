@@ -10,8 +10,9 @@
  * With no DATABASE_URL set it starts a harness of its own. It never touches
  * the production Supabase project.
  */
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
+const fs = require('node:fs');
 
 const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -762,6 +763,17 @@ const login = async (id) =>
     const pod = (await api('GET', `/api/v1/orders/detail?order_id=${po.order_id}`, { token: owner })).json.data;
     check('店主在後台訂單明細看得到客人拍的照片（簽名網址）',
       typeof pod.items[0].image_url === 'string' && pod.items[0].image_url.startsWith(STORAGE_MOCK_URL), pod.items[0]);
+
+    section('後台網頁（web/）：語法、路徑');
+    // 後端測試不會在瀏覽器裡跑後台頁面，所以語法錯誤（例如多一個括號）會一路溜到正式站。
+    const webFiles = ['app.js', ...fs.readdirSync(path.join(ROOT, 'web', 'views')).filter((f) => f.endsWith('.js')).map((f) => 'views/' + f)];
+    const badSyntax = webFiles.filter((f) => spawnSync(process.execPath, ['--check', '--input-type=module'],
+      { input: fs.readFileSync(path.join(ROOT, 'web', f)) }).status !== 0);
+    check(`後台 ${webFiles.length} 支網頁程式都能正確解析`, badSyntax.length === 0, badSyntax);
+    // 後台會掛在前台網域的 /admin 底下：路徑一律相對，寫死 /app.js、/views/ 會載到前台的檔案。
+    const absPaths = [...webFiles, 'index.html'].filter((f) =>
+      /['"`]\/(app\.js|style\.css|views\/)/.test(fs.readFileSync(path.join(ROOT, 'web', f), 'utf8')));
+    check('後台網頁沒有寫死根目錄的路徑（才能放在 /admin 底下）', absPaths.length === 0, absPaths);
 
     section('上線健檢 /api/v1/health');
     const hPublic = await api('GET', '/api/v1/health');

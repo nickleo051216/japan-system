@@ -94,7 +94,7 @@ const SAY = {
   'ecpay.failed': (t, d, l) => [`${l.subject_label || '客人'} 刷卡付對帳單 ${t} 沒有成功`, d.rtn_msg ? `綠界說：${d.rtn_msg}` : ''],
   'ecpay.ignored': (t, d, l) => [`收到對帳單 ${t} 的刷卡通知，但沒有入帳`,
     d.reason === 'amount_mismatch' ? `金額不符：應收 ${ntd(d.amount)}，綠界回報 ${ntd(d.got)}，請到綠界後台確認`
-      : '這是綠界後台的「模擬付款」，正式環境不入帳']),
+      : '這是綠界後台的「模擬付款」，正式環境不入帳'],
   'ecpay.return': (t, d) => ['擋下一筆來路不明的付款通知', ({
     bad_mac: '檢查碼對不上（不是綠界送的，或金鑰不一致）', unknown_trade: '找不到這筆交易編號',
     merchant_mismatch: '特店編號不是我們的', bad_request: '格式不對' })[d.reason] || ''],

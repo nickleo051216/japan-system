@@ -1,5 +1,5 @@
-import { GET, h, dt, roleLabel } from '/app.js';
-import { describe } from '/views/audit-text.js';
+import { GET, h, dt, roleLabel } from '../app.js';
+import { describe } from './audit-text.js';
 
 /**
  * 稽核軌跡：誰、在什麼時候、做了什麼。可依日期、人、結果篩選。

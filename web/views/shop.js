@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, jpy, dt, toast, fail, session } from '/app.js';
+import { GET, POST, h, nt, jpy, dt, toast, fail, session } from '../app.js';
 
 /**
  * 開團與喊單。客人首頁顯示的團別與喊單就是從這裡來的 ——

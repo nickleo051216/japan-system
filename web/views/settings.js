@@ -1,4 +1,4 @@
-import { GET, POST, h, dt, toast, fail, session } from '/app.js';
+import { GET, POST, h, dt, toast, fail, session } from '../app.js';
 
 /** F-23 匯率管理 + 價目表 + 團別切換 + 店家收款設定（含運費）。 */
 export async function render(root) {
