@@ -51,6 +51,8 @@ function boot() {
   require('./routes/admin-shop');
   // 後台設定：價目表、成員與權限。
   require('./routes/admin-config');
+  // 綠界：付款結果回調、後台金流設定。
+  require('./routes/ecpay');
   booted = true;
   return true;
 }
@@ -75,6 +77,9 @@ async function handleApi(req, res) {
 
     const hit = httpLib.match(req.method, pathname);
     if (!hit) return httpLib.send(res, 404, httpLib.fail('NOT_FOUND', '找不到這個 API'));
+
+    // 外部服務的回調（綠界 ReturnURL）：自己驗簽、自己決定回應格式，不經過會員身分。
+    if (hit.route.raw) return await hit.route.handler({ req, res, query: Object.fromEntries(url.searchParams) });
 
     // /notify/* 是 n8n 對打的機器介面，身分由路由自己驗共用金鑰，
     // 不經過會員 token —— n8n 不是會員。/health 則必須在資料庫掛掉時還答得出話。

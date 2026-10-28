@@ -48,6 +48,11 @@ function startHarness() {
     const fixture = require('./contract-fixture');
     await seed.reset();
     await fixture.load();
+    // 綠界：金鑰現在存資料庫（Vault），不再讀環境變數。合約只驗「後端有產生導轉表單與簽章」，
+    // 不驗綠界是否接受，所以直接塞一組假的正式環境金鑰（harness 的 Vault 是替身，不加密）。
+    await require('../server/lib/ecpay').saveCredentials('live',
+      { merchantId: '3002607', hashKey: 'contractHashKey0', hashIv: 'contractHashIv00', verifyMsg: '合約測試' }, 'contract');
+    await db.putSetting('ecpay_env', 'live');
     await db.close();
 
     server = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
@@ -56,9 +61,7 @@ function startHarness() {
         ...process.env, PORT: String(PORT), DATABASE_URL: harness.url, DB_POOL_MAX: '1',
         QR_SIGNING_KEY: 'contract-qr', SESSION_SIGNING_KEY: 'contract-session',
         ADMIN_LOGIN_PASSWORD: ADMIN_PW, LINE_LOGIN_CHANNEL_ID: '2011699944', NOTIFY_SHARED_SECRET: 'contract-notify',
-        // 綠界用假參數：只驗「後端有產生導轉表單與簽章」，不驗綠界是否接受。
-        ECPAY_MERCHANT_ID: '3002607', ECPAY_HASH_KEY: 'contractHashKey0', ECPAY_HASH_IV: 'contractHashIv00',
-        ECPAY_API_URL: 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5',
+        ECPAY_RETURN_URL: 'https://contract.example/api/v1/ecpay/return',
       },
     });
     server.stderr.on('data', (d) => { const s = d.toString(); if (/Error|error/.test(s)) process.stderr.write(s); });

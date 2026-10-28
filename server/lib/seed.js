@@ -199,7 +199,7 @@ async function seed() {
  */
 const RESET_TABLES = [
   'idempotency', 'notifications', 'fx_history', 'audit_log', 'logistics_bindings',
-  'shipments', 'payments', 'expenses', 'procurements', 'restock_watch',
+  'shipments', 'payments', 'ecpay_trades', 'expenses', 'procurements', 'restock_watch',
   'cart_items', 'wishlist', 'broadcast', 'order_status_log', 'order_items',
   'orders', 'statements', 'products', 'batches', 'members',
 ];

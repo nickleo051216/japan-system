@@ -111,6 +111,7 @@ const ROUTES = [
   { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('/views/audit.js'), group: '設定' },
   { path: 'settings', title: '匯率、價目表與團別', icon: '⚙', cap: 'order.read', mod: () => import('/views/settings.js') },
   { path: 'members', title: '成員與權限', icon: '☺', cap: 'settings.write', mod: () => import('/views/members.js') },
+  { path: 'payments', title: '金流設定', icon: '¤', cap: 'settings.write', mod: () => import('/views/payments.js') },
 ];
 
 function parseHash() {

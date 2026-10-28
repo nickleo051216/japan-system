@@ -68,15 +68,12 @@ const envFor = (databaseUrl) => ({
   LINE_LOGIN_CHANNEL_ID: '2011699944',
   // 後台 LINE 登入。LINE 的驗證端點由 scripts/line-verify-mock.cjs 換成假資料。
   ADMIN_LIFF_ID: '2011699944-smokeAdm',
-  NODE_OPTIONS: `--require ${path.join(ROOT, 'scripts', 'line-verify-mock.cjs')}`,
+  // 綠界的查詢 API（後台驗證金鑰用）由 scripts/ecpay-mock.cjs 換成假資料。
+  NODE_OPTIONS: `--require ${path.join(ROOT, 'scripts', 'line-verify-mock.cjs')} --require ${path.join(ROOT, 'scripts', 'ecpay-mock.cjs')}`,
   SUPABASE_URL: STORAGE_MOCK_URL,
   SUPABASE_SERVICE_KEY: 'smoke-supabase-secret',
-  // 綠界官方測試商店的參數不放進原始碼；這裡用假值，只驗「有沒有簽、簽出來的值
-  // 有沒有外洩」，不驗綠界端是否接受 —— 那要真的打到綠界才算數。
-  ECPAY_MERCHANT_ID: '3002607',
-  ECPAY_HASH_KEY: 'smokeEcpayHashKey00',
-  ECPAY_HASH_IV: 'smokeEcpayHashIv000',
-  ECPAY_API_URL: 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5',
+  // 綠界的金鑰改存資料庫（Vault），由測試在後台「金流設定」填。這裡只給回調網址。
+  ECPAY_RETURN_URL: 'https://smoke.example/api/v1/ecpay/return',
   NOTIFY_SHARED_SECRET: 'smoke-notify-secret',
   // NOTIFY_HOOK_URL 刻意不設：驗證「沒接 n8n 也照常出貨」
   FX_JPY_TWD: '0.215',
@@ -595,10 +592,8 @@ const login = async (id) =>
         { body: { statement_id: 'STMT-SEED-001', payway: 'linepay' } })).json.error?.code === 'BAD_PAYWAY');
     const pay = await B('POST', '/api/v1/statements/pay-init',
       { body: { statement_id: 'STMT-SEED-001', payway: 'credit' } });
-    check('信用卡 → 導轉表單，且 CheckMacValue 在後端產生',
-      pay.json.data.flow === 'redirect' && !!pay.json.data.action && !!pay.json.data.fields.CheckMacValue, pay.json.error);
-    check('回應不含綠界金鑰',
-      !JSON.stringify(pay.json).includes(process.env.SMOKE_ECPAY_HASH_KEY || 'smokeEcpayHashKey00'));
+    check('店主還沒在後台填綠界金鑰 → 503 NOT_CONFIGURED（請客人改用轉帳）',
+      pay.status === 503 && pay.json.error?.code === 'NOT_CONFIGURED', pay.json);
 
     section('後台 — 開團');
     check('小幫手不能開團',
@@ -779,6 +774,7 @@ const login = async (id) =>
     const hOwner = (await api('GET', '/api/v1/health', { token: owner })).json.data;
     check('店主看得到詳細內容', !!hOwner.detail && hOwner.detail.open_reason === '店主 token');
     check('資料表一張不缺', hOwner.detail.schema.missing.length === 0, hOwner.detail.schema);
+    check('migration 都跑過了（含 009 綠界）', hOwner.detail.schema.missing_migrations.length === 0, hOwner.detail.schema.missing_migrations);
     check('必要環境變數全部就緒',
       hOwner.detail.config.filter((c) => c.required && !c.set).length === 0,
       hOwner.detail.config.filter((c) => c.required && !c.set).map((c) => c.key));
@@ -971,6 +967,162 @@ const login = async (id) =>
     check('採購紀錄的對象換成品名，不是內部編號', procLog && !/^prc_/.test(procLog.target_label), procLog);
     check('每一筆都有經手人名稱', al.every((l) => l.actor_label && !/^U[_0-9a-f]/.test(l.actor_label)),
       al.filter((l) => !l.actor_label || /^U[_0-9a-f]/.test(l.actor_label)).slice(0, 3));
+
+    section('綠界金流設定（金鑰存 Supabase Vault，畫面只看得到末四碼）');
+    const ecLib = require(path.join(ROOT, 'server', 'lib', 'ecpay.js'));
+    // 跟 scripts/ecpay-mock.cjs 同一組假金鑰
+    const EC_STAGE = { merchant_id: '3002607', hash_key: 'smokeStageKey0001', hash_iv: 'smokeStageIv00001' };
+    const EC_LIVE = { merchant_id: '3383324', hash_key: 'smokeLiveKey00001', hash_iv: 'smokeLiveIv000001' };
+    const ecGet = async () => (await api('GET', '/api/v1/settings/ecpay', { token: owner })).json.data;
+    const ecPost = (token, p, body) => api('POST', '/api/v1/settings/ecpay' + p, { token, body });
+    check('檢查碼照綠界規則（含 \' ~ 空格 中文 括號，固定值防退化）',
+      ecLib.checkMac({ MerchantID: '3002607', ItemName: "Tom's ~ 測試 (A)*!", TotalAmount: '100' }, 'pwFHCqoQZGmho4w6', 'EkRm7iFT261dpevs')
+        === '8405DCCCCD8583F9C7B7D4A8CBC1BD984ECAE1157CC4AB5608262EE0415BB006');
+    check('台灣時間 yyyy/MM/dd HH:mm:ss（UTC 16:30 → 隔天 00:30）',
+      ecLib.taipeiStamp(new Date('2026-10-28T16:30:05Z')) === '2026/10/29 00:30:05');
+    check('小幫手看不到金流設定', (await api('GET', '/api/v1/settings/ecpay', { token: helper })).status === 403);
+    const ec0 = await ecGet();
+    check('預設是測試環境，兩組都還沒設定',
+      ec0.env === 'stage' && !ec0.envs.stage.configured && !ec0.envs.live.configured, ec0);
+    check('畫面上看得到綠界回傳網址', ec0.return_url === 'https://smoke.example/api/v1/ecpay/return');
+    const ecBad = await ecPost(owner, '/credentials', { env: 'stage', ...EC_STAGE, hash_key: 'wrongKey00000000' });
+    check('金鑰錯 → 綠界驗證不過（422），而且不會存',
+      ecBad.status === 422 && ecBad.json.error?.code === 'ECPAY_VERIFY_FAILED' && !(await ecGet()).envs.stage.configured, ecBad.json);
+    const ecDown = await ecPost(owner, '/credentials', { env: 'stage', merchant_id: '9999999', hash_key: 'abcdefgh12345678', hash_iv: 'abcdefgh12345678' });
+    check('連不上綠界 → 502，不會存', ecDown.status === 502 && ecDown.json.error?.code === 'ECPAY_UNREACHABLE', ecDown.json);
+    check('格式不對 → 400', (await ecPost(owner, '/credentials', { env: 'stage', merchant_id: 'abc', hash_key: 'x', hash_iv: 'y' })).status === 400);
+    check('小幫手不能填金鑰', (await ecPost(helper, '/credentials', { env: 'stage', ...EC_STAGE })).status === 403);
+    check('還沒填正式金鑰不能切到正式', (await ecPost(owner, '/env', { env: 'live' })).status === 409);
+    const ecSaved = await ecPost(owner, '/credentials', { env: 'stage', ...EC_STAGE });
+    check('金鑰對 → 存起來，回應只有末四碼',
+      ecSaved.status === 200 && ecSaved.json.data.envs.stage.verify_ok === true
+        && ecSaved.json.data.envs.stage.key_last4 === '0001' && ecSaved.json.data.envs.stage.iv_last4 === '0001', ecSaved.json);
+    check('回應裡沒有完整金鑰',
+      !JSON.stringify(ecSaved.json).includes(EC_STAGE.hash_key) && !JSON.stringify(ecSaved.json).includes(EC_STAGE.hash_iv));
+    const ecAudit = JSON.stringify((await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data);
+    check('稽核記了這次設定，但只有末四碼',
+      ecAudit.includes('settings.ecpay') && !ecAudit.includes(EC_STAGE.hash_key) && !ecAudit.includes(EC_STAGE.hash_iv));
+    check('重新驗證已存的金鑰', (await ecPost(owner, '/verify', { env: 'stage' })).json.data?.envs.stage.verify_ok === true);
+
+    section('線上刷卡：測試環境只有店家帳號能刷');
+    const ecOrder = async (token, memberNo) => {
+      const made = (await api('POST', '/api/v1/orders/create', { token: owner, body: {
+        member_no: memberNo, pickup_type: 'cvs', items: [{ name: '刷卡測試品', qty: 1, price_twd: 1234 }] } })).json.data;
+      await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: made.order_id, items: [] } });
+      return made.order_id;
+    };
+    await ecOrder(owner, 'HB-00001');
+    const ownerStmt = (await api('POST', '/api/v1/statements/generate', { token: owner, body: { line_user_id: 'U_owner' } }))
+      .json.data.created.find((c) => c.line_user_id === 'U_owner');
+    const buyerOrderId = await ecOrder(owner, 'HB-00005');
+    const buyerStmt = (await api('POST', '/api/v1/statements/generate', { token: owner, body: { line_user_id: 'U_buyer1' } }))
+      .json.data.created.find((c) => c.line_user_id === 'U_buyer1');
+    check('準備好兩張待付款的對帳單', !!ownerStmt && !!buyerStmt, { ownerStmt, buyerStmt });
+    const stageBuyer = await B('POST', '/api/v1/statements/pay-init', { body: { statement_id: buyerStmt.statement_id, payway: 'credit' } });
+    check('測試環境：客人刷卡 → 503（公開測試卡號不能拿來付清對帳單）',
+      stageBuyer.status === 503 && stageBuyer.json.error?.code === 'NOT_CONFIGURED' && /測試/.test(stageBuyer.json.error.message), stageBuyer.json);
+    const stageOwner = (await api('POST', '/api/v1/statements/pay-init',
+      { token: owner, body: { statement_id: ownerStmt.statement_id, payway: 'credit' } })).json;
+    check('測試環境：店家自己的帳號可以刷，走綠界測試網址',
+      stageOwner.ok && stageOwner.data.action === 'https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5'
+        && stageOwner.data.test_mode === true, stageOwner);
+
+    section('線上刷卡：正式環境開單');
+    await ecPost(owner, '/credentials', { env: 'live', ...EC_LIVE });
+    const ecLive = await ecPost(owner, '/env', { env: 'live' });
+    check('正式金鑰驗證通過後可以切到正式', ecLive.status === 200 && ecLive.json.data.env === 'live', ecLive.json);
+    const pi1 = (await B('POST', '/api/v1/statements/pay-init', { body: { statement_id: buyerStmt.statement_id, payway: 'credit' } })).json.data;
+    const f1 = pi1.fields;
+    check('導轉到綠界正式網址', pi1.flow === 'redirect' && pi1.action === 'https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5' && pi1.test_mode === false, pi1);
+    const twNow = ecLib.taipeiStamp();
+    check('MerchantTradeDate 是台灣時間 yyyy/MM/dd HH:mm:ss',
+      /^\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d$/.test(f1.MerchantTradeDate) && f1.MerchantTradeDate.slice(0, 13) === twNow.slice(0, 13), { got: f1.MerchantTradeDate, twNow });
+    check('交易編號只有英數、20 碼以內', /^HB[0-9]{12}[A-Za-z0-9]{6}$/.test(f1.MerchantTradeNo), f1.MerchantTradeNo);
+    check('金額、回傳網址、對帳單編號都帶上',
+      f1.TotalAmount === String(Math.round(buyerStmt.total_amount)) && f1.ReturnURL === 'https://smoke.example/api/v1/ecpay/return'
+        && f1.CustomField1 === buyerStmt.statement_id && f1.ChoosePayment === 'Credit' && f1.EncryptType === '1', f1);
+    check('檢查碼用正式金鑰簽，綠界驗得過', ecLib.verifyMac(f1, EC_LIVE.hash_key, EC_LIVE.hash_iv));
+    check('回應不含完整金鑰', !JSON.stringify(pi1).includes(EC_LIVE.hash_key) && !JSON.stringify(pi1).includes(EC_LIVE.hash_iv));
+    const pi2 = (await B('POST', '/api/v1/statements/pay-init', { body: { statement_id: buyerStmt.statement_id, payway: 'credit' } })).json.data;
+    check('再按一次付款 → 開新的交易編號（綠界的編號永久唯一）', pi2.fields.MerchantTradeNo !== f1.MerchantTradeNo);
+
+    section('綠界付款回調（驗簽、冪等、入帳）');
+    const cb = async (fields) => {
+      const res = await fetch(BASE + '/api/v1/ecpay/return', { method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() });
+      return { status: res.status, type: res.headers.get('content-type') || '', text: await res.text() };
+    };
+    const signed = (keys, f) => ({ ...f, CheckMacValue: ecLib.checkMac(f, keys.hash_key, keys.hash_iv) });
+    const paidFields = (keys, tradeNo, amount, extra = {}) => ({
+      MerchantID: keys.merchant_id, MerchantTradeNo: tradeNo, StoreID: '', RtnCode: '1', RtnMsg: '交易成功',
+      TradeNo: '2610281430001234', TradeAmt: String(amount), PaymentDate: '2026/10/28 14:30:00',
+      PaymentType: 'Credit_CreditCard', PaymentTypeChargeFee: '25', TradeDate: '2026/10/28 14:29:00',
+      SimulatePaid: '0', CustomField1: '', CustomField2: '', CustomField3: '', CustomField4: '', ...extra });
+    const amt = Number(f1.TotalAmount);
+    const stmtStatus = async () => (await B('GET', '/api/v1/statements/list')).json.data.statements
+      .find((x) => x.statement_id === buyerStmt.statement_id);
+    const paidLogs = async () => (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data
+      .filter((l) => l.action === 'ecpay.paid' && l.target === buyerStmt.statement_id);
+
+    const forged = await cb(signed({ ...EC_LIVE, hash_key: 'attackerKey00000' }, paidFields(EC_LIVE, f1.MerchantTradeNo, amt)));
+    check('檢查碼不對 → 回 0|，不入帳', forged.text.startsWith('0|') && (await stmtStatus()).payment_status === '待付款', forged);
+    check('不認識的交易編號 → 回 0|',
+      (await cb(signed(EC_LIVE, paidFields(EC_LIVE, 'HB000000000000ZZZZZZ', amt)))).text.startsWith('0|'));
+    check('特店編號不是我們的 → 回 0|',
+      (await cb(signed(EC_LIVE, paidFields({ ...EC_LIVE, merchant_id: '1234567' }, f1.MerchantTradeNo, amt)))).text.startsWith('0|'));
+    const failCb = await cb(signed(EC_LIVE, paidFields(EC_LIVE, f1.MerchantTradeNo, amt, { RtnCode: '10100058', RtnMsg: '付款失敗' })));
+    check('付款失敗（RtnCode≠1）→ 回 1|OK，不入帳', failCb.text === '1|OK' && (await stmtStatus()).payment_status === '待付款', failCb);
+    check('金額不符 → 回 1|OK，不入帳（留給店主確認）',
+      (await cb(signed(EC_LIVE, paidFields(EC_LIVE, pi2.fields.MerchantTradeNo, amt - 1)))).text === '1|OK'
+        && (await stmtStatus()).payment_status === '待付款');
+    check('正式環境收到「模擬付款」→ 回 1|OK，不入帳',
+      (await cb(signed(EC_LIVE, paidFields(EC_LIVE, pi2.fields.MerchantTradeNo, amt, { SimulatePaid: '1' })))).text === '1|OK'
+        && (await stmtStatus()).payment_status === '待付款');
+
+    // 客人先棄單一次，付清後應該自動恢復喊單資格
+    const ecDrop = (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: 'BC-SEED-002', qty: 1 } })).json.data;
+    await B('POST', '/api/v1/cart/remove', { body: { cart_id: ecDrop.cart_item.cart_id } });
+    check('（前置）客人目前被暫停喊單', (await B('GET', '/api/v1/me/profile')).json.data.shout_suspended === true);
+
+    const good = signed(EC_LIVE, paidFields(EC_LIVE, pi2.fields.MerchantTradeNo, amt));
+    const burst = await Promise.all([cb(good), cb(good), cb(good)]);
+    check('付款成功：同時收到 3 次回調，每次都回純文字 1|OK',
+      burst.every((r) => r.status === 200 && r.text === '1|OK' && r.type.startsWith('text/plain')), burst);
+    const afterPaid = await stmtStatus();
+    check('對帳單變成「已核對」、付款方式信用卡', afterPaid.payment_status === '已核對' && afterPaid.payway === 'credit', afterPaid);
+    check('底下的訂單一起變成已付款',
+      (await B('GET', `/api/v1/orders/detail?order_id=${buyerOrderId}`)).json.data.paid === true);
+    check('只入帳一次（3 次回調只有 1 筆入帳紀錄）', (await paidLogs()).length === 1, (await paidLogs()).length);
+    const dup = await cb(good);
+    check('之後綠界再重送同一筆 → 1|OK，還是只有 1 筆', dup.text === '1|OK' && (await paidLogs()).length === 1);
+    const paidLog = (await paidLogs())[0];
+    check('稽核：經手人是「綠界（自動）」，客人顯示稱呼與會員編號',
+      paidLog.actor_label === '綠界（自動）' && /（HB-00005）$/.test(paidLog.subject_label) && paidLog.result === 'ok', paidLog);
+    check('付清後自動恢復喊單資格', (await B('GET', '/api/v1/me/profile')).json.data.shout_suspended === false);
+    const ecNotes = (await api('POST', '/api/v1/notify/pending',
+      { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 50 } })).json.data.notifications
+      .filter((n) => n.kind === 'payment_received' && n.statement_id === buyerStmt.statement_id);
+    check('排了一則「付款成功」通知給客人（只有一則，附文案）',
+      ecNotes.length === 1 && /付款成功/.test((typeof ecNotes[0].payload === 'string' ? JSON.parse(ecNotes[0].payload) : ecNotes[0].payload).text), ecNotes);
+    const late = await cb(signed(EC_LIVE, paidFields(EC_LIVE, f1.MerchantTradeNo, amt)));
+    const lateLogs = await paidLogs();
+    check('付清後，舊的那筆交易也刷成功了 → 記一筆「付了兩次」提醒店主退款，不重複入帳',
+      late.text === '1|OK' && lateLogs.length === 2 && lateLogs.some((l) => l.detail.double_paid === true && l.result === 'warn'), lateLogs);
+    const ecTrades = (await ecGet()).recent_trades.filter((t) => t.statement_id === buyerStmt.statement_id);
+    check('金流設定頁看得到刷卡紀錄', ecTrades.length === 2 && ecTrades.every((t) => t.status === 'paid'), ecTrades);
+
+    section('切換環境後，舊單的回調照開單時的環境驗簽');
+    check('測試環境的舊單用正式金鑰簽 → 0|',
+      (await cb(signed(EC_LIVE, paidFields(EC_STAGE, stageOwner.data.fields.MerchantTradeNo, Number(stageOwner.data.fields.TotalAmount))))).text.startsWith('0|'));
+    const stageCb = await cb(signed(EC_STAGE, paidFields(EC_STAGE, stageOwner.data.fields.MerchantTradeNo,
+      Number(stageOwner.data.fields.TotalAmount), { SimulatePaid: '1' })));
+    check('測試環境的單用測試金鑰簽 → 入帳（測試環境接受模擬付款，方便店家測）',
+      stageCb.text === '1|OK' && (await api('GET', '/api/v1/statements/admin-list', { token: owner })).json.data
+        .find((x) => x.statement_id === ownerStmt.statement_id)?.payment_status === '已核對', stageCb);
+    const ecBlocked = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data
+      .filter((l) => l.action === 'ecpay.return' && l.result === 'blocked');
+    check('被擋下的回調都記在稽核', ecBlocked.length >= 4, ecBlocked.length);
+    await ecPost(owner, '/env', { env: 'stage' });
 
     section('後台 LINE 登入（白名單就是 members）');
     const cfg = (await api('GET', '/api/v1/auth/config')).json.data;

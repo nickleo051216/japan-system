@@ -84,13 +84,12 @@ module.exports = {
   supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
   supabaseServiceKey: (process.env.SUPABASE_SERVICE_KEY || '').trim(),
   supabaseBucket: (process.env.SUPABASE_BUCKET || 'cart-images').trim(),
-  // 綠界（ECPay）。HashKey／HashIV 只在伺服器端，永遠不進 API 回應或前端。
-  // 沒設就不開放線上刷卡（回 503），不會退化成不驗簽。
-  ecpayMerchantId: (process.env.ECPAY_MERCHANT_ID || '').trim(),
-  ecpayHashKey: (process.env.ECPAY_HASH_KEY || '').trim(),
-  ecpayHashIv: (process.env.ECPAY_HASH_IV || '').trim(),
-  ecpayApiUrl: (process.env.ECPAY_API_URL || 'https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5').trim(),
-  ecpayReturnUrl: (process.env.ECPAY_RETURN_URL || '').trim(),
+  // 綠界（ECPay）的特店編號與 HashKey／HashIV 不放環境變數：店主在後台「金流設定」填，
+  // 存在 Supabase Vault（見 lib/ecpay.js、009_ecpay.sql）。這裡只留回調網址：
+  // 綠界付款完成後要打回來的公開網址。沒設就用 Vercel 的正式網域推出來。
+  ecpayReturnUrl: (process.env.ECPAY_RETURN_URL || '').trim()
+    || (process.env.VERCEL_PROJECT_PRODUCTION_URL
+      ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}/api/v1/ecpay/return` : ''),
   qrSigningKey: keyOrEphemeral('QR_SIGNING_KEY'),
   sessionSigningKey: keyOrEphemeral('SESSION_SIGNING_KEY'),
   defaultFxRate: Number(process.env.FX_JPY_TWD || 0.215),

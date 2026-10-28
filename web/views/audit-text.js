@@ -88,6 +88,22 @@ const SAY = {
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, ''],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
 
+  'ecpay.paid': (t, d, l) => (d.double_paid
+    ? [`${l.subject_label || '客人'} 用信用卡付了對帳單 ${t}，但這張之前已經付清了`, `收到 ${ntd(d.amount)}，等於付了兩次，請店主退款`]
+    : [`${l.subject_label || '客人'} 用信用卡付清對帳單 ${t}`, `收到 ${ntd(d.amount)}${d.env === 'stage' ? '（綠界測試環境，沒有真的扣款）' : ''}`]),
+  'ecpay.failed': (t, d, l) => [`${l.subject_label || '客人'} 刷卡付對帳單 ${t} 沒有成功`, d.rtn_msg ? `綠界說：${d.rtn_msg}` : ''],
+  'ecpay.ignored': (t, d, l) => [`收到對帳單 ${t} 的刷卡通知，但沒有入帳`,
+    d.reason === 'amount_mismatch' ? `金額不符：應收 ${ntd(d.amount)}，綠界回報 ${ntd(d.got)}，請到綠界後台確認`
+      : '這是綠界後台的「模擬付款」，正式環境不入帳']),
+  'ecpay.return': (t, d) => ['擋下一筆來路不明的付款通知', ({
+    bad_mac: '檢查碼對不上（不是綠界送的，或金鑰不一致）', unknown_trade: '找不到這筆交易編號',
+    merchant_mismatch: '特店編號不是我們的', bad_request: '格式不對' })[d.reason] || ''],
+  'settings.ecpay': (t, d, l) => (l.result === 'blocked'
+    ? [`想更新綠界${d.env === 'live' ? '正式' : '測試'}環境的金鑰，但綠界驗證沒過`, d.verify || '']
+    : [`更新綠界${d.env === 'live' ? '正式' : '測試'}環境的金鑰`, `特店編號 ${d.merchant_id}，HashKey 末四碼 ${d.key_last4}，HashIV 末四碼 ${d.iv_last4}`]),
+  'settings.ecpay_env': (t, d) => [`把線上刷卡切換成${d.to === 'live' ? '「正式收款」' : '「測試環境」'}`,
+    `原本是${d.from === 'live' ? '正式收款' : '測試環境'}`],
+
   'settings.fx': (t, d) => [`把匯率從 ${d.from} 改成 ${d.to}`, '已經登錄的成本不會跟著改'],
   'settings.batch': (t, d) => [`把目前的團切換成 ${d.batch}`, ''],
   'settings.shop': (t, d) => ['修改店家與收款設定', `改了：${(d.keys || []).map((k) => SHOP_KEY[k] || k).join('、') || '—'}`],
