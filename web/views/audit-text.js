@@ -78,9 +78,10 @@ const SAY = {
   'procurement.expense': (t, d) => [`登錄採購成本：「${t}」`,
     `單價 ${yen(d.unit_cost_jpy)} × ${d.qty} 件，匯率 ${d.fx}${d.amount_edited ? '（金額有手動修改）' : ''}`],
 
-  'batch.create': (t) => [`開新團：${t}`, ''],
+  'batch.create': (t, d) => [`開新團：${t}`, d && d.via === 'broadcast' ? '開喊單時一起開的' : ''],
   'broadcast.create': (t, d) => [`開喊單：「${t}」`, `數量 ${d.quantity}，售價 ${ntd(d.price_twd)}`],
   'broadcast.close': (t) => [`關閉喊單：「${t}」`, ''],
+  'broadcast.image': (t, d) => [`${d && d.replaced ? '更換' : '加上'}喊單「${t}」的照片`, ''],
   'broadcast.adjust': (t, d) => [`調整喊單「${t}」的數量`, `${d.delta > 0 ? '增加' : '減少'} ${Math.abs(d.delta)} 個`],
   'wish.quote': (t, d) => [`替許願「${t}」報價 ${ntd(d.quote_twd)}`, ''],
   'wish.mark': (t, d) => [`把許願「${t}」標記為${q(d.status)}`, ''],

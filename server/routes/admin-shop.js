@@ -20,6 +20,7 @@ const { get, post, ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const shipfee = require('../lib/shipfee');
 const drops = require('../lib/drops');
+const storage = require('../lib/storage');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -69,6 +70,9 @@ const broadcastShape = (b) => ({
   waitlist: b.waitlist === undefined ? undefined : b.waitlist,
 });
 
+/** 照片是私有 bucket 的 `storage:` 參照，給畫面前換成短效簽名網址。 */
+const signedShape = async (rows) => storage.resolve(rows.map(broadcastShape), 'image_url');
+
 get('/api/v1/broadcast/admin-list', async ({ actor, query }) => {
   auth.requireCap(actor, 'broadcast');
   const batch = query.batch || await currentBatch();
@@ -76,8 +80,50 @@ get('/api/v1/broadcast/admin-list', async ({ actor, query }) => {
     `SELECT b.*, (SELECT count(*) FROM restock_watch w
                    WHERE w.item_ref = b.send_id AND w.kind = 'waitlist') AS waitlist
        FROM broadcast b WHERE (?::text IS NULL OR b.batch = ?) ORDER BY b.created_at DESC`, batch, batch);
-  return ok({ batch, broadcasts: rows.map(broadcastShape) });
+  return ok({ batch, broadcasts: await signedShape(rows) });
 });
+
+/**
+ * 開喊單的表單需要知道的事：目前團別、價目表上限。
+ * 價目表上限給「超過請直接填台幣」的提示用 —— 周小姐第一次開喊單就是卡在這裡。
+ */
+get('/api/v1/broadcast/form-info', async ({ actor }) => {
+  auth.requireCap(actor, 'broadcast');
+  const [batch, table] = await Promise.all([
+    currentBatch().then((b) => (b ? db.one('SELECT batch, name FROM batches WHERE batch = ?', b) : null)),
+    price.table(),
+  ]);
+  return ok({ batch: batch || null, price_max_jpy: table.length ? table[table.length - 1].jpy_taxed_max : null });
+});
+
+/**
+ * 還沒開團時，開喊單順便開一團（Nick 2026-11-09 決定）。
+ * 「團」在這裡是「這一趟採買」，喊單、訂單、對帳都掛在它底下；沒有團的喊單會從
+ * 後台「本團喊單」消失、客人卻還能搶，所以不讓喊單掛空。
+ * 團號自動用台灣日期 T-YYMMDD，同一天開第二團接 -2、-3。
+ */
+async function ensureBatch(actor, batchName) {
+  const cur = await currentBatch();
+  if (cur) return cur;
+  const name = String(batchName ?? '').trim();
+  if (!name) throw err('NO_BATCH', '還沒開團：請先填「這一趟叫什麼」（例：11/20 大阪採買），系統會一起開團', 409);
+  if (name.length > 40) throw err('BAD_NAME', '團名最多 40 個字');
+  auth.requireCap(actor, 'settings.write');
+  const base = `T-${twDate().ymd.slice(2)}`;
+  for (let i = 1; i <= 9; i++) {
+    const batch = i === 1 ? base : `${base}-${i}`;
+    const res = await db.run(
+      `INSERT INTO batches (batch, name, stage, opened_at, created_at) VALUES (?,?,0,?,?) ON CONFLICT (batch) DO NOTHING`,
+      batch, name, now(), now());
+    if (res.changes > 0) {
+      await db.putSetting('current_batch', batch);
+      await audit.record({ actor: actor.line_user_id, action: 'batch.create', target: batch,
+        detail: { via: 'broadcast' }, result: 'ok' });
+      return batch;
+    }
+  }
+  throw err('BUSY', '今天已經開了太多團，請到「開團」手動填團號', 409);
+}
 
 post('/api/v1/broadcast/create', async ({ actor, body }) => {
   auth.requireCap(actor, 'broadcast');
@@ -90,11 +136,22 @@ post('/api/v1/broadcast/create', async ({ actor, body }) => {
   // 售價以查表為準；只有超出級距（或大型品加價）才讓店主直接填台幣。
   let twd = num(body.price_twd);
   if (twd === null && jpy !== null) twd = await price.twdOf(jpy);
-  if (!(twd > 0)) throw err('BAD_PRICE', jpy !== null ? '超出價目表級距，請直接填台幣售價' : '請填日幣金額或台幣售價');
+  if (!(twd > 0)) {
+    if (jpy === null) throw err('BAD_PRICE', '請填日幣金額或台幣售價');
+    const table = await price.table();
+    const max = table.length ? table[table.length - 1].jpy_taxed_max : null;
+    throw err('BAD_PRICE', max
+      ? `日幣 ¥${jpy.toLocaleString('en-US')} 超過價目表上限 ¥${max.toLocaleString('en-US')}，請直接填台幣售價`
+      : '價目表是空的，請直接填台幣售價');
+  }
   const deadline = isoOrNull(body.deadline_at, '截止');
   if (deadline && new Date(deadline).getTime() <= Date.now()) throw err('BAD_TIME', '截止時間要在現在之後');
+  // 照片一律走 /broadcast/image 上傳；這裡只收自己 bucket 裡喊單資料夾的參照，不收任意網址。
+  const imageUrl = typeof body.image_url === 'string' && body.image_url.startsWith(storage.PREFIX + 'broadcast/')
+    ? body.image_url : null;
 
-  const batch = await currentBatch();
+  // 驗證都過了才開團：不然填錯價錢也會多出一個空團。
+  const batch = await ensureBatch(actor, body.batch_name);
   const { md } = twDate();
   // 編號沿用營運習慣 BC-MMDD-NNN。同時開兩張撞號時，主鍵擋下，換下一號重試。
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -105,14 +162,45 @@ post('/api/v1/broadcast/create', async ({ actor, body }) => {
     const res = await db.run(
       `INSERT INTO broadcast (send_id, batch, name, jpy_taxed, price_twd, quantity, remaining, deadline_at, note, image_url, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (send_id) DO NOTHING`,
-      sendId, batch, name, jpy, twd, quantity, quantity, deadline, body.note || null, body.image_url || null, now());
+      sendId, batch, name, jpy, twd, quantity, quantity, deadline, body.note || null, imageUrl, now());
     if (res.changes > 0) {
       await audit.record({ actor: actor.line_user_id, action: 'broadcast.create', target: sendId,
         detail: { quantity, price_twd: twd }, result: 'ok' });
-      return ok(broadcastShape(await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)));
+      return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
     }
   }
   throw err('BUSY', '同時開單的人太多，請再按一次', 409);
+});
+
+/**
+ * 喊單照片：開喊單之後上傳，也可以之後補上或更換。
+ * 後台在瀏覽器先壓縮（長邊 1200px、JPEG）再送，這裡再擋一次大小與格式。
+ * 每次換照片用新檔名，避免客人看到瀏覽器快取的舊照片。
+ */
+const BC_IMAGE = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/;
+const BC_IMAGE_MAX = 3 * 1024 * 1024;
+
+post('/api/v1/broadcast/image', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  const sendId = String(body.send_id ?? '');
+  const row = await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId);
+  if (!row) throw err('NOT_FOUND', '找不到這張喊單', 404);
+  const m = BC_IMAGE.exec(String(body.data ?? ''));
+  if (!m) throw err('BAD_IMAGE', '照片格式不對，請選 JPG、PNG 或 WebP');
+  const buf = Buffer.from(m[2], 'base64');
+  if (!buf.length || buf.length > BC_IMAGE_MAX) throw err('BAD_IMAGE', '照片太大（上限 3 MB），請換一張');
+  const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[m[1].toLowerCase()];
+  let ref;
+  try {
+    ref = await storage.put(`broadcast/${sendId}-${Date.now()}.${ext}`, buf, m[1]);
+  } catch (e) {
+    console.error('[broadcast] 照片上傳失敗：', e.message);
+    throw Object.assign(new Error('照片上傳失敗，請再試一次'), { code: 'UPLOAD_FAILED', status: 503 });
+  }
+  await db.run('UPDATE broadcast SET image_url = ? WHERE send_id = ?', ref, sendId);
+  await audit.record({ actor: actor.line_user_id, action: 'broadcast.image', target: sendId,
+    detail: { replaced: !!row.image_url }, result: 'ok' });
+  return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
 });
 
 /** 提前截止。已被搶走的不受影響，只是之後不能再搶。 */
@@ -123,7 +211,7 @@ post('/api/v1/broadcast/close', async ({ actor, body }) => {
       WHERE send_id = ? AND (deadline_at IS NULL OR deadline_at > now())`, String(body.send_id ?? ''));
   if (res.changes === 0) throw err('NOT_OPEN', '找不到這個喊單，或它已經截止了', 409);
   await audit.record({ actor: actor.line_user_id, action: 'broadcast.close', target: body.send_id, result: 'ok' });
-  return ok(broadcastShape(await db.one('SELECT * FROM broadcast WHERE send_id = ?', body.send_id)));
+  return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', body.send_id)]))[0]);
 });
 
 /**
@@ -140,7 +228,7 @@ post('/api/v1/broadcast/adjust', async ({ actor, body }) => {
   if (res.changes === 0) throw err('SOLD_OUT', '已經被搶走的數量不能扣回來', 409);
   await audit.record({ actor: actor.line_user_id, action: 'broadcast.adjust', target: body.send_id,
     detail: { delta }, result: 'ok' });
-  return ok(broadcastShape(await db.one('SELECT * FROM broadcast WHERE send_id = ?', body.send_id)));
+  return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', body.send_id)]))[0]);
 });
 
 // ---- 許願報價 -------------------------------------------------------------

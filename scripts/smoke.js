@@ -81,10 +81,10 @@ const envFor = (databaseUrl) => ({
 });
 
 /** Start scripts/pg-harness.mjs and resolve with the DATABASE_URL it prints. */
-function startHarness() {
+function startHarness(port) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'pg-harness.mjs')],
-      { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: ROOT, env: port ? { ...process.env, PG_HARNESS_PORT: String(port) } : process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = '';
     const timer = setTimeout(() => reject(new Error('harness 啟動逾時')), 120000);
     child.stdout.on('data', (d) => {
@@ -610,15 +610,43 @@ const login = async (id) =>
     section('後台 — 開喊單');
     check('小幫手不能開喊單（僅店主）',
       (await api('POST', '/api/v1/broadcast/create', { token: helper, body: { name: 'x', jpy_taxed: 500, quantity: 1 } })).status === 403);
-    check('超出級距又沒填台幣 → BAD_PRICE',
-      (await api('POST', '/api/v1/broadcast/create', { token: owner, body: { name: 'x', jpy_taxed: 99999, quantity: 1 } }))
-        .json.error?.code === 'BAD_PRICE');
+    const overMax = (await api('POST', '/api/v1/broadcast/create', { token: owner, body: { name: 'x', jpy_taxed: 99999, quantity: 1 } })).json;
+    check('超出級距又沒填台幣 → BAD_PRICE，訊息寫出價目表上限，周小姐知道該填台幣',
+      overMax.error?.code === 'BAD_PRICE' && /¥2,519/.test(overMax.error.message) && /台幣/.test(overMax.error.message), overMax.error);
+    const fInfo = (await api('GET', '/api/v1/broadcast/form-info', { token: owner })).json.data;
+    check('開喊單表單拿得到目前團別與價目表上限', fInfo.batch?.batch === 'T-SMOKE-01' && fInfo.price_max_jpy === 2519, fInfo);
+    check('小幫手拿不到開喊單表單資訊', (await api('GET', '/api/v1/broadcast/form-info', { token: helper })).status === 403);
     const inHour = new Date(Date.now() + 3600_000).toISOString();
     const bc = (await api('POST', '/api/v1/broadcast/create',
       { token: owner, body: { name: '西松屋 紗布巾', jpy_taxed: 1639, quantity: 4, deadline_at: inHour } })).json.data;
     check('開喊單 → 售價查表（¥1639 → 600）、歸入目前團', bc.price_twd === 600 && bc.batch === 'T-SMOKE-01', bc);
     const seen = (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((b) => b.send_id === bc.send_id);
     check('客人首頁立刻看到新喊單、可以搶', !!seen && seen.open === true);
+
+    section('喊單照片（後台上傳、私有空間、簽名網址）');
+    const jpgData = 'data:image/jpeg;base64,' + Buffer.from('fake-broadcast-jpeg').toString('base64');
+    const BI = (token, body) => api('POST', '/api/v1/broadcast/image', { token, body });
+    check('小幫手不能上傳喊單照片', (await BI(helper, { send_id: bc.send_id, data: jpgData })).status === 403);
+    check('找不到的喊單 → 404', (await BI(owner, { send_id: 'BC-0000-999', data: jpgData })).status === 404);
+    check('不是照片 → BAD_IMAGE', (await BI(owner, { send_id: bc.send_id, data: 'data:text/plain;base64,aGk=' })).json.error?.code === 'BAD_IMAGE');
+    check('太大 → BAD_IMAGE',
+      (await BI(owner, { send_id: bc.send_id, data: 'data:image/jpeg;base64,' + Buffer.alloc(3 * 1024 * 1024 + 10).toString('base64') })).json.error?.code === 'BAD_IMAGE');
+    const up1 = (await BI(owner, { send_id: bc.send_id, data: jpgData })).json.data;
+    const bcKeys = () => [...storageMock.objects.keys()].filter((k) => k.startsWith(`broadcast/${bc.send_id}-`));
+    check('照片存進私有空間的 broadcast/ 資料夾', bcKeys().length === 1 && storageMock.objects.get(bcKeys()[0]).toString() === 'fake-broadcast-jpeg', bcKeys());
+    check('回傳的是簽名網址，不是存放路徑', /\/object\/sign\/cart-images\/broadcast\/.+token=t900/.test(up1.image_url || ''), up1.image_url);
+    const homeBc = (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((x) => x.send_id === bc.send_id);
+    check('客人首頁的喊單照片是 15 分鐘簽名網址（前台過期會重抓）',
+      /token=t900/.test(homeBc?.image_url || '') && !/^storage:/.test(homeBc.image_url), homeBc?.image_url);
+    const adminBc = (await api('GET', '/api/v1/broadcast/admin-list', { token: owner })).json.data.broadcasts.find((x) => x.send_id === bc.send_id);
+    check('後台喊單列表的縮圖也是簽名網址', /token=t900/.test(adminBc?.image_url || ''), adminBc?.image_url);
+    await BI(owner, { send_id: bc.send_id, data: jpgData });
+    check('更換照片 → 用新檔名（客人不會看到快取的舊照片）', bcKeys().length === 2);
+    const imgLogs = (await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data.filter((l) => l.action === 'broadcast.image');
+    check('加照片、換照片都記在稽核', imgLogs.length === 2 && imgLogs.some((l) => l.detail.replaced === true), imgLogs.map((l) => l.detail));
+    const evil = (await api('POST', '/api/v1/broadcast/create', { token: owner,
+      body: { name: '外部圖片測試', price_twd: 100, quantity: 1, image_url: 'https://evil.example/x.jpg' } })).json.data;
+    check('開喊單不收外部網址當照片（只能走上傳）', evil.image_url === null, evil);
     await B('POST', '/api/v1/broadcast/shout', { body: { send_id: bc.send_id, qty: 3 } });
     check('減量不能扣到已被搶走的份 → 409',
       (await api('POST', '/api/v1/broadcast/adjust', { token: owner, body: { send_id: bc.send_id, delta: -2 } })).status === 409);
@@ -1187,6 +1215,46 @@ const login = async (id) =>
         body: JSON.stringify({ line_user_id: 'U_owner', password: ADMIN_PW }) })).json();
       check('密碼正確也換不到 token（入口已關）', offLogin.error?.code === 'PASSWORD_LOGIN_DISABLED', offLogin);
     } finally { off.kill(); }
+
+    // 「還沒開團」只會發生在全新的資料庫（示範資料一定有團），所以另開一個空的資料庫測。
+    section('還沒開團：開喊單順便開團（全新資料庫）');
+    const FRESH_PORT = PORT + 8;
+    const fresh = await startHarness(55432 + 9);
+    const { Client } = require('pg');
+    const pgc = new Client({ connectionString: fresh.url });
+    await pgc.connect();
+    await pgc.query("INSERT INTO members (line_user_id, nickname, display_name, role, created_at) VALUES ('U_fresh_owner','新店主','新店主','owner', now())");
+    await pgc.end();
+    const freshSrv = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+      cwd: ROOT, stdio: ['ignore', 'ignore', 'ignore'], env: { ...envFor(fresh.url), PORT: String(FRESH_PORT) } });
+    try {
+      const F = `http://127.0.0.1:${FRESH_PORT}`;
+      const fapi = async (method, url, body, token) => {
+        const r = await fetch(F + url, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: body ? JSON.stringify(body) : undefined });
+        return { status: r.status, json: await r.json() };
+      };
+      let ftok = null;
+      for (let i = 0; i < 100 && !ftok; i++) {
+        try { ftok = (await fapi('POST', '/api/v1/auth/login', { line_user_id: 'U_fresh_owner', password: ADMIN_PW })).json.data?.token; }
+        catch { await new Promise((r) => setTimeout(r, 100)); }
+      }
+      const fi0 = (await fapi('GET', '/api/v1/broadcast/form-info', null, ftok)).json.data;
+      check('全新資料庫：表單知道還沒開團、價目表上限 ¥2,519', fi0.batch === null && fi0.price_max_jpy === 2519, fi0);
+      const noBatch = (await fapi('POST', '/api/v1/broadcast/create', { name: '紗布巾', price_twd: 300, quantity: 2 }, ftok)).json;
+      check('沒開團又沒填「這一趟叫什麼」→ 409 NO_BATCH，請她填團名', noBatch.error?.code === 'NO_BATCH' && /這一趟/.test(noBatch.error.message), noBatch.error);
+      const badFirst = (await fapi('POST', '/api/v1/broadcast/create',
+        { name: '紗布巾', jpy_taxed: 99999, quantity: 2, batch_name: '11/20 大阪採買' }, ftok)).json;
+      check('價錢填錯就不會開團（不會多一個空團）',
+        badFirst.error?.code === 'BAD_PRICE' && (await fapi('GET', '/api/v1/broadcast/form-info', null, ftok)).json.data.batch === null, badFirst.error);
+      const withBatch = (await fapi('POST', '/api/v1/broadcast/create',
+        { name: '紗布巾', price_twd: 300, quantity: 2, batch_name: '11/20 大阪採買' }, ftok)).json.data;
+      check('填了團名 → 一次開團＋開喊單，喊單掛在新團底下', /^T-\d{6}$/.test(withBatch?.batch || ''), withBatch);
+      const fi1 = (await fapi('GET', '/api/v1/broadcast/form-info', null, ftok)).json.data;
+      check('新團成為目前團別，名稱照她填的', fi1.batch?.batch === withBatch.batch && fi1.batch.name === '11/20 大阪採買', fi1);
+      const next = (await fapi('POST', '/api/v1/broadcast/create', { name: '口罩', price_twd: 150, quantity: 5 }, ftok)).json.data;
+      check('之後再開喊單就直接放進這一團，不用再填團名', next?.batch === withBatch.batch, next);
+    } finally { freshSrv.kill(); fresh.child.kill(); }
   } catch (e) {
     failed++;
     console.error('\n測試中止：', e);
