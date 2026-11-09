@@ -125,8 +125,12 @@ async function ensureBatch(actor, batchName) {
   throw err('BUSY', '今天已經開了太多團，請到「開團」手動填團號', 409);
 }
 
-post('/api/v1/broadcast/create', async ({ actor, body }) => {
-  auth.requireCap(actor, 'broadcast');
+/**
+ * 開一張喊單：驗證 → （沒團就順便開團）→ 配 BC-MMDD-NNN 編號 → 寫入。
+ * 後台「開喊單」和許願牆「轉成喊單」共用這一段，規則只寫一次。
+ * imageUrl 是已經驗過的自家 bucket 參照（呼叫的人負責），沒有就 null。
+ */
+async function createBroadcast(actor, body, imageUrl) {
   const name = String(body.name ?? '').trim();
   if (!name) throw err('BAD_NAME', '請填品名');
   const quantity = Number(body.quantity);
@@ -146,10 +150,6 @@ post('/api/v1/broadcast/create', async ({ actor, body }) => {
   }
   const deadline = isoOrNull(body.deadline_at, '截止');
   if (deadline && new Date(deadline).getTime() <= Date.now()) throw err('BAD_TIME', '截止時間要在現在之後');
-  // 照片一律走 /broadcast/image 上傳；這裡只收自己 bucket 裡喊單資料夾的參照，不收任意網址。
-  const imageUrl = typeof body.image_url === 'string' && body.image_url.startsWith(storage.PREFIX + 'broadcast/')
-    ? body.image_url : null;
-
   // 驗證都過了才開團：不然填錯價錢也會多出一個空團。
   const batch = await ensureBatch(actor, body.batch_name);
   const { md } = twDate();
@@ -165,11 +165,20 @@ post('/api/v1/broadcast/create', async ({ actor, body }) => {
       sendId, batch, name, jpy, twd, quantity, quantity, deadline, body.note || null, imageUrl, now());
     if (res.changes > 0) {
       await audit.record({ actor: actor.line_user_id, action: 'broadcast.create', target: sendId,
-        detail: { quantity, price_twd: twd }, result: 'ok' });
-      return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
+        detail: { quantity, price_twd: twd, ...(body.from_wish ? { from_wish: body.from_wish } : {}) }, result: 'ok' });
+      return db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId);
     }
   }
   throw err('BUSY', '同時開單的人太多，請再按一次', 409);
+}
+
+post('/api/v1/broadcast/create', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  // 照片一律走 /broadcast/image 上傳；這裡只收自己 bucket 裡喊單資料夾的參照，不收任意網址。
+  const imageUrl = typeof body.image_url === 'string' && body.image_url.startsWith(storage.PREFIX + 'broadcast/')
+    ? body.image_url : null;
+  const row = await createBroadcast(actor, { ...body, from_wish: undefined }, imageUrl);
+  return ok((await signedShape([row]))[0]);
 });
 
 /**
@@ -235,13 +244,92 @@ post('/api/v1/broadcast/adjust', async ({ actor, body }) => {
 
 const WISH_MARKS = ['待處理', '現場缺貨', '保留下團'];
 
+const WALL_STATUSES = ['private', 'pending', 'public', 'hidden'];
+
+/**
+ * 許願列表。依「想要的人數」排 —— 想要的人越多越該先處理。
+ * ?wall=pending 只看「客人勾了公開、等審核」的；?status= 照許願狀態篩。
+ */
 get('/api/v1/wishes/admin-list', async ({ actor, query }) => {
   auth.requireCap(actor, 'order.read');
   const status = query.status || '待處理';
+  const wall = WALL_STATUSES.includes(query.wall) ? query.wall : null;
   const rows = await db.all(
-    `SELECT w.*, m.nickname FROM wishlist w JOIN members m ON m.line_user_id = w.line_user_id
-      WHERE (? = '全部' OR w.wish_status = ?) ORDER BY w.wished_at`, status, status);
-  return ok(auth.redact(actor, rows.map((w) => ({ ...w, quote_twd: num(w.quote_twd) }))));
+    `SELECT w.*, m.nickname,
+            (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes
+       FROM wishlist w JOIN members m ON m.line_user_id = w.line_user_id
+      WHERE (?::text IS NOT NULL AND w.wall_status = ?)
+         OR (?::text IS NULL AND (? = '全部' OR w.wish_status = ?))
+      ORDER BY votes DESC, w.wished_at`, wall, wall, wall, status, status);
+  const shaped = rows.map((w) => ({ ...w, quote_twd: num(w.quote_twd), votes: Number(w.votes) }));
+  return ok(auth.redact(actor, await storage.resolve(shaped, 'picture')));
+});
+
+/**
+ * 許願牆審核：public＝放上牆、hidden＝收下來。
+ * 客人沒勾「公開」的（private）店家也不能放上去：那是客人的隱私，由這裡擋。
+ * 放上牆就是對所有客人發佈內容，所以跟開喊單一樣只有店主能做。
+ */
+post('/api/v1/wishes/wall', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  const to = body.status;
+  if (!['public', 'hidden'].includes(to)) throw err('BAD_STATUS', '只能放上牆（public）或收下來（hidden）');
+  const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', String(body.wish_id ?? ''));
+  if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+  if (w.wall_status === 'private') throw err('NOT_SHARED', '客人沒有勾「公開到許願牆」，不能放上去', 409);
+  const res = await db.run(
+    `UPDATE wishlist SET wall_status = ?,
+            wall_at = CASE WHEN ? = 'public' AND wall_status <> 'public' THEN now() ELSE wall_at END
+      WHERE wish_id = ? AND wall_status <> 'private'`, to, to, w.wish_id);
+  if (res.changes === 0) throw err('NOT_SHARED', '客人剛剛取消公開了', 409);
+  await audit.record({ actor: actor.line_user_id, action: 'wish.wall', target: w.wish_id,
+    detail: { from: w.wall_status, to }, result: 'ok' });
+  return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id));
+});
+
+/**
+ * 許願一鍵轉成喊單，並通知想要的人（許願的人＋按過 +1 的人）。
+ * 喊單的規則（價目表、數量、截止、沒團順便開團）跟一般開喊單完全一樣；
+ * 品名預設用許願的名稱、照片沿用許願的照片。
+ * 整段一筆交易，並先鎖住這則許願：連按兩下也只會開出一張喊單、只通知一次。
+ */
+const ntd = (v) => 'NT$' + Math.round(Number(v) || 0).toLocaleString('en-US');
+
+post('/api/v1/wishes/to-broadcast', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  const wishId = String(body.wish_id ?? '');
+  let row;
+  let notified = 0;
+  await db.tx(async () => {
+    const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ? FOR UPDATE', wishId);
+    if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+    if (w.broadcast_send_id) throw err('ALREADY_BROADCAST', `這則許願已經開成喊單 ${w.broadcast_send_id} 了`, 409);
+    const imageUrl = typeof w.picture === 'string' && w.picture.startsWith(storage.PREFIX) ? w.picture : null;
+    row = await createBroadcast(actor,
+      { ...body, name: String(body.name ?? '').trim() || w.item_name, from_wish: w.wish_id }, imageUrl);
+    await db.run('UPDATE wishlist SET broadcast_send_id = ? WHERE wish_id = ?', row.send_id, w.wish_id);
+
+    // 想要的人：許願的人＋按過 +1 的人，每人一則。
+    const people = await db.all(
+      `SELECT line_user_id FROM wish_votes WHERE wish_id = ?
+       UNION SELECT ? AS line_user_id`, w.wish_id, w.line_user_id);
+    const deadline = row.deadline_at
+      ? new Date(new Date(row.deadline_at).getTime() + 8 * 3600_000).toISOString().replace('T', ' ').slice(5, 16).replace('-', '/')
+      : null;
+    for (const p of people) {
+      const own = p.line_user_id === w.line_user_id;
+      const text = `🙌 ${own ? '你許的願' : '你按了 +1 的許願'}開喊單了！\n\n`
+        + `「${row.name}」\n${ntd(row.price_twd)}｜限量 ${row.quantity} 個`
+        + (deadline ? `｜${deadline} 截止` : '')
+        + `\n\n先搶先贏，打開商店首頁就能喊單 👉`;
+      if (await notify.queue({ kind: 'wish_broadcast', lineUserId: p.line_user_id,
+        payload: { send_id: row.send_id, wish_id: w.wish_id, text } })) notified += 1;
+    }
+    await audit.record({ actor: actor.line_user_id, action: 'wish.to_broadcast', target: w.wish_id,
+      detail: { send_id: row.send_id, notified }, result: 'ok' });
+  });
+  notify.poke();
+  return ok({ broadcast: (await signedShape([row]))[0], notified });
 });
 
 post('/api/v1/wishes/quote', async ({ actor, body }) => {

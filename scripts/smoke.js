@@ -667,6 +667,110 @@ const login = async (id) =>
     check('已下單的許願不能再改價 → 409',
       (await api('POST', '/api/v1/wishes/quote', { token: owner, body: { wish_id: aw.wish_id, quote_twd: 1 } })).status === 409);
 
+    {
+    section('許願牆（客人勾公開 → 店主審核 → 大家 +1 → 一鍵轉喊單並通知）');
+    const B2 = (m, u, o) => api(m, u, { token: buyer2, ...o });
+    const wishJpg = 'data:image/jpeg;base64,' + Buffer.from('fake-wish-jpeg').toString('base64');
+    const pw = (await B('POST', '/api/v1/wishes/create', { body: {
+      src: 'photo', item_name: '阿卡將 限定口水巾', file_name: 'IMG_1.jpg', data: wishJpg, quantity: 1, public: true } })).json.data;
+    check('勾「公開到許願牆」→ 等店主審核，不會直接上牆', pw.wall_status === 'pending' && pw.votes === 0, pw);
+    const wishKey = `wish/${pw.wish_id}.jpg`;
+    check('照片許願的圖有存下來（以前只存檔名）', storageMock.objects.get(wishKey)?.toString() === 'fake-wish-jpeg', [...storageMock.objects.keys()]);
+    check('回給客人的是簽名網址', /\/object\/sign\/cart-images\/wish\/.+token=t900/.test(pw.picture || ''), pw.picture);
+    const pv = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '私人許願 不公開' } })).json.data;
+    check('沒勾公開 → 只有自己看得到（private）', pv.wall_status === 'private');
+    const board = async (who = B2, sort = '') => (await who('GET', '/api/v1/wishes/board' + (sort ? `?sort=${sort}` : ''))).json.data;
+    check('還沒審核的不會出現在許願牆', !(await board()).some((x) => x.wish_id === pw.wish_id));
+    check('還沒上牆的不能 +1 → 404',
+      (await B2('POST', '/api/v1/wishes/plus', { body: { wish_id: pw.wish_id } })).status === 404);
+
+    const WALL = (token, wish_id, status) => api('POST', '/api/v1/wishes/wall', { token, body: { wish_id, status } });
+    check('小幫手不能審核上牆（對所有客人發佈＝店主才行）', (await WALL(helper, pw.wish_id, 'public')).status === 403);
+    check('客人沒勾公開的，店主也不能放上牆 → 409 NOT_SHARED',
+      (await WALL(owner, pv.wish_id, 'public')).json.error?.code === 'NOT_SHARED');
+    check('狀態只能 public／hidden', (await WALL(owner, pw.wish_id, 'private')).json.error?.code === 'BAD_STATUS');
+    const pub = (await WALL(owner, pw.wish_id, 'public')).json.data;
+    check('店主放上牆 → public，記下上牆時間', pub.wall_status === 'public' && !!pub.wall_at, pub);
+    const onWall = (await board()).find((x) => x.wish_id === pw.wish_id);
+    check('其他客人在許願牆看得到：品名、照片、想要人數', !!onWall && onWall.item_name === '阿卡將 限定口水巾'
+      && onWall.wants === 1 && onWall.votes === 0 && onWall.voted === false && onWall.mine === false
+      && /token=t900/.test(onWall.picture || ''), onWall);
+    check('許願牆看不到是誰許的（沒有會員編號、暱稱、備註）',
+      !['line_user_id', 'nickname', 'member_no', 'note'].some((k) => k in onWall) && !JSON.stringify(onWall).includes('U_buyer1'), onWall);
+    check('許願的人自己看是 mine=true', (await board(B)).find((x) => x.wish_id === pw.wish_id)?.mine === true);
+
+    const PLUS = (who, on) => who('POST', '/api/v1/wishes/plus', { body: { wish_id: pw.wish_id, ...(on === undefined ? {} : { on }) } });
+    check('不能對自己的許願 +1 → 409 OWN_WISH', (await PLUS(B)).json.error?.code === 'OWN_WISH');
+    const p1 = (await PLUS(B2)).json.data;
+    check('別人按 +1 → 1 票、想要 2 人', p1.voted === true && p1.votes === 1 && p1.wants === 2, p1);
+    check('連按兩次不會變 2 票（一人一票）', (await PLUS(B2)).json.data.votes === 1);
+    const HP = (m, u, o) => api(m, u, { token: helper, ...o });
+    check('第三個人也按 +1 → 2 票', (await PLUS(HP)).json.data.votes === 2);
+    check('取消 +1 → 1 票', (await PLUS(B2, false)).json.data.votes === 1);
+    await PLUS(B2, true);
+    const mineView = (await board()).find((x) => x.wish_id === pw.wish_id);
+    check('許願牆顯示我按過了、想要 3 人', mineView.voted === true && mineView.wants === 3, mineView);
+    const hot = (await api('GET', '/api/v1/wishes/admin-list?wall=public', { token: owner })).json.data;
+    check('後台許願依想要人數排，第一筆是 2 票的', hot[0]?.wish_id === pw.wish_id && hot[0].votes === 2, hot.map((x) => [x.wish_id, x.votes]));
+    check('後台縮圖也是簽名網址', /token=t900/.test(hot[0]?.picture || ''), hot[0]?.picture);
+    check('後台「待上牆」分頁只列等審核的',
+      (await api('GET', '/api/v1/wishes/admin-list?wall=pending', { token: owner })).json.data.every((x) => x.wall_status === 'pending'));
+    check('客人自己的許願清單也看得到票數', (await B('GET', '/api/v1/wishes/list')).json.data.find((x) => x.wish_id === pw.wish_id)?.votes === 2);
+
+    const SHARE = (pub) => B('POST', '/api/v1/wishes/share', { body: { wish_id: pw.wish_id, public: pub } });
+    check('客人改成不公開 → 立刻從牆上下來', (await SHARE(false)).json.data.wall_status === 'private'
+      && !(await board()).some((x) => x.wish_id === pw.wish_id));
+    check('再改回公開 → 要重新審核（pending）', (await SHARE(true)).json.data.wall_status === 'pending');
+    await WALL(owner, pw.wish_id, 'public');
+    check('重新上牆，之前的 +1 還在', (await board()).find((x) => x.wish_id === pw.wish_id)?.votes === 2);
+    check('別人不能改我的許願公開設定 → 404',
+      (await B2('POST', '/api/v1/wishes/share', { body: { wish_id: pw.wish_id, public: false } })).status === 404);
+    await WALL(owner, pw.wish_id, 'hidden');
+    check('店主收下來 → 牆上看不到', !(await board()).some((x) => x.wish_id === pw.wish_id));
+    check('店主收下來的，客人不能自己再放上去 → 409 HIDDEN_BY_SHOP', (await SHARE(true)).json.error?.code === 'HIDDEN_BY_SHOP');
+    await WALL(owner, pw.wish_id, 'public');
+
+    const TB = (token, body) => api('POST', '/api/v1/wishes/to-broadcast', { token, body: { wish_id: pw.wish_id, ...body } });
+    check('小幫手不能轉成喊單', (await TB(helper, { jpy_taxed: 1639, quantity: 3 })).status === 403);
+    const bcCount = async () => (await api('GET', '/api/v1/broadcast/admin-list', { token: owner })).json.data.broadcasts.length;
+    const before = await bcCount();
+    const bad = (await TB(owner, { jpy_taxed: 99999, quantity: 3 })).json;
+    check('價錢超過價目表 → BAD_PRICE，而且沒有開出半張喊單、許願沒被標記',
+      bad.error?.code === 'BAD_PRICE' && (await bcCount()) === before
+      && !(await B('GET', '/api/v1/wishes/list')).json.data.find((x) => x.wish_id === pw.wish_id).broadcast_send_id, bad.error);
+    const tb = (await TB(owner, { jpy_taxed: 1639, quantity: 3, deadline_at: new Date(Date.now() + 2 * 3600_000).toISOString() })).json.data;
+    check('一鍵轉成喊單：品名沿用許願、售價查表 600、歸入目前團',
+      tb.broadcast.name === '阿卡將 限定口水巾' && tb.broadcast.price_twd === 600 && tb.broadcast.batch === 'T-SMOKE-01', tb);
+    check('喊單沿用許願的照片（簽名網址）', /\/cart-images\/wish\/.+token=t900/.test(tb.broadcast.image_url || ''), tb.broadcast.image_url);
+    check('通知想要的 3 個人（許願的人＋2 個 +1）', tb.notified === 3, tb);
+    check('同一則許願不能轉兩次 → 409 ALREADY_BROADCAST',
+      (await TB(owner, { jpy_taxed: 1639, quantity: 3 })).json.error?.code === 'ALREADY_BROADCAST');
+    const wn = (await api('POST', '/api/v1/notify/pending', { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 50 } }))
+      .json.data.notifications.filter((n) => n.kind === 'wish_broadcast');
+    const wp = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
+    check('排了 3 則 LINE 通知，每人一則，附喊單編號與文案',
+      wn.length === 3 && new Set(wn.map((n) => n.line_user_id)).size === 3
+      && wn.every((n) => wp(n).send_id === tb.broadcast.send_id && /阿卡將 限定口水巾/.test(wp(n).text) && /NT\$600/.test(wp(n).text)),
+      wn.map((n) => [n.line_user_id, wp(n).text]));
+    check('許願的人收到「你許的願開喊單了」，按 +1 的收到「你按了 +1 的許願」',
+      /你許的願/.test(wp(wn.find((n) => n.line_user_id === 'U_buyer1')).text)
+      && /你按了 \+1/.test(wp(wn.find((n) => n.line_user_id === 'U_buyer2')).text));
+    const bcOnWall = (await board()).find((x) => x.wish_id === pw.wish_id);
+    check('許願牆上這則變成「去搶」：附喊單編號、售價、剩餘',
+      bcOnWall?.broadcast?.send_id === tb.broadcast.send_id && bcOnWall.broadcast.price_twd === 600 && bcOnWall.broadcast.remaining === 3, bcOnWall);
+    check('客人的許願清單記著開成哪張喊單',
+      (await B('GET', '/api/v1/wishes/list')).json.data.find((x) => x.wish_id === pw.wish_id)?.broadcast_send_id === tb.broadcast.send_id);
+    const wallLogs = (await api('GET', '/api/v1/audit/list?limit=80', { token: owner })).json.data;
+    check('稽核記下上牆、收下來、轉成喊單（通知人數）',
+      wallLogs.some((l) => l.action === 'wish.wall' && l.detail.to === 'public')
+      && wallLogs.some((l) => l.action === 'wish.wall' && l.detail.to === 'hidden')
+      && wallLogs.some((l) => l.action === 'wish.to_broadcast' && l.detail.notified === 3 && l.detail.send_id === tb.broadcast.send_id)
+      && wallLogs.some((l) => l.action === 'broadcast.create' && l.detail.from_wish === pw.wish_id));
+    await api('POST', '/api/v1/broadcast/close', { token: owner, body: { send_id: tb.broadcast.send_id } });
+    check('喊單截止後，這則從許願牆下來', !(await board()).some((x) => x.wish_id === pw.wish_id));
+    check('排序參數 sort=new 也能用', Array.isArray(await board(B2, 'new')));
+    }
+
     section('後台 — 訂單報價（0 元品項不能漏）');
     const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
     check('沒填日幣的文字品項價格為 null', nx.price_twd === null);

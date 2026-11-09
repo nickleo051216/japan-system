@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.4
+# 買家 API 合約（Buyer API Contract）v1.5
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -69,6 +69,9 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 24 | GET | `/statements/list` | 對帳單＋未結算彙總 | statements, orders |
 | 25 | POST | `/statements/report-transfer` | 銀行轉帳回報末五碼 | statements |
 | 26 | POST | `/statements/pay-init` | 信用卡／ATM／LINE Pay 付款初始化 | statements, payments |
+| 27 | GET | `/wishes/board?sort=hot\|new` | 許願牆（店家審核過的公開許願，v1.5） | wishlist, wish_votes, broadcast |
+| 28 | POST | `/wishes/plus` | 我也想要 +1／取消（v1.5） | wish_votes |
+| 29 | POST | `/wishes/share` | 自己的許願改公開／不公開（v1.5） | wishlist |
 
 所有端點**只回傳該 `line_user_id` 自己的資料**，不能透過參數查別人的。
 
@@ -190,9 +193,42 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 請求 `{ src: "photo|link|text", item_name?, ref_url?, quantity, note?, file_name?, data? }`
 - `link` 需 `http(s)://` 開頭 → 否則 `BAD_URL`；`text` 需 `item_name`；`photo` 需 `file_name`＋`data`
 - 建立時 `wish_status = 待處理`
+- v1.5：
+  - 多收 `public: true`（預設 false）→ `wall_status = pending`，等店家審核才上許願牆。
+  - 照片許願的圖存進私有 Storage（`wish/<wish_id>.<副檔名>`，路徑不含 LINE user ID），`picture` 回 15 分鐘簽名網址。上限 3 MB，格式 JPG／PNG／WebP／HEIC，否則 `BAD_IMAGE`。
+  - 許願的回傳（`/wishes/list`、`create`、`keep`、`to-cart`、`share`）多三個欄位：
+    - `wall_status`：`private`（只有自己）／`pending`（等店家審核）／`public`（在牆上）／`hidden`（店家收下來了）
+    - `votes`：別人按 +1 的人數
+    - `broadcast_send_id`：店家把這則開成喊單時的喊單編號，沒有就 `null`
 
 ### 15. `POST /wishes/to-cart`
 請求 `{ wish_id }` → 回 `{ wish, cart_item }`；非「已報價」→ `409 NOT_QUOTED`；許願改為「已下單」
+
+### 27. `GET /wishes/board?sort=hot|new`（v1.5 許願牆）
+回店家審核通過（`public`）的許願，最多 100 則。`hot`（預設）依想要人數排，`new` 依上牆時間排。
+```json
+[{ "wish_id": "W_…", "item_name": "阿卡將 限定口水巾", "item_name_ja": null, "brand": null, "ref_url": null,
+   "picture": "https://…簽名網址（15 分鐘）", "votes": 2, "wants": 3, "voted": true, "mine": false,
+   "quote_twd": null,
+   "broadcast": { "send_id": "BC-1110-001", "price_twd": 600, "remaining": 3, "deadline_at": "…" },
+   "wall_at": "2026-11-10T02:36:00.000Z" }]
+```
+- `votes` 是按 +1 的人數，`wants` = `votes + 1`（加上許願的人），畫面顯示「N 人想要」用 `wants`。
+- **不回任何身分資訊**：沒有 `line_user_id`、暱稱、會員編號、備註。客人之間看不到彼此。
+- `mine`：這則是我許的（不能對自己 +1）。`quote_twd` 只在 `mine` 而且已報價時才有值。
+- `broadcast` 不是 `null` → 店家已經開成喊單，按鈕改成「去搶」，呼叫既有的 `/broadcast/shout`。喊單截止或搶完後，這則會自動從牆上消失。
+
+### 28. `POST /wishes/plus`（v1.5）
+請求 `{ wish_id, on?: bool }`（`on` 預設 true；false＝取消）→ 回 `{ wish_id, voted, votes, wants }`
+- 一人一票，重按不會多算。
+- 不在牆上（未審核、被收下來、已刪除）→ `404 NOT_FOUND`；自己的許願 → `409 OWN_WISH`。
+
+### 29. `POST /wishes/share`（v1.5）
+請求 `{ wish_id, public: bool }` → 回許願（同 14 的形狀）
+- `true`：`private` → `pending`（要重新審核）。已是 `pending`／`public` 不變。
+- `false`：立刻從牆上下來（`private`）。之前別人按的 +1 會保留，下次上牆還在。
+- 店家收下來的（`hidden`）客人不能自己再放上去 → `409 HIDDEN_BY_SHOP`。
+- 只能改自己的許願，別人的 → `404`。
 
 ### 18. `POST /orders/checkout`
 請求：
@@ -256,6 +292,16 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.3 v1.5 變更（2026-11-10，許願牆）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 許願可勾「公開到許願牆」（`public`），店家審核後才上牆 | 14、29 |
+| 2 | 許願牆列表、我也想要 +1（匿名，只顯示人數） | 27、28 |
+| 3 | 照片許願的圖會存下來，`picture` 回簽名網址（以前只存檔名） | 13、14 |
+| 4 | 許願多回 `wall_status`、`votes`、`broadcast_send_id` | 13～17、29 |
+| 5 | 店家把許願轉成喊單時，許願的人和按過 +1 的人都會收到 LINE 通知（`wish_broadcast`，後端排、n8n 發） | — |
 
 ## 5.4 v1.4 變更（2026-10-28，綠界線上刷卡）
 

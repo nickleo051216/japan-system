@@ -274,7 +274,17 @@ const wishShape = (w) => ({
   brand: w.brand || null, ref_url: w.ref_url || null, quantity: w.quantity,
   note: w.note || '', wish_status: w.wish_status, quote_twd: num(w.quote_twd),
   picture: w.picture || null, file_name: w.file_name || null, wished_at: w.wished_at,
+  // 許願牆（v1.5）：private／pending（等店家審核）／public／hidden（店家收下來了）
+  wall_status: w.wall_status || 'private',
+  votes: Number(w.votes || 0),
+  broadcast_send_id: w.broadcast_send_id || null,
 });
+/** 照片是私有 bucket 的參照，回給畫面前換成 15 分鐘的簽名網址。 */
+const wishesOut = async (rows) => storage.resolve(rows.map(wishShape), 'picture');
+
+const WISH_COLS = `w.*, (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes`;
+const oneWish = async (wishId) =>
+  (await wishesOut([await db.one(`SELECT ${WISH_COLS} FROM wishlist w WHERE w.wish_id = ?`, wishId)]))[0];
 
 async function myWish(wishId, user) {
   const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ? AND line_user_id = ?', wishId, user);
@@ -282,10 +292,13 @@ async function myWish(wishId, user) {
   return w;
 }
 
-bget('/api/v1/wishes/list', async ({ me }) => ok(
-  (await db.all(
-    "SELECT * FROM wishlist WHERE line_user_id = ? AND wish_status <> '已下單' ORDER BY wished_at DESC",
-    me.line_user_id)).map(wishShape)));
+bget('/api/v1/wishes/list', async ({ me }) => ok(await wishesOut(await db.all(
+  `SELECT ${WISH_COLS} FROM wishlist w
+    WHERE w.line_user_id = ? AND w.wish_status <> '已下單' ORDER BY w.wished_at DESC`,
+  me.line_user_id))));
+
+const WISH_IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+  'image/heic': 'heic', 'image/heif': 'heif' };
 
 bpost('/api/v1/wishes/create', async ({ me, body }) => {
   const src = String(body.src ?? '');
@@ -303,14 +316,108 @@ bpost('/api/v1/wishes/create', async ({ me, body }) => {
     if (!name) name = '照片許願';
   }
   const wishId = uid('W');
+  // 照片許願的圖要存下來：店家報價要看，上了許願牆大家也要看。
+  // 以前只存檔名、圖本身丟掉了（v1.5 修正）。
+  let picture = null;
+  const m = src === 'photo' ? DATA_URL.exec(String(body.data)) : null;
+  if (m) {
+    const ext = WISH_IMAGE_EXT[m[1].toLowerCase()];
+    if (!ext) throw err('BAD_IMAGE', '照片格式不對，請選 JPG、PNG 或 WebP');
+    const buf = Buffer.from(m[2], 'base64');
+    if (!buf.length || buf.length > MAX_IMAGE_BYTES) throw err('BAD_IMAGE', '照片太大（上限 3 MB），請重新拍一張');
+    try {
+      // 路徑不放 LINE user ID：這張圖上了許願牆，簽名網址會被別的客人看到。
+      picture = await storage.put(`wish/${wishId}.${ext}`, buf, m[1]);
+    } catch (e) {
+      console.error('[buyer] 許願照片上傳失敗：', e.message);
+      throw Object.assign(new Error('照片上傳失敗，請再試一次'), { code: 'UPLOAD_FAILED', status: 503 });
+    }
+  }
+  // 公開到許願牆要客人自己勾（預設不公開），而且要等店家審核才會上牆。
+  const wall = body.public === true ? 'pending' : 'private';
   await db.run(
     `INSERT INTO wishlist (wish_id, line_user_id, item_name, ref_url, quantity, note,
-                           wish_status, file_name, wished_at)
-     VALUES (?,?,?,?,?,?,'待處理',?,?)`,
+                           wish_status, picture, file_name, wall_status, wished_at)
+     VALUES (?,?,?,?,?,?,'待處理',?,?,?,?)`,
     wishId, me.line_user_id, name, body.ref_url || null,
     Math.max(1, parseInt(body.quantity, 10) || 1), body.note || null,
-    body.file_name || null, now());
-  return ok(wishShape(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', wishId)));
+    picture, body.file_name || null, wall, now());
+  return ok(await oneWish(wishId));
+});
+
+/**
+ * 許願建立之後，客人自己改要不要公開。
+ * 公開 → 回到「等店家審核」；不公開 → 立刻從牆上下來（已經按的 +1 保留，再公開時還在）。
+ * 店家收下來的（hidden）客人不能自己再放上去 —— 最後決定權在店家。
+ */
+bpost('/api/v1/wishes/share', async ({ me, body }) => {
+  const w = await myWish(String(body.wish_id ?? ''), me.line_user_id);
+  if (typeof body.public !== 'boolean') throw err('BAD_PUBLIC', 'public 要是 true 或 false');
+  if (body.public) {
+    if (w.wall_status === 'hidden') throw err('HIDDEN_BY_SHOP', '店家已經把這則從許願牆收下來了，有問題請直接私訊店家', 409);
+    if (w.wall_status === 'private') {
+      await db.run("UPDATE wishlist SET wall_status = 'pending' WHERE wish_id = ? AND wall_status = 'private'", w.wish_id);
+    }
+  } else if (w.wall_status !== 'hidden') {
+    await db.run("UPDATE wishlist SET wall_status = 'private' WHERE wish_id = ?", w.wish_id);
+  }
+  return ok(await oneWish(w.wish_id));
+});
+
+/**
+ * 許願牆：店家審核通過的許願，依「想要的人數」排。
+ * 只給商品資訊和人數，不給是誰許的、誰按了 +1（客人之間互相看不到身分）。
+ * 已經轉成喊單的：喊單還開著就留在牆上並附喊單編號（前台改成「去搶」按鈕），截止或搶完就下牆。
+ */
+const BOARD_SORTS = {
+  hot: 'votes DESC, w.wall_at DESC',
+  new: 'w.wall_at DESC',
+};
+
+bget('/api/v1/wishes/board', async ({ me, query }) => {
+  const order = BOARD_SORTS[query.sort] || BOARD_SORTS.hot;
+  const rows = await db.all(
+    `SELECT w.wish_id, w.item_name, w.item_name_ja, w.brand, w.ref_url, w.picture, w.wish_status, w.quote_twd,
+            w.wall_at, w.broadcast_send_id, (w.line_user_id = ?) AS mine,
+            (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes,
+            EXISTS (SELECT 1 FROM wish_votes v WHERE v.wish_id = w.wish_id AND v.line_user_id = ?) AS voted,
+            b.price_twd AS bc_price, b.remaining AS bc_remaining, b.deadline_at AS bc_deadline
+       FROM wishlist w LEFT JOIN broadcast b ON b.send_id = w.broadcast_send_id
+      WHERE w.wall_status = 'public'
+        AND (w.broadcast_send_id IS NULL OR (b.remaining > 0 AND (b.deadline_at IS NULL OR b.deadline_at > now())))
+      ORDER BY ${order}
+      LIMIT 100`, me.line_user_id, me.line_user_id);
+  const shaped = rows.map((r) => ({
+    wish_id: r.wish_id, item_name: r.item_name, item_name_ja: r.item_name_ja || null, brand: r.brand || null,
+    ref_url: r.ref_url || null, picture: r.picture || null,
+    votes: Number(r.votes),                 // 按了 +1 的人數（不含許願的人）
+    wants: Number(r.votes) + 1,             // 想要的人數 ＝ 許願的人 ＋ 按 +1 的人
+    voted: !!r.voted, mine: !!r.mine,
+    // 報價只在許願的人自己那一則才顯示：報價是給他的，別人照喊單價格買。
+    quote_twd: r.mine && r.wish_status === '已報價' ? num(r.quote_twd) : null,
+    broadcast: r.broadcast_send_id
+      ? { send_id: r.broadcast_send_id, price_twd: num(r.bc_price), remaining: r.bc_remaining, deadline_at: r.bc_deadline }
+      : null,
+    wall_at: r.wall_at,
+  }));
+  return ok(await storage.resolve(shaped, 'picture'));
+});
+
+/** 我也想要 +1（on:false 取消）。只能對牆上的許願按，不能對自己的許願按。 */
+bpost('/api/v1/wishes/plus', async ({ me, body }) => {
+  const wishId = String(body.wish_id ?? '');
+  const w = await db.one("SELECT wish_id, line_user_id FROM wishlist WHERE wish_id = ? AND wall_status = 'public'", wishId);
+  if (!w) throw err('NOT_FOUND', '這則許願已經不在許願牆上了', 404);
+  if (w.line_user_id === me.line_user_id) throw err('OWN_WISH', '這是你自己的許願，不用再 +1 喔', 409);
+  if (body.on === false) {
+    await db.run('DELETE FROM wish_votes WHERE wish_id = ? AND line_user_id = ?', wishId, me.line_user_id);
+  } else {
+    await db.run(
+      'INSERT INTO wish_votes (wish_id, line_user_id, created_at) VALUES (?,?,?) ON CONFLICT DO NOTHING',
+      wishId, me.line_user_id, now());
+  }
+  const { n } = await db.one('SELECT count(*) AS n FROM wish_votes WHERE wish_id = ?', wishId);
+  return ok({ wish_id: wishId, voted: body.on !== false, votes: Number(n), wants: Number(n) + 1 });
 });
 
 bpost('/api/v1/wishes/to-cart', async ({ me, body }) => {
@@ -327,7 +434,7 @@ bpost('/api/v1/wishes/to-cart', async ({ me, body }) => {
     await db.run("UPDATE wishlist SET wish_status = '已下單' WHERE wish_id = ?", w.wish_id);
   });
   return ok({
-    wish: wishShape(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id)),
+    wish: await oneWish(w.wish_id),
     cart_item: cartShape(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)),
   });
 });
@@ -335,7 +442,7 @@ bpost('/api/v1/wishes/to-cart', async ({ me, body }) => {
 bpost('/api/v1/wishes/keep', async ({ me, body }) => {
   const w = await myWish(String(body.wish_id ?? ''), me.line_user_id);
   await db.run("UPDATE wishlist SET wish_status = '保留下團' WHERE wish_id = ?", w.wish_id);
-  return ok(wishShape(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id)));
+  return ok(await oneWish(w.wish_id));
 });
 
 bpost('/api/v1/wishes/remove', async ({ me, body }) => {
