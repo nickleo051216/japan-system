@@ -79,12 +79,14 @@ const SAY = {
     `單價 ${yen(d.unit_cost_jpy)} × ${d.qty} 件，匯率 ${d.fx}${d.amount_edited ? '（金額有手動修改）' : ''}`],
 
   'batch.create': (t, d) => [`開新團：${t}`, d && d.via === 'broadcast' ? '開喊單時一起開的' : ''],
-  'broadcast.create': (t, d) => [`開喊單：「${t}」`, `數量 ${d.quantity}，售價 ${ntd(d.price_twd)}`],
+  'broadcast.create': (t, d) => [`開喊單：「${t}」`, `數量 ${d.quantity}，售價 ${ntd(d.price_twd)}${d.from_wish ? `，從許願 ${d.from_wish} 轉來的` : ''}`],
   'broadcast.close': (t) => [`關閉喊單：「${t}」`, ''],
   'broadcast.image': (t, d) => [`${d && d.replaced ? '更換' : '加上'}喊單「${t}」的照片`, ''],
   'broadcast.adjust': (t, d) => [`調整喊單「${t}」的數量`, `${d.delta > 0 ? '增加' : '減少'} ${Math.abs(d.delta)} 個`],
   'wish.quote': (t, d) => [`替許願「${t}」報價 ${ntd(d.quote_twd)}`, ''],
   'wish.mark': (t, d) => [`把許願「${t}」標記為${q(d.status)}`, ''],
+  'wish.wall': (t, d) => [d.to === 'public' ? `把許願「${t}」放上許願牆` : `把許願「${t}」從許願牆收下來`, ''],
+  'wish.to_broadcast': (t, d) => [`把許願「${t}」轉成喊單 ${d.send_id}`, `LINE 通知想要的 ${d.notified} 個人`],
 
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, ''],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
