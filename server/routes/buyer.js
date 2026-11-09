@@ -18,6 +18,7 @@
 const db = require('../lib/db');
 const price = require('../lib/price');
 const shipfee = require('../lib/shipfee');
+const storage = require('../lib/storage');
 const drops = require('../lib/drops');
 const { currentBatch } = require('../lib/batch');
 const { get, post, ok } = require('../lib/http');
@@ -172,13 +173,15 @@ bget('/api/v1/home/summary', async ({ me }) => {
       buy_at: batch.buy_at, back_at: batch.back_at, ship_at: batch.ship_at, stage: batch.stage,
     } : null,
     price_table: priceTable,
-    broadcast: broadcast.map((b) => ({
+    // 喊單照片存的是 `storage:` 參照（私有 bucket），給前台前換成 15 分鐘的簽名網址。
+    // 過期時前台會重抓 /home/summary 換新的（前台 imgExpired()）。
+    broadcast: await storage.resolve(broadcast.map((b) => ({
       send_id: b.send_id, name: b.name, jpy_taxed: num(b.jpy_taxed), price_twd: num(b.price_twd),
       quantity: b.quantity, remaining: b.remaining, deadline_at: b.deadline_at,
       note: b.note || '', image_url: b.image_url || null,
       open: b.remaining > 0 && (!b.deadline_at || new Date(b.deadline_at).getTime() > t),
       waitlisted: waitlisted.has(b.send_id),
-    })),
+    })), 'image_url'),
     todo: { unpaid_statements: todo.unpaid_statements, pending_cart: todo.pending_cart },
   });
 });
