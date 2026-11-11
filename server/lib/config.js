@@ -73,6 +73,9 @@ module.exports = {
   // 後台的 LINE 登入：同一個 LINE Login channel 底下另開一個 LIFF app，
   // Endpoint URL 指向後台首頁。LIFF ID 不是機密（本來就會出現在網頁上）。
   adminLiffId: (process.env.ADMIN_LIFF_ID || '').trim(),
+  // 買家前台的 LIFF 網址，通知文案裡的「點這裡」用。LIFF ID 不是機密（客人分享出去的連結就是它）。
+  // 換 LIFF app 時設 BUYER_LIFF_URL 覆蓋；沒設就用目前正式的那一個。
+  buyerLiffUrl: (process.env.BUYER_LIFF_URL || 'https://liff.line.me/2011699944-c5n725TF').trim().replace(/\/+$/, ''),
   // 共用密碼入口是 LINE 登入之前的過渡措施。LINE 登入確認可用後設成 off，
   // 後台就只剩 LINE 一扇門。預設開著，免得部署當下兩扇門都打不開。
   adminPasswordLogin: !/^(off|false|0|no)$/i.test((process.env.ADMIN_PASSWORD_LOGIN || '').trim()),

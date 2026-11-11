@@ -69,12 +69,13 @@ export async function render(root, ctx) {
         catch (e) { fail(e); } } }, '保留下團'),
     ] : [];
 
-    const setWall = (status, msg) => h('button', { class: 'btn sm', onClick: async () => {
-      try { await POST('/api/v1/wishes/wall', { wish_id: w.wish_id, status }); toast(msg); ctx.reload(); }
-      catch (e) { fail(e); } } }, status === 'public' ? '放上牆' : '收下來');
+    const takeDown = h('button', { class: 'btn sm', onClick: async () => {
+      try { await POST('/api/v1/wishes/wall', { wish_id: w.wish_id, status: 'hidden' }); toast('已從許願牆收下來'); ctx.reload(); }
+      catch (e) { fail(e); } } }, '收下來');
     const wallActions = canWall ? [
-      ['pending', 'hidden'].includes(w.wall_status) ? setWall('public', '已放上許願牆，客人看得到了') : null,
-      ['pending', 'public'].includes(w.wall_status) ? setWall('hidden', '已從許願牆收下來') : null,
+      ['pending', 'hidden'].includes(w.wall_status)
+        ? h('button', { class: 'btn sm', onClick: () => publish(w, ctx) }, '放上牆') : null,
+      ['pending', 'public'].includes(w.wall_status) ? takeDown : null,
       w.broadcast_send_id ? null
         : h('button', { class: 'btn sm primary', onClick: () => toBroadcast(w, ctx) }, '轉成喊單'),
     ].filter(Boolean) : [];
@@ -92,10 +93,43 @@ export async function render(root, ctx) {
       h('td', {},
         h('span', { class: 'tag' + (w.wish_status === '已報價' ? ' blue' : w.wish_status === '待處理' ? ' amber' : '') }, w.wish_status),
         wall ? h('div', { style: 'margin-top:4px' }, h('span', { class: 'tag ' + wall[1] }, wall[0])) : null,
+        w.unreadable && w.wall_status !== 'private'
+          ? h('div', { class: 'tiny', style: 'margin-top:4px;color:var(--red)' }, '⚠️ 沒照片也沒品名，要補品名才能上牆') : null,
         w.broadcast_send_id ? h('div', { style: 'margin-top:4px' }, h('span', { class: 'tag green' }, `已開喊單 ${w.broadcast_send_id}`)) : null),
       h('td', {}, w.quote_twd ? nt(w.quote_twd) : '—'),
       h('td', {}, actions.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, ...actions) : null)));
   }
+}
+
+/**
+ * 放上牆的小表單：順便補品名。照片許願的品名預設是「照片許願」，
+ * 不補的話其他客人只看得到照片、看不懂是什麼；沒照片的更是一張空白卡片（後端會擋）。
+ */
+function publish(w, ctx) {
+  const placeholder = w.item_name === '照片許願';
+  const name = h('input', { type: 'text', maxlength: '60', value: placeholder ? '' : w.item_name,
+    placeholder: '例：阿卡將 限定口水巾（藍色）' });
+  const errBox = h('div', { class: 'banner', role: 'alert', hidden: true, style: 'background:var(--red-bg);color:var(--red)' });
+  name.addEventListener('input', () => { errBox.hidden = true; });
+  const body = h('div', {},
+    w.picture ? h('img', { class: 'thumb lg', src: w.picture, alt: '', style: 'margin-bottom:10px' })
+      : h('div', { class: 'small muted', style: 'margin-bottom:10px' }, '這則沒有照片，品名就是客人唯一看得到的內容。'),
+    h('label', { class: 'field' }, h('span', {}, '許願牆上顯示的品名'), name),
+    h('div', { class: 'tiny muted', style: 'margin-top:6px' },
+      placeholder ? '客人沒填品名（系統先寫「照片許願」）。補一個看得懂的名字，其他客人才知道要不要 +1。'
+        : '可以改得更清楚，例如加上品牌、顏色、尺寸。改了之後許願的客人也會看到新品名，原本的名字記在稽核軌跡。'),
+    w.note ? h('div', { class: 'tiny muted', style: 'margin-top:6px' }, `客人備註：${w.note}`) : null,
+    errBox);
+  modal('放上許願牆', body, [
+    { label: '取消', onClick: (close) => close() },
+    { label: '放上牆', primary: true, onClick: async (close) => {
+      const v = name.value.trim();
+      try {
+        await POST('/api/v1/wishes/wall', { wish_id: w.wish_id, status: 'public', ...(v ? { item_name: v } : {}) });
+        close(); toast('已放上許願牆，客人看得到了'); ctx.reload();
+      } catch (e) { errBox.textContent = e.message || '放上牆失敗'; errBox.hidden = false; }
+    } },
+  ]);
 }
 
 /**

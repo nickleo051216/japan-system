@@ -14,4 +14,4 @@
 - 綠界官方的 ECPay-API-Skill（`~/.claude/skills/ecpay`）是 All Rights Reserved：可以參考它寫程式，但不要把它的檔案或內容 commit 進 repo。
 
 ## 驗收
-`npm run smoke`（後端 412 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。
+`npm run smoke`（後端 423 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。

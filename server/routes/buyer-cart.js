@@ -13,6 +13,7 @@ const { ok, post } = require('../lib/http');
 const notify = require('../lib/notify');
 const drops = require('../lib/drops');
 const { now, uid } = require('../lib/ids');
+const { READABLE_SQL } = require('../lib/wish');
 const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
@@ -368,6 +369,7 @@ bpost('/api/v1/wishes/share', async ({ me, body }) => {
  * 許願牆：店家審核通過的許願，依「想要的人數」排。
  * 只給商品資訊和人數，不給是誰許的、誰按了 +1（客人之間互相看不到身分）。
  * 已經轉成喊單的：喊單還開著就留在牆上並附喊單編號（前台改成「去搶」按鈕），截止或搶完就下牆。
+ * 看不懂的許願（品名是「照片許願」又沒有照片）不列，見 lib/wish.js。
  */
 const BOARD_SORTS = {
   hot: 'votes DESC, w.wall_at DESC',
@@ -383,7 +385,7 @@ bget('/api/v1/wishes/board', async ({ me, query }) => {
             EXISTS (SELECT 1 FROM wish_votes v WHERE v.wish_id = w.wish_id AND v.line_user_id = ?) AS voted,
             b.price_twd AS bc_price, b.remaining AS bc_remaining, b.deadline_at AS bc_deadline
        FROM wishlist w LEFT JOIN broadcast b ON b.send_id = w.broadcast_send_id
-      WHERE w.wall_status = 'public'
+      WHERE w.wall_status = 'public' AND ${READABLE_SQL}
         AND (w.broadcast_send_id IS NULL OR (b.remaining > 0 AND (b.deadline_at IS NULL OR b.deadline_at > now())))
       ORDER BY ${order}
       LIMIT 100`, me.line_user_id, me.line_user_id);
@@ -406,7 +408,8 @@ bget('/api/v1/wishes/board', async ({ me, query }) => {
 /** 我也想要 +1（on:false 取消）。只能對牆上的許願按，不能對自己的許願按。 */
 bpost('/api/v1/wishes/plus', async ({ me, body }) => {
   const wishId = String(body.wish_id ?? '');
-  const w = await db.one("SELECT wish_id, line_user_id FROM wishlist WHERE wish_id = ? AND wall_status = 'public'", wishId);
+  const w = await db.one(
+    `SELECT w.wish_id, w.line_user_id FROM wishlist w WHERE w.wish_id = ? AND w.wall_status = 'public' AND ${READABLE_SQL}`, wishId);
   if (!w) throw err('NOT_FOUND', '這則許願已經不在許願牆上了', 404);
   if (w.line_user_id === me.line_user_id) throw err('OWN_WISH', '這是你自己的許願，不用再 +1 喔', 409);
   if (body.on === false) {

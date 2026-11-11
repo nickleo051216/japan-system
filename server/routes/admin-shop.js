@@ -21,6 +21,8 @@ const { now, uid, nextOrderId } = require('../lib/ids');
 const shipfee = require('../lib/shipfee');
 const drops = require('../lib/drops');
 const storage = require('../lib/storage');
+const config = require('../lib/config');
+const wishRule = require('../lib/wish');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -261,7 +263,8 @@ get('/api/v1/wishes/admin-list', async ({ actor, query }) => {
       WHERE (?::text IS NOT NULL AND w.wall_status = ?)
          OR (?::text IS NULL AND (? = '全部' OR w.wish_status = ?))
       ORDER BY votes DESC, w.wished_at`, wall, wall, wall, status, status);
-  const shaped = rows.map((w) => ({ ...w, quote_twd: num(w.quote_twd), votes: Number(w.votes) }));
+  const shaped = rows.map((w) => ({ ...w, quote_twd: num(w.quote_twd), votes: Number(w.votes),
+    unreadable: wishRule.isUnreadable(w) }));
   return ok(auth.redact(actor, await storage.resolve(shaped, 'picture')));
 });
 
@@ -269,6 +272,9 @@ get('/api/v1/wishes/admin-list', async ({ actor, query }) => {
  * 許願牆審核：public＝放上牆、hidden＝收下來。
  * 客人沒勾「公開」的（private）店家也不能放上去：那是客人的隱私，由這裡擋。
  * 放上牆就是對所有客人發佈內容，所以跟開喊單一樣只有店主能做。
+ *
+ * 放上牆時可以順便補品名（item_name）：照片許願的品名預設是「照片許願」，
+ * 不補的話其他客人看不懂是什麼。品名是「照片許願」又沒有照片的，不能上牆。
  */
 post('/api/v1/wishes/wall', async ({ actor, body }) => {
   auth.requireCap(actor, 'broadcast');
@@ -277,13 +283,25 @@ post('/api/v1/wishes/wall', async ({ actor, body }) => {
   const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', String(body.wish_id ?? ''));
   if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
   if (w.wall_status === 'private') throw err('NOT_SHARED', '客人沒有勾「公開到許願牆」，不能放上去', 409);
+
+  let name = null;
+  if (to === 'public' && body.item_name !== undefined && body.item_name !== null) {
+    name = String(body.item_name).trim();
+    if (!name) throw err('BAD_NAME', '品名不能是空的');
+    if (name.length > 60) throw err('BAD_NAME', '品名最多 60 個字');
+    if (name === w.item_name) name = null;
+  }
+  if (to === 'public' && wishRule.isUnreadable({ item_name: name ?? w.item_name, picture: w.picture })) {
+    throw err('UNREADABLE', '這則照片許願沒有照片，品名也還是「照片許願」，其他客人看不懂是什麼。請先補品名再放上牆，或收下來', 409);
+  }
   const res = await db.run(
     `UPDATE wishlist SET wall_status = ?,
-            wall_at = CASE WHEN ? = 'public' AND wall_status <> 'public' THEN now() ELSE wall_at END
-      WHERE wish_id = ? AND wall_status <> 'private'`, to, to, w.wish_id);
+            wall_at = CASE WHEN ? = 'public' AND wall_status <> 'public' THEN now() ELSE wall_at END,
+            item_name = coalesce(?, item_name)
+      WHERE wish_id = ? AND wall_status <> 'private'`, to, to, name, w.wish_id);
   if (res.changes === 0) throw err('NOT_SHARED', '客人剛剛取消公開了', 409);
   await audit.record({ actor: actor.line_user_id, action: 'wish.wall', target: w.wish_id,
-    detail: { from: w.wall_status, to }, result: 'ok' });
+    detail: { from: w.wall_status, to, ...(name ? { renamed: { from: w.item_name, to: name } } : {}) }, result: 'ok' });
   return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id));
 });
 
@@ -321,7 +339,7 @@ post('/api/v1/wishes/to-broadcast', async ({ actor, body }) => {
       const text = `🙌 ${own ? '你許的願' : '你按了 +1 的許願'}開喊單了！\n\n`
         + `「${row.name}」\n${ntd(row.price_twd)}｜限量 ${row.quantity} 個`
         + (deadline ? `｜${deadline} 截止` : '')
-        + `\n\n先搶先贏，打開商店首頁就能喊單 👉`;
+        + `\n\n先搶先贏，點這裡直接到喊單頁 👉\n${config.buyerLiffUrl}?path=live`;
       if (await notify.queue({ kind: 'wish_broadcast', lineUserId: p.line_user_id,
         payload: { send_id: row.send_id, wish_id: w.wish_id, text } })) notified += 1;
     }

@@ -748,9 +748,10 @@ const login = async (id) =>
     const wn = (await api('POST', '/api/v1/notify/pending', { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 50 } }))
       .json.data.notifications.filter((n) => n.kind === 'wish_broadcast');
     const wp = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
-    check('排了 3 則 LINE 通知，每人一則，附喊單編號與文案',
+    check('排了 3 則 LINE 通知，每人一則，附喊單編號、文案、直接到喊單頁的連結（?path=live）',
       wn.length === 3 && new Set(wn.map((n) => n.line_user_id)).size === 3
-      && wn.every((n) => wp(n).send_id === tb.broadcast.send_id && /阿卡將 限定口水巾/.test(wp(n).text) && /NT\$600/.test(wp(n).text)),
+      && wn.every((n) => wp(n).send_id === tb.broadcast.send_id && /阿卡將 限定口水巾/.test(wp(n).text) && /NT\$600/.test(wp(n).text)
+        && wp(n).text.includes('https://liff.line.me/2011699944-c5n725TF?path=live')),
       wn.map((n) => [n.line_user_id, wp(n).text]));
     check('許願的人收到「你許的願開喊單了」，按 +1 的收到「你按了 +1 的許願」',
       /你許的願/.test(wp(wn.find((n) => n.line_user_id === 'U_buyer1')).text)
@@ -769,6 +770,37 @@ const login = async (id) =>
     await api('POST', '/api/v1/broadcast/close', { token: owner, body: { send_id: tb.broadcast.send_id } });
     check('喊單截止後，這則從許願牆下來', !(await board()).some((x) => x.wish_id === pw.wish_id));
     check('排序參數 sort=new 也能用', Array.isArray(await board(B2, 'new')));
+
+    // 看不懂的許願：照片許願沒存到圖（v1.5 以前的舊資料就是這樣），品名又是預設的「照片許願」
+    const blank = (await B('POST', '/api/v1/wishes/create', { body: {
+      src: 'photo', file_name: 'IMG_old.jpg', data: 'legacy-no-image', public: true } })).json.data;
+    check('沒附圖的照片許願：品名是「照片許願」、沒有照片', blank.item_name === '照片許願' && blank.picture === null, blank);
+    const ad = (await api('GET', '/api/v1/wishes/admin-list?wall=pending', { token: owner })).json.data.find((x) => x.wish_id === blank.wish_id);
+    check('後台列表標出「看不懂」，提醒先補品名', ad?.unreadable === true, ad);
+    const un = (await WALL(owner, blank.wish_id, 'public')).json;
+    check('沒照片又沒品名 → 不能上牆（409 UNREADABLE），訊息叫店家先補品名',
+      un.error?.code === 'UNREADABLE' && /補品名/.test(un.error.message), un.error);
+    check('品名填空白 → BAD_NAME',
+      (await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: blank.wish_id, status: 'public', item_name: '  ' } })).json.error?.code === 'BAD_NAME');
+    check('補的品名還是「照片許願」→ 一樣不能上牆',
+      (await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: blank.wish_id, status: 'public', item_name: '照片許願' } })).json.error?.code === 'UNREADABLE');
+    check('擋下來之後不在牆上、不能 +1',
+      !(await board()).some((x) => x.wish_id === blank.wish_id)
+      && (await B2('POST', '/api/v1/wishes/plus', { body: { wish_id: blank.wish_id } })).status === 404);
+    const named = (await api('POST', '/api/v1/wishes/wall',
+      { token: owner, body: { wish_id: blank.wish_id, status: 'public', item_name: '西松屋 六重紗布衣 80cm' } })).json.data;
+    check('店家放上牆時補品名 → 上牆，品名改成店家補的', named?.wall_status === 'public' && named.item_name === '西松屋 六重紗布衣 80cm', named);
+    check('補了品名的許願出現在牆上（沒照片也看得懂）',
+      (await board()).find((x) => x.wish_id === blank.wish_id)?.item_name === '西松屋 六重紗布衣 80cm');
+    check('許願的客人自己的清單也看到新品名',
+      (await B('GET', '/api/v1/wishes/list')).json.data.find((x) => x.wish_id === blank.wish_id)?.item_name === '西松屋 六重紗布衣 80cm');
+    const renameLog = (await api('GET', '/api/v1/audit/list?limit=20', { token: owner })).json.data
+      .find((l) => l.action === 'wish.wall' && l.target === blank.wish_id && l.detail.to === 'public');
+    check('稽核記下品名從「照片許願」改成什麼', renameLog?.detail.renamed?.from === '照片許願'
+      && renameLog.detail.renamed.to === '西松屋 六重紗布衣 80cm', renameLog?.detail);
+    check('品名太長 → BAD_NAME',
+      (await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: blank.wish_id, status: 'public', item_name: 'x'.repeat(61) } })).json.error?.code === 'BAD_NAME');
+    await WALL(owner, blank.wish_id, 'hidden');
     }
 
     section('後台 — 訂單報價（0 元品項不能漏）');
