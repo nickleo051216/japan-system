@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.5
+# 買家 API 合約（Buyer API Contract）v1.5.1
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -216,12 +216,14 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - `votes` 是按 +1 的人數，`wants` = `votes + 1`（加上許願的人），畫面顯示「N 人想要」用 `wants`。
 - **不回任何身分資訊**：沒有 `line_user_id`、暱稱、會員編號、備註。客人之間看不到彼此。
 - `mine`：這則是我許的（不能對自己 +1）。`quote_twd` 只在 `mine` 而且已報價時才有值。
+- 品名是「照片許願」而且 `picture` 是 `null` 的許願不列（v1.5.1，後端排除，前台不用再自己過濾）。店家放上牆時可以補品名，所以牆上的 `item_name` 可能跟客人當初填的不同。
 - `broadcast` 不是 `null` → 店家已經開成喊單，按鈕改成「去搶」，呼叫既有的 `/broadcast/shout`。喊單截止或搶完後，這則會自動從牆上消失。
 
 ### 28. `POST /wishes/plus`（v1.5）
 請求 `{ wish_id, on?: bool }`（`on` 預設 true；false＝取消）→ 回 `{ wish_id, voted, votes, wants }`
 - 一人一票，重按不會多算。
 - 不在牆上（未審核、被收下來、已刪除）→ `404 NOT_FOUND`；自己的許願 → `409 OWN_WISH`。
+- 看不懂的許願（品名是「照片許願」而且沒有照片）不會出現在 27，也不能 +1（`404`）。v1.5.1
 
 ### 29. `POST /wishes/share`（v1.5）
 請求 `{ wish_id, public: bool }` → 回許願（同 14 的形狀）
@@ -292,6 +294,14 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.2 v1.5.1 變更（2026-11-11，許願牆修正）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 許願牆不列、也不能 +1「品名是照片許願又沒有照片」的許願 | 27、28 |
+| 2 | 店家放上牆時可以補品名，客人的許願清單會看到新品名 | 13、27 |
+| 3 | `wish_broadcast` 通知文案附 `<買家 LIFF>?path=live` 連結 | — |
 
 ## 5.3 v1.5 變更（2026-11-10，許願牆）
 

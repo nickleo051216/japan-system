@@ -85,7 +85,8 @@ const SAY = {
   'broadcast.adjust': (t, d) => [`調整喊單「${t}」的數量`, `${d.delta > 0 ? '增加' : '減少'} ${Math.abs(d.delta)} 個`],
   'wish.quote': (t, d) => [`替許願「${t}」報價 ${ntd(d.quote_twd)}`, ''],
   'wish.mark': (t, d) => [`把許願「${t}」標記為${q(d.status)}`, ''],
-  'wish.wall': (t, d) => [d.to === 'public' ? `把許願「${t}」放上許願牆` : `把許願「${t}」從許願牆收下來`, ''],
+  'wish.wall': (t, d) => [d.to === 'public' ? `把許願「${t}」放上許願牆` : `把許願「${t}」從許願牆收下來`,
+    d.renamed ? `品名從「${d.renamed.from}」改成「${d.renamed.to}」` : (d.reason || '')],
   'wish.to_broadcast': (t, d) => [`把許願「${t}」轉成喊單 ${d.send_id}`, `LINE 通知想要的 ${d.notified} 個人`],
 
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, ''],
