@@ -13,7 +13,8 @@ const { ok, post } = require('../lib/http');
 const notify = require('../lib/notify');
 const drops = require('../lib/drops');
 const { now, uid } = require('../lib/ids');
-const { READABLE_SQL } = require('../lib/wish');
+const { READABLE_SQL, PHOTO_PLACEHOLDER } = require('../lib/wish');
+const audit = require('../lib/audit');
 const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
@@ -463,6 +464,42 @@ bpost('/api/v1/wishes/remove', async ({ me, body }) => {
 // 那種品項辨識不了，前台輪詢一分鐘後會請客人自己填。
 const OCR_LEASE_MINUTES = 10;
 
+/**
+ * 照片許願的辨識工作（011）。只有 n8n 帶 include_wishes: true 才會拿到 ——
+ * 舊版流程不認得許願，給它只會回寫失敗、整條變紅。
+ * 品名還是「照片許願」、有照片、還沒辨識完的才發出去。
+ * 正式庫還沒跑 011 時這張表不存在：直接當作沒有許願要辨識，購物車的辨識照常。
+ */
+async function claimWishJobs(n) {
+  if (n <= 0) return [];
+  let res;
+  try {
+    res = await db.run(
+      `WITH due AS (
+         SELECT w.wish_id FROM wishlist w LEFT JOIN wish_ocr o ON o.wish_id = w.wish_id
+          WHERE w.item_name = ? AND w.picture IS NOT NULL AND o.done_at IS NULL
+            AND coalesce(o.attempts, 0) < ?
+            AND (o.claimed_at IS NULL OR o.claimed_at < now() - (? || ' minutes')::interval)
+          ORDER BY w.wished_at LIMIT ? FOR UPDATE OF w SKIP LOCKED)
+       INSERT INTO wish_ocr (wish_id, claimed_at, attempts) SELECT wish_id, now(), 1 FROM due
+       ON CONFLICT (wish_id) DO UPDATE SET claimed_at = now(), attempts = wish_ocr.attempts + 1
+       RETURNING wish_id, attempts`,
+      PHOTO_PLACEHOLDER, OCR_MAX_ATTEMPTS, String(OCR_LEASE_MINUTES), n);
+  } catch (e) {
+    if (e.code === '42P01') return [];        // wish_ocr 不存在：011 還沒跑
+    throw e;
+  }
+  if (!res.rows.length) return [];
+  const rows = await db.all(
+    'SELECT wish_id, line_user_id, item_name, picture, file_name, wished_at FROM wishlist WHERE wish_id = ANY(?::text[])',
+    res.rows.map((r) => r.wish_id));
+  const attempts = new Map(res.rows.map((r) => [r.wish_id, r.attempts]));
+  return storage.resolve(rows.map((w) => ({
+    kind: 'wish', wish_id: w.wish_id, line_user_id: w.line_user_id, file_name: w.file_name,
+    image_url: w.picture, name: w.item_name, created_at: w.wished_at, ocr_attempts: attempts.get(w.wish_id),
+  })), 'image_url');
+}
+
 post('/api/v1/ocr/pending', async ({ body, req }) => {
   notify.requireMachine(req);
   const n = Math.min(Math.max(parseInt(body && body.limit, 10) || 10, 1), 50);
@@ -477,7 +514,9 @@ post('/api/v1/ocr/pending', async ({ body, req }) => {
       RETURNING cart_id, line_user_id, file_name, image_url, name, created_at, ocr_attempts`,
     OCR_MAX_ATTEMPTS, String(OCR_LEASE_MINUTES), n);
   // 給 n8n 的是 15 分鐘就失效的簽名網址，不是永久連結。
-  const jobs = await storage.resolve(res.rows.map((r) => ({ ...r })), 'image_url');
+  const jobs = await storage.resolve(res.rows.map((r) => ({ kind: 'cart', ...r })), 'image_url');
+  // 購物車優先（客人在等），剩下的名額才給許願。
+  if (body && body.include_wishes === true) jobs.push(...await claimWishJobs(n - jobs.length));
   return ok({ jobs, count: jobs.length, lease_minutes: OCR_LEASE_MINUTES });
 }, { idempotent: false });
 
@@ -489,8 +528,41 @@ post('/api/v1/ocr/pending', async ({ body, req }) => {
 // 這是機器對機器的介面，身分驗 X-Notify-Token（跟通知佇列同一把），不走會員
 // token —— n8n 不是會員。刻意不是冪等路由：同一張圖辨識兩次應該以最後一次為準，
 // 而不是回放第一次的答案。
+/**
+ * 照片許願的辨識結果（011）。
+ * 品名還是「照片許願」才寫回 —— 客人或店家已經改過名就不動，人永遠贏過 AI。
+ * AI 認不出來（信心 low 或品名空白）也算辨識結束，不會再送去花錢。
+ */
+async function wishResult(body) {
+  const wishId = String(body.wish_id);
+  const w = await db.one('SELECT wish_id FROM wishlist WHERE wish_id = ?', wishId);
+  if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+  let name = String(body.name ?? '').trim().slice(0, 60);
+  if (!['high', 'medium'].includes(body.ai_confidence) || name === PHOTO_PLACEHOLDER) name = '';
+  let applied = false;
+  await db.tx(async () => {
+    if (name) {
+      const r = await db.run(
+        `UPDATE wishlist SET item_name = ?, item_name_ja = coalesce(item_name_ja, ?)
+          WHERE wish_id = ? AND item_name = ?`, name, body.name_ja || null, wishId, PHOTO_PLACEHOLDER);
+      applied = r.changes > 0;
+    }
+    await db.run(
+      `INSERT INTO wish_ocr (wish_id, attempts, done_at, result) VALUES (?, 1, now(), ?)
+       ON CONFLICT (wish_id) DO UPDATE SET done_at = now(), result = excluded.result`, wishId, name || null);
+  });
+  if (applied) {
+    await audit.record({ actor: 'n8n', action: 'wish.ai_name', target: wishId,
+      detail: { name, confidence: body.ai_confidence }, result: 'ok' });
+  }
+  return { wish_id: wishId, applied,
+    reason: applied ? null : name ? '品名已經被改過，不覆蓋' : 'AI 認不出來，維持原樣',
+    wish: await oneWish(wishId) };
+}
+
 post('/api/v1/ocr/result', async ({ body, req }) => {
   notify.requireMachine(req);
+  if (body.wish_id !== undefined && body.wish_id !== null) return ok(await wishResult(body));
   const cartId = String(body.cart_id ?? '');
   const row = await db.one(
     "SELECT * FROM cart_items WHERE cart_id = ? AND status IN ('pending','confirmed')", cartId);

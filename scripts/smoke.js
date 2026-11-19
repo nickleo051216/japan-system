@@ -803,6 +803,75 @@ const login = async (id) =>
     await WALL(owner, blank.wish_id, 'hidden');
     }
 
+    {
+    section('後台首頁大按鈕版（2026-11-19）：本團摘要、訂單狀態數字格、今天要處理');
+    const dash = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+    check('首頁拿得到本團摘要（團號、團名）與開放中喊單數',
+      dash.batch_info && dash.batch_info.batch === dash.batch && typeof dash.open_broadcasts === 'number', dash.batch_info);
+    const sc = dash.status_counts || {};
+    check('訂單狀態 6 格都有數字', ['unpaid', 'to_buy', 'to_ship', 'shipping', 'done', 'failed'].every((k) => Number.isInteger(sc[k])), sc);
+    const listOf = async (qs) => (await api('GET', `/api/v1/orders/list?batch=${encodeURIComponent(dash.batch)}&${qs}`, { token: owner })).json.data;
+    const unpaidList = await listOf('unpaid=1');
+    check('點「待收款」的清單筆數跟數字一樣，而且都是還沒付、沒取消的',
+      unpaidList.length === sc.unpaid && unpaidList.every((o) => !o.paid && !['缺貨', '已取消'].includes(o.status)), [unpaidList.length, sc.unpaid]);
+    const buyList = await listOf('status=' + encodeURIComponent('待確認,已報價'));
+    check('點「待採購」（兩種狀態一起）筆數跟數字一樣',
+      buyList.length === sc.to_buy && buyList.every((o) => ['待確認', '已報價'].includes(o.status)), [buyList.length, sc.to_buy]);
+    check('點「已到貨待出貨」筆數跟數字一樣', (await listOf('status=' + encodeURIComponent('已到貨'))).length === sc.to_ship);
+    check('點「缺貨・取消」筆數跟數字一樣', (await listOf('status=' + encodeURIComponent('缺貨,已取消'))).length === sc.failed);
+    check('今天要處理：有等報價的許願就列出來，點了到許願頁',
+      dash.wishes_to_quote > 0 && dash.todo.some((t) => t.kind === 'wish' && t.link === '#/wishes'), dash.todo.map((t) => t.kind));
+    check('小幫手也看得到首頁（但看不到營收）',
+      (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.status_counts !== undefined);
+
+    section('客人首頁的團卡開關（show_trip_card）');
+    const tripOf = async () => (await B('GET', '/api/v1/home/summary')).json.data.shop.show_trip_card;
+    check('沒設定 → null（前台照有沒有開團自動決定）', (await tripOf()) === null);
+    check('選項以外的值 → BAD_SETTING',
+      (await api('POST', '/api/v1/settings/shop', { token: owner, body: { show_trip_card: 'maybe' } })).json.error?.code === 'BAD_SETTING');
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { show_trip_card: 'hide' } });
+    check('設成一律隱藏 → false', (await tripOf()) === false);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { show_trip_card: 'show' } });
+    check('設成一律顯示 → true', (await tripOf()) === true);
+    check('小幫手不能改團卡開關', (await api('POST', '/api/v1/settings/shop', { token: helper, body: { show_trip_card: '' } })).status === 403);
+    await api('POST', '/api/v1/settings/shop', { token: owner, body: { show_trip_card: '' } });
+    check('改回自動 → null', (await tripOf()) === null);
+
+    section('照片許願自動取名（011）：跟拍照下單同一條辨識佇列');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const wjpg = 'data:image/jpeg;base64,' + Buffer.from('fake-wish-ocr').toString('base64');
+    const pw1 = (await B('POST', '/api/v1/wishes/create', { body: { src: 'photo', file_name: 'IMG_7001.jpg', data: wjpg } })).json.data;
+    const pw2 = (await B('POST', '/api/v1/wishes/create', { body: { src: 'photo', file_name: 'IMG_7002.jpg', data: wjpg } })).json.data;
+    const pend = async (extra) => (await api('POST', '/api/v1/ocr/pending', { ...MK, body: { limit: 20, ...extra } })).json.data.jobs;
+    check('舊版 n8n（沒說要許願）拿不到許願工作，不會回寫失敗', (await pend({})).every((j) => j.kind === 'cart'));
+    const wjobs = (await pend({ include_wishes: true })).filter((j) => j.kind === 'wish');
+    check('新版 n8n 帶 include_wishes 才拿到照片許願，照片是簽名網址',
+      wjobs.some((j) => j.wish_id === pw1.wish_id) && wjobs.some((j) => j.wish_id === pw2.wish_id)
+      && wjobs.every((j) => /token=t900/.test(j.image_url)), wjobs);
+    check('領走之後 10 分鐘內不會再發一次', !(await pend({ include_wishes: true })).some((j) => j.kind === 'wish' && j.wish_id === pw1.wish_id));
+    check('沒帶機器金鑰不能回寫',
+      (await api('POST', '/api/v1/ocr/result', { body: { wish_id: pw1.wish_id, name: 'x', ai_confidence: 'high' } })).status === 401);
+    const r1 = (await api('POST', '/api/v1/ocr/result', { ...MK,
+      body: { wish_id: pw1.wish_id, name: 'Combi 手口濕巾 80 抽', name_ja: 'コンビ 手口ふき', ai_confidence: 'high' } })).json.data;
+    check('AI 的品名寫回許願，回應帶新的許願', r1.applied === true && r1.wish.item_name === 'Combi 手口濕巾 80 抽'
+      && r1.wish.item_name_ja === 'コンビ 手口ふき', r1);
+    await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: pw2.wish_id, status: 'public', item_name: 'x' } });
+    await B('POST', '/api/v1/wishes/share', { body: { wish_id: pw2.wish_id, public: true } });
+    const named2 = (await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: pw2.wish_id, status: 'public', item_name: '店家取的名字' } })).json.data;
+    const r2 = (await api('POST', '/api/v1/ocr/result', { ...MK,
+      body: { wish_id: pw2.wish_id, name: 'AI 晚到的名字', ai_confidence: 'high' } })).json.data;
+    check('店家已經改過名 → AI 晚到的結果不覆蓋', named2.item_name === '店家取的名字' && r2.applied === false
+      && r2.wish.item_name === '店家取的名字', r2);
+    const pw3 = (await B('POST', '/api/v1/wishes/create', { body: { src: 'photo', file_name: 'IMG_7003.jpg', data: wjpg } })).json.data;
+    const r3 = (await api('POST', '/api/v1/ocr/result', { ...MK, body: { wish_id: pw3.wish_id, name: '可能是奶瓶', ai_confidence: 'low' } })).json.data;
+    check('AI 沒把握（low）→ 不改名，維持「照片許願」', r3.applied === false && r3.wish.item_name === '照片許願', r3);
+    check('辨識結束的許願不會再發出去（不重複花錢）',
+      !(await pend({ include_wishes: true })).some((j) => j.kind === 'wish' && [pw1.wish_id, pw2.wish_id, pw3.wish_id].includes(j.wish_id)));
+    check('找不到的許願 → 404', (await api('POST', '/api/v1/ocr/result', { ...MK, body: { wish_id: 'W_none', name: 'x', ai_confidence: 'high' } })).status === 404);
+    const aiLog = (await api('GET', '/api/v1/audit/list?limit=30', { token: owner })).json.data.find((l) => l.action === 'wish.ai_name' && l.target === pw1.wish_id);
+    check('稽核記下 AI 取了什麼名字，經手人是系統自動', aiLog?.detail.name === 'Combi 手口濕巾 80 抽' && aiLog.actor_label === '系統自動', aiLog);
+    }
+
     section('後台 — 訂單報價（0 元品項不能漏）');
     const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
     check('沒填日幣的文字品項價格為 null', nx.price_twd === null);

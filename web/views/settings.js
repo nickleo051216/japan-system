@@ -89,7 +89,9 @@ async function shopCard(root) {
   };
 
   const fieldNode = (f) => {
-    const input = h('input', {
+    const input = f.type === 'choice'
+      ? h('select', {}, ...f.options.map(([v, label]) => h('option', { value: v, selected: (data.values[f.key] || '') === v }, label)))
+      : h('input', {
       type: 'text',
       value: data.values[f.key] || '',
       placeholder: f.required ? '必填' : '選填',

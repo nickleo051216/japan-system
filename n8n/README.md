@@ -6,9 +6,11 @@
 | 檔案 | 做什麼 | 多久跑一次 |
 |---|---|---|
 | `notify-collector.json` | 領出貨／對帳單通知 → LINE OA 推播 → 回報結果 | 每分鐘；後端出貨時也會打 Webhook 叫醒 |
-| `ocr-worker.json` | 領待辨識的照片 → OpenRouter（`anthropic/claude-sonnet-5`）讀品名與含稅日幣價 → 回寫（售價由後端查表） | 每分鐘，一次最多 5 張 |
+| `ocr-worker.json` | 領待辨識的照片 → OpenRouter（`anthropic/claude-sonnet-5`）讀品名與含稅日幣價 → 回寫（售價由後端查表）。2026-11-19 起也替**照片許願**取名（只取品名，寫回許願） | 每分鐘，一次最多 5 張 |
 
 兩條都用 `npm run test:n8n` 在本機逐節點跑過：真的後端＋真的資料庫，LINE 和 OpenRouter 用假的伺服器代替。
+
+**2026-11-19 更新**：`ocr-worker.json` 改了 3 個節點（「領取待辨識」多帶 `include_wishes: true`、「組請求」「解析結果」認得許願）。線上的流程要**重新匯入**才會開始替許願取名；沒重新匯入也不會壞，只是許願不會自動取名。後端要先跑 `011_wish_ocr.sql`。
 
 **目前狀態（2026-09-24）**：兩條都已在正式環境啟用，並用真的 LINE 與 OpenRouter 實測過。這兩個檔案是從線上的 n8n 匯出的，線上有改動請重新匯出同步回來。
 

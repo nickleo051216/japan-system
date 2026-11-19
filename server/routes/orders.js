@@ -54,7 +54,12 @@ get('/api/v1/orders/list', async ({ actor, query }) => {
   if (actor.role === 'buyer') { where.push('o.line_user_id = ?'); params.push(actor.line_user_id); }
   else auth.requireCap(actor, 'order.read');
   if (query.batch) { where.push('o.batch = ?'); params.push(query.batch); }
-  if (query.status) { where.push('o.status = ?'); params.push(query.status); }
+  // status 可以用逗號給好幾個（首頁的「待採購」「缺貨・取消」）；unpaid=1 是「待收款」。
+  if (query.status) {
+    const list = String(query.status).split(',').map((x) => x.trim()).filter(Boolean);
+    where.push(`o.status IN (${list.map(() => '?').join(',')})`); params.push(...list);
+  }
+  if (query.unpaid === '1') where.push("NOT o.paid AND o.status NOT IN ('缺貨','已取消')");
   if (query.q) { where.push('(o.order_id LIKE ? OR m.nickname LIKE ?)'); params.push(`%${query.q}%`, `%${query.q}%`); }
   const limit = Math.min(Number(query.limit) || 100, 500);
   const rows = await db.all(

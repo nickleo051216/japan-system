@@ -7,7 +7,8 @@ import { GET, POST, h, nt, jpy, dt, toast, fail, session } from '../app.js';
 export async function render(root, ctx) {
   const canBatch = session.can('settings.write');
 
-  // ---- 開團 ----
+  // ---- 開團 ----（畫在「開喊單」下面：周小姐最常用的是開喊單，要一打開就看到）
+  let batchCard = null;
   if (canBatch) {
     const f = {
       batch: h('input', { type: 'text', placeholder: '例：T-261015' }),
@@ -16,7 +17,7 @@ export async function render(root, ctx) {
       close: h('input', { type: 'datetime-local' }),
     };
     const batches = await GET('/api/v1/settings/batches');
-    root.append(h('div', { class: 'card' },
+    batchCard = h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h2', {}, '開團'), h('div', { class: 'spacer' }),
         h('span', { class: 'muted tiny' }, `目前團別：${batches.current_batch || '尚未設定'}`)),
       h('div', { class: 'card-body' },
@@ -36,7 +37,7 @@ export async function render(root, ctx) {
               ctx.reload();
             } catch (e) { fail(e); }
           },
-        }, '開團'))));
+        }, '開團')));
   }
 
   // ---- 開喊單 ----
@@ -51,7 +52,9 @@ export async function render(root, ctx) {
     deadline: h('input', { type: 'datetime-local' }),
     note: h('input', { type: 'text', placeholder: '備註（選填）' }),
     batchName: h('input', { type: 'text', maxlength: '40', placeholder: '例：11/20 大阪採買' }),
-    photo: h('input', { type: 'file', accept: 'image/*' }),
+    // 「拍商品照」直接開相機（capture）；「從相簿選」給已經拍好的。兩個都藏在按鈕裡面。
+    photo: h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true }),
+    album: h('input', { type: 'file', accept: 'image/*', hidden: true }),
   };
   const maxJpy = info.price_max_jpy;
   const priceHint = h('div', { class: 'tiny muted' }, maxJpy
@@ -76,15 +79,18 @@ export async function render(root, ctx) {
   // 照片：選了就先在手機上壓縮（長邊 1200px、JPEG），再顯示預覽。
   const preview = h('img', { class: 'thumb lg', alt: '', hidden: true });
   let photoData = null;
-  b.photo.addEventListener('change', async () => {
-    photoData = null; preview.hidden = true;
-    const file = b.photo.files && b.photo.files[0];
+  const onPick = (input) => async () => {
+    const file = input.files && input.files[0];
     if (!file) return;
+    photoData = null; preview.hidden = true;
     try {
       photoData = await compressImage(file);
       preview.src = photoData; preview.hidden = false;
-    } catch (e) { showError(e.message); b.photo.value = ''; }
-  });
+      b.name.focus();
+    } catch (e) { showError(e.message); input.value = ''; }
+  };
+  b.photo.addEventListener('change', onPick(b.photo));
+  b.album.addEventListener('change', onPick(b.album));
 
   const batchField = info.batch ? null : h('label', { class: 'field', style: 'min-width:240px' },
     h('span', {}, '這一趟叫什麼？（還沒開團，會一起開）'), b.batchName);
@@ -125,10 +131,14 @@ export async function render(root, ctx) {
     },
   }, '開喊單');
 
-  root.append(h('div', { class: 'card' },
+  root.append(h('div', { class: 'card', id: 'new-broadcast' },
     h('div', { class: 'card-head' }, h('h2', {}, '開喊單')),
     h('div', { class: 'card-body' },
       batchBanner,
+      h('div', { class: 'row', style: 'gap:10px;margin-bottom:12px;align-items:center' },
+        h('label', { class: 'btn primary', style: 'min-height:52px;font-size:16px;padding:10px 20px' }, '📷 拍商品照', b.photo),
+        h('label', { class: 'btn' }, '從相簿選', b.album),
+        preview),
       h('div', { class: 'row', style: 'flex-wrap:wrap;gap:10px' },
         batchField,
         h('label', { class: 'field', style: 'min-width:240px' }, h('span', {}, '品名'), b.name),
@@ -136,11 +146,12 @@ export async function render(root, ctx) {
         h('label', { class: 'field' }, h('span', {}, '台幣（選填）'), b.twd),
         h('label', { class: 'field' }, h('span', {}, '數量'), b.qty),
         h('label', { class: 'field' }, h('span', {}, '截止時間'), b.deadline),
-        h('label', { class: 'field', style: 'min-width:200px' }, h('span', {}, '備註'), b.note),
-        h('label', { class: 'field', style: 'min-width:220px' }, h('span', {}, '商品照片（選填）'), b.photo, preview)),
+        h('label', { class: 'field', style: 'min-width:200px' }, h('span', {}, '備註'), b.note)),
       priceHint,
       formError,
       h('div', { class: 'row', style: 'margin-top:12px' }, submit))));
+
+  if (batchCard) root.append(batchCard);
 
   // ---- 喊單列表 ----
   const list = await GET('/api/v1/broadcast/admin-list');
