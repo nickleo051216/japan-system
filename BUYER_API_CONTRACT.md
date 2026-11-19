@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.5.1
+# 買家 API 合約（Buyer API Contract）v1.5.2
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -132,7 +132,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 3. `GET /home/summary`
 ```json
 { "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "bank_ready", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
-            "ship_fee": { "cvs": 70, "home": 120 }, "ship_free": { "cvs": 2500, "home": null } },
+            "ship_fee": { "cvs": 70, "home": 120 }, "ship_free": { "cvs": 2500, "home": null }, "show_trip_card": null },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
@@ -145,6 +145,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
 - `bank_ready` = 銀行名稱、代碼、帳號三者都有值才是 `true`；`false` 時前台引導改用信用卡／ATM（見 §8 #5）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
+- `show_trip_card`（v1.5.2）= 首頁團卡要不要顯示，店主在後台「店家與收款設定」選：`true` 一律顯示、`false` 一律隱藏、`null` 自動（前台照有沒有開團自己決定，跟以前一樣）
 - `ship_free` = 滿額免運門檻（台幣，v1.3 新增）。**看單張訂單的商品小計（不含運費）**，小計 ≥ 門檻就免運；`null` = 這種取貨方式沒有免運。前台可用 `門檻 − 小計` 顯示「再買 NT$xxx 免運」；實收運費以結帳回傳的 `ship_fee_twd` 為準
 
 ### 5. `POST /cart/add-text`
@@ -195,6 +196,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - 建立時 `wish_status = 待處理`
 - v1.5：
   - 多收 `public: true`（預設 false）→ `wall_status = pending`，等店家審核才上許願牆。
+  - v1.5.2：照片許願沒填品名時，品名先是「照片許願」，後端會送 AI 辨識（跟拍照下單同一條 n8n 流程），認出來就改成商品名（通常 1–2 分鐘）。前台不用改，下次讀 `/wishes/list` 就是新品名。客人或店家改過名的不會被 AI 蓋掉。
   - 照片許願的圖存進私有 Storage（`wish/<wish_id>.<副檔名>`，路徑不含 LINE user ID），`picture` 回 15 分鐘簽名網址。上限 3 MB，格式 JPG／PNG／WebP／HEIC，否則 `BAD_IMAGE`。
   - 許願的回傳（`/wishes/list`、`create`、`keep`、`to-cart`、`share`）多三個欄位：
     - `wall_status`：`private`（只有自己）／`pending`（等店家審核）／`public`（在牆上）／`hidden`（店家收下來了）
@@ -294,6 +296,13 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.1 v1.5.2 變更（2026-11-19，後台改版配套）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | `shop.show_trip_card`：首頁團卡開關（`true`／`false`／`null`＝自動） | 3 |
+| 2 | 照片許願沒填品名時由 AI 自動取名（只改還叫「照片許願」的） | 13、14 |
 
 ## 5.2 v1.5.1 變更（2026-11-11，許願牆修正）
 

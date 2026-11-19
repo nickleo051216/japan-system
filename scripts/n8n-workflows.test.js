@@ -358,7 +358,45 @@ function startHarness() {
     out = await run(ocrWf, '每分鐘');
     check('沒有待辨識的照片就不呼叫模型（不花錢）', mock.claude.length === 0 && !out['組請求'], mock.claude.length);
 
+    section('照片許願自動取名：同一條流程，只取品名寫回許願（011）');
+    const wishes = async () => (await api('GET', '/api/v1/wishes/list', { token: buyer })).data;
+    const w1 = (await api('POST', '/api/v1/wishes/create', { token: buyer,
+      body: { src: 'photo', file_name: 'IMG_9001.jpg', data: jpg, public: true } })).data;
+    const w2 = (await api('POST', '/api/v1/wishes/create', { token: buyer,
+      body: { src: 'photo', file_name: 'IMG_9002.jpg', data: jpg, item_name: '客人自己填的名字' } })).data;
+    check('照片許願沒填品名 → 先叫「照片許願」', w1.item_name === '照片許願' && w2.item_name === '客人自己填的名字');
+    mock.claude.length = 0;
+    mock.claudeScript.push(claudeSays({ name: '阿卡將 限定口水巾 藍色', name_ja: 'アカチャンホンポ スタイ', jpy_taxed: null, confidence: 'medium' }));
+    out = await run(ocrWf, '每分鐘');
+    const wcall = mock.claude.shift();
+    const wuser = wcall && wcall.body.messages.find((m) => m.role === 'user');
+    check('只送「照片許願」那一則去辨識（客人自己填了名的不送、不花錢）',
+      mock.claude.length === 0 && out['組請求'].length === 1 && out['組請求'][0].wish_id === w1.wish_id, out['組請求']);
+    check('許願的提示語說明可能沒有價格、照片用簽名網址',
+      wuser && /可能/.test(wuser.content.find((c) => c.type === 'text').text)
+      && wuser.content.find((c) => c.type === 'image_url').image_url.url.startsWith(mock.base + '/storage/v1/object/sign/'), wuser);
+    const named = (await wishes()).find((x) => x.wish_id === w1.wish_id);
+    check('AI 取的名字寫回許願，日文名一起存', named.item_name === '阿卡將 限定口水巾 藍色'
+      && named.item_name_ja === 'アカチャンホンポ スタイ', named);
+    check('客人自己填的名字不被動到', (await wishes()).find((x) => x.wish_id === w2.wish_id).item_name === '客人自己填的名字');
+    mock.claude.length = 0;
+    out = await run(ocrWf, '每分鐘');
+    check('辨識過的許願不會再送一次（不重複花錢）', mock.claude.length === 0 && !out['組請求'], mock.claude.length);
+
+    const w3 = (await api('POST', '/api/v1/wishes/create', { token: buyer,
+      body: { src: 'photo', file_name: 'IMG_9003.jpg', data: jpg } })).data;
+    mock.claudeScript.push(claudeSays({ name: '', name_ja: null, jpy_taxed: null, confidence: 'low' }));
+    await run(ocrWf, '每分鐘');
+    check('AI 認不出來 → 維持「照片許願」，等店家放上牆時補品名；也不會再送',
+      (await wishes()).find((x) => x.wish_id === w3.wish_id).item_name === '照片許願');
+    mock.claude.length = 0;
+    await run(ocrWf, '每分鐘');
+    check('認不出來的也算辨識結束，不會一直重送', mock.claude.length === 0);
+
     const parse = ocrWf.nodes.find((n) => n.name === '解析結果');
+    const wishParsed = await runCode(parse, { json: { statusCode: 200, body: claudeSays({ name: 'X', name_ja: null, jpy_taxed: null, confidence: 'high' }).body },
+      lineage: { 組請求: { kind: 'wish', wish_id: 'W_x' } } });
+    check('許願的回寫帶 wish_id、不帶 cart_id', wishParsed.result.wish_id === 'W_x' && !('cart_id' in wishParsed.result), wishParsed);
     const refused = await runCode(parse, { json: { statusCode: 200,
       body: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: null, refusal: '不處理' } }] } },
     lineage: { 組請求: { cart_id: 'x' } } });

@@ -99,18 +99,18 @@ export const statusTag = (s) => h('span', { class: 'tag ' + (STATUS_TONE[s] || '
 
 // ---- routes --------------------------------------------------------------
 const ROUTES = [
-  { path: 'dashboard', title: '營運儀表板', icon: '◎', cap: 'order.read', mod: () => import('./views/dashboard.js') },
+  { path: 'dashboard', title: '首頁', icon: '⌂', cap: 'order.read', mod: () => import('./views/dashboard.js') },
   { path: 'orders', title: '訂單管理', icon: '▤', cap: 'order.read', mod: () => import('./views/orders.js') },
   { path: 'statements', title: '對帳單', icon: '$', cap: 'payment.reconcile', mod: () => import('./views/statements.js') },
   { path: 'shop', title: '開團與喊單', icon: '✦', cap: 'broadcast', mod: () => import('./views/shop.js'), group: '上架' },
   { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('./views/wishes.js') },
   { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('./views/board.js'), group: '採購' },
-  { path: 'expense', title: '拍照請款', icon: '¥', cap: 'procurement.write', mod: () => import('./views/expense.js') },
+  { path: 'expense', title: '拍收據記帳', icon: '¥', cap: 'procurement.write', mod: () => import('./views/expense.js') },
   { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('./views/packing.js'), group: '出貨' },
   { path: 'labels', title: 'QR 標籤列印', icon: '▩', cap: 'shipment.write', mod: () => import('./views/labels.js') },
   { path: 'scan', title: '掃碼核對工作站', icon: '⌁', cap: 'shipment.write', mod: () => import('./views/scan.js') },
   { path: 'logistics', title: '進貨物流綁定', icon: '⇄', cap: 'shipment.write', mod: () => import('./views/logistics.js') },
-  { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('./views/audit.js'), group: '設定' },
+  { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('./views/audit.js'), group: '更多設定' },
   { path: 'settings', title: '匯率、價目表與團別', icon: '⚙', cap: 'order.read', mod: () => import('./views/settings.js') },
   { path: 'members', title: '成員與權限', icon: '☺', cap: 'settings.write', mod: () => import('./views/members.js') },
   { path: 'payments', title: '金流設定', icon: '¤', cap: 'settings.write', mod: () => import('./views/payments.js') },
@@ -125,7 +125,8 @@ function parseHash() {
 function renderNav(active) {
   const nav = document.getElementById('sidebar');
   nav.innerHTML = '';
-  nav.append(h('div', { class: 'brand' }, 'HEEEHABABY', h('small', {}, '代購營運後台 · 雛型')));
+  nav.append(h('div', { class: 'brand' }, h('span', { class: 'word' }, 'heeehababy'),
+    h('small', {}, 'LAUGH LIKE A BABY. LIVE LIKE A QUEEN.')));
   let group = null;
   for (const r of ROUTES) {
     if (!session.can(r.cap)) continue;
@@ -136,6 +137,31 @@ function renderNav(active) {
   nav.append(h('div', { class: 'sidebar-foot' },
     h('div', {}, session.member ? `${session.member.nickname}（${roleLabel(session.member.role)}）` : ''),
     h('button', { class: 'btn ghost sm', style: 'padding-left:0', onClick: logout }, '切換身分 / 登出')));
+}
+
+/**
+ * 手機底部的 5 個分頁（浮動膠囊）。最後一格「更多」打開側邊選單，
+ * 金流設定、成員與權限這些店主才用的頁面都在那裡，不佔首頁。
+ */
+const TABS = [
+  { path: 'dashboard', label: '首頁', icon: '⌂' },
+  { path: 'shop', label: '喊單', icon: '✦' },
+  { path: 'orders', label: '訂單', icon: '▤' },
+  { path: 'wishes', label: '許願', icon: '♡' },
+];
+function renderTabbar(active) {
+  const bar = document.getElementById('tabbar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  for (const t of TABS) {
+    const r = ROUTES.find((x) => x.path === t.path);
+    if (!r || !session.can(r.cap)) continue;
+    bar.append(h('a', { href: `#/${t.path}`, class: t.path === active ? 'on' : '', 'aria-current': t.path === active ? 'page' : null },
+      h('span', { class: 'ti', 'aria-hidden': 'true' }, t.icon), t.label));
+  }
+  const inMore = !TABS.some((t) => t.path === active);
+  bar.append(h('button', { type: 'button', class: inMore ? 'on' : '', onClick: toggleNav },
+    h('span', { class: 'ti', 'aria-hidden': 'true' }, '⋯'), '更多'));
 }
 
 export const roleLabel = (r) => ({ owner: '店主', helper: '小幫手', packer: '理貨', buyer: '買家' }[r] || r);
@@ -149,7 +175,8 @@ function renderTop(title, extra) {
   bar.innerHTML = '';
   bar.append(
     h('button', { class: 'menu-btn', type: 'button', 'aria-label': '打開選單', onClick: toggleNav }, '☰'),
-    h('h1', {}, title), h('div', { class: 'spacer' }));
+    // 首頁的標題就是品牌字（樣板：小寫 heeehababy、粗體）。
+    title === '首頁' ? h('h1', { class: 'brand-h' }, 'heeehababy') : h('h1', {}, title), h('div', { class: 'spacer' }));
   if (extra) bar.append(extra);
   if (session.member) {
     bar.append(h('div', { class: 'who' },
@@ -221,6 +248,7 @@ async function lineLogin(liffId, interactive) {
 
 async function renderLogin(err = null) {
   document.getElementById('app').style.display = 'none';
+  document.getElementById('tabbar')?.replaceChildren();
   document.querySelectorAll('.login').forEach((n) => n.remove());
 
   let cfg = { line: { ready: false }, password: true };
@@ -352,6 +380,7 @@ async function route() {
   }
   closeNav();
   renderNav(r.path);
+  renderTabbar(r.path);
   renderTop(r.title);
   const view = document.getElementById('view');
   // 轉圈圈一直顯示到這一頁的資料都拿到為止。頁面先畫在隱藏的容器裡，畫完才換上 ——

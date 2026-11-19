@@ -167,6 +167,8 @@ bget('/api/v1/home/summary', async ({ me }) => {
       // 滿額免運門檻（看單張訂單的商品小計）；null = 這種取貨方式沒有免運。
       // 前台用它顯示「再買 NT$xxx 免運」，實際收費一樣由後端照同一份設定算。
       ship_free: shipfee.freeFromSettings(s),
+      // 首頁團卡：true＝一律顯示、false＝一律隱藏、null＝自動（有開團才顯示，前台自己判斷）。v1.5.2
+      show_trip_card: s.show_trip_card === 'show' ? true : s.show_trip_card === 'hide' ? false : null,
     },
     batch: batch ? {
       batch: batch.batch, name: batch.name, region: batch.region, close_at: batch.close_at,

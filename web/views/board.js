@@ -37,7 +37,7 @@ export async function render(root, ctx) {
         // Locked for everyone else — the button is simply not rendered (F-08 認領機制 3)
         actions.append(h('span', { class: 'tag' }, `🔒 ${r.claimed_by_nickname || '他人'} 認領中`));
       } else if (['got', 'partial'].includes(r.state)) {
-        actions.append(h('a', { class: 'btn sm', href: `#/expense?proc=${r.proc_id}` }, '去請款'));
+        actions.append(h('a', { class: 'btn sm', href: `#/expense?proc=${r.proc_id}` }, '記收據'));
         if (mine || session.member.role === 'owner') actions.append(h('button', { class: 'btn ghost sm', onClick: () => resultDialog(r) }, '修改結果'));
       } else if (r.state === 'out_of_stock' && (mine || session.member.role === 'owner')) {
         actions.append(h('button', { class: 'btn ghost sm', onClick: () => resultDialog(r) }, '修改結果'));

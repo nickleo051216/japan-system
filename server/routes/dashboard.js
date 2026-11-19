@@ -71,7 +71,30 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
   const toShip = orders.filter((o) => o.status === STATUS.ARRIVED).length;
   if (toShip) todo.push({ urgency: 3, kind: 'to_ship', title: `${toShip} 張訂單待出貨`, body: '可列印標籤後掃碼核對', link: '#/packing' });
   if (uncostedRevenue > 0) todo.push({ urgency: 4, kind: 'uncosted', title: '尚有品項未登錄成本', body: `對應營收 ${ntw(uncostedRevenue)} 未計入毛利`, link: '#/board' });
+  // 許願：等報價、等審核上牆。周小姐每天要看的兩件事，放進「今天要處理」。
+  const wishCounts = await db.one(
+    `SELECT count(*) FILTER (WHERE wish_status = '待處理') AS to_quote,
+            count(*) FILTER (WHERE wall_status = 'pending') AS to_review
+       FROM wishlist`);
+  const toReview = Number(wishCounts.to_review);
+  const toQuote = Number(wishCounts.to_quote);
+  if (toReview) todo.push({ urgency: 2, kind: 'wall', title: `${toReview} 則許願等你審核上牆`, body: '客人勾了「公開到許願牆」', link: '#/wishes?tab=待上牆' });
+  if (toQuote) todo.push({ urgency: 3, kind: 'wish', title: `${toQuote} 則許願等報價`, body: '報了價客人才能加購物車', link: '#/wishes' });
   todo.sort((a, b) => a.urgency - b.urgency);
+
+  // 訂單狀態數字格：點了直接跳到訂單管理的同一個篩選，所以數字跟清單要一致（都是這一團）。
+  const counts = await db.one(
+    `SELECT count(*) FILTER (WHERE NOT paid AND status NOT IN ('缺貨','已取消')) AS unpaid,
+            count(*) FILTER (WHERE status IN ('待確認','已報價')) AS to_buy,
+            count(*) FILTER (WHERE status = '已到貨') AS to_ship,
+            count(*) FILTER (WHERE status = '已出貨') AS shipping,
+            count(*) FILTER (WHERE status = '已送達') AS done,
+            count(*) FILTER (WHERE status IN ('缺貨','已取消')) AS failed
+       FROM orders WHERE batch = ?`, batch);
+  const batchRow = batch ? await db.one('SELECT batch, name, region, close_at, buy_at, back_at, ship_at FROM batches WHERE batch = ?', batch) : null;
+  const openBroadcasts = Number((await db.one(
+    `SELECT count(*) AS n FROM broadcast WHERE batch = ? AND remaining > 0
+        AND (deadline_at IS NULL OR deadline_at > now())`, batch)).n);
 
   const data = {
     batch,
@@ -81,6 +104,12 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     order_count: orders.length,
     pending_procurement_pieces: pendingPieces,
     pending_shipment_count: toShip,
+    // 首頁大按鈕版（2026-11-19）
+    batch_info: batchRow,
+    open_broadcasts: openBroadcasts,
+    wishes_to_quote: toQuote,
+    wall_to_review: toReview,
+    status_counts: Object.fromEntries(Object.entries(counts).map(([k, v]) => [k, Number(v)])),
     // F-22 毛利呈現規則: uncosted lines are excluded from the denominator and
     // reported separately, never filled in with estimates.
     cost_registered_twd: money.round2(costedCost),
@@ -176,6 +205,9 @@ const SHOP_FIELDS = [
     hint: '同上，宅配到府用' },
   { key: 'shout_drop_limit',      label: '喊單棄單上限（次）', type: 'int',    lo: 1, hi: 99,
     hint: '客人取消喊單累積到這個次數就暫停喊單，對帳單付清後自動恢復。留空＝1 次' },
+  { key: 'show_trip_card',        label: '客人首頁的團卡',   type: 'choice',
+    options: [['', '自動（有開團才顯示）'], ['show', '一律顯示'], ['hide', '一律隱藏']],
+    hint: '客人 LINE 首頁上方那張「這一團」卡片要不要出現' },
 ];
 
 /** Normalise one field for storage, or throw a 400 the owner can act on. */
@@ -184,6 +216,10 @@ function shopValue(field, raw) {
   if (!v) {
     if (field.required) throw err('BAD_SETTING', `${field.label}不能空白`);
     return '';
+  }
+  if (field.type === 'choice') {
+    if (!field.options.some(([k]) => k === v)) throw err('BAD_SETTING', `${field.label}的選項不正確`);
+    return v;
   }
   if (field.type === 'digits') {
     if (!/^[0-9]+$/.test(v)) throw err('BAD_SETTING', `${field.label}只能填數字`);

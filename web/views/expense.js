@@ -1,7 +1,7 @@
 import { GET, POST, h, nt, jpy, pct, toast, fail, session } from '../app.js';
 
 /**
- * F-07 拍照請款.
+ * F-07 拍收據記帳（原「拍照請款」，2026-11-19 改名：周小姐以為這裡是放商品照的地方）.
  * The order of the steps is the point: pick the product FIRST, then shoot the
  * receipt, so OCR only ever has to read one number — and that number always
  * needs human confirmation before it is written.
@@ -13,9 +13,13 @@ export async function render(root, ctx) {
 
   const state = { proc: candidates.find((r) => r.proc_id === ctx.query.proc) || null, receiptUrl: null, ocr: null };
 
+  // 周小姐 11/18 在這裡找不到放商品照的地方 —— 這頁是記「買了多少錢」的，商品照在開喊單。
+  root.append(h('div', { class: 'banner warn', style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' },
+    h('span', { style: 'flex:1;min-width:200px' }, '📷 這裡是拍「收據」記成本的。商品照片請到「開喊單」上傳。'),
+    h('a', { class: 'btn sm primary', href: '#/shop?new=1' }, '去開喊單 →')));
   root.append(h('div', { class: 'banner info' },
-    '步驟固定為「先選商品 → 再拍收據 → 確認金額」。日文收據品名無法可靠對應中文品名，'
-    + '因此不讓 AI 判斷收據屬於哪個商品，OCR 只負責讀金額，且必須人工確認才寫入。'));
+    '步驟：先選商品 → 再拍收據 → 確認金額。日文收據的品名對不上中文品名，'
+    + '所以 AI 只讀金額，而且一定要人工確認才會寫入。'));
 
   const step1 = h('div', { class: 'card' });
   const step2 = h('div', { class: 'card' });
@@ -25,9 +29,9 @@ export async function render(root, ctx) {
   function renderStep1() {
     step1.innerHTML = '';
     step1.append(h('div', { class: 'card-head' }, h('h2', {}, '① 選擇商品'), h('div', { class: 'spacer' }),
-      h('span', { class: 'muted tiny' }, '本團尚未完成請款的品項')));
+      h('span', { class: 'muted tiny' }, '本團還沒記帳的品項')));
     const body = h('div', { class: 'card-body', style: 'display:grid;gap:8px' });
-    if (!candidates.length) body.append(h('div', { class: 'muted small' }, '目前沒有可請款的品項。'));
+    if (!candidates.length) body.append(h('div', { class: 'muted small' }, '目前沒有要記帳的品項。'));
     for (const r of candidates) {
       const selected = state.proc && state.proc.proc_id === r.proc_id;
       body.append(h('button', {

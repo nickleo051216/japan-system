@@ -2,16 +2,28 @@ import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '..
 import { openCreateOrder } from './order-create.js';
 
 const STATUSES = ['待確認', '已報價', '已到貨', '已出貨', '已送達', '缺貨', '已取消'];
+const UNPAID = '__unpaid';
+const COMBOS = [['待確認,已報價', '待採購（待確認＋已報價）'], ['缺貨,已取消', '缺貨・取消']];
 
 export async function render(root, ctx) {
-  const state = { status: ctx.query.status || '', q: '' };
+  // 首頁數字格點進來會帶篩選：unpaid=1（待收款）、status 可以是好幾個（待採購、缺貨・取消）、batch（只看這一團）。
+  const state = { status: ctx.query.unpaid === '1' ? UNPAID : (ctx.query.status || ''), q: '', batch: ctx.query.batch || '' };
+  const known = [UNPAID, ...COMBOS.map((c) => c[0]), ...STATUSES];
+  const custom = state.status && !known.includes(state.status) ? state.status : null;
 
+  const batchChip = state.batch ? h('span', { class: 'tag' }, `只看 ${state.batch} `,
+    h('a', { href: '#', style: 'text-decoration:none', 'aria-label': '看全部團',
+      onClick: (e) => { e.preventDefault(); state.batch = ''; batchChip.remove(); load(); } }, '✕')) : null;
   const filters = h('div', { class: 'card-head' },
     h('h2', {}, '訂單'),
+    batchChip,
     h('div', { class: 'spacer' }),
-    h('select', { style: 'width:150px', onChange: (e) => { state.status = e.target.value; load(); } },
+    h('select', { style: 'width:170px', onChange: (e) => { state.status = e.target.value; load(); } },
       h('option', { value: '' }, '全部狀態'),
-      ...STATUSES.map((s) => h('option', { value: s, selected: s === state.status }, s))),
+      h('option', { value: UNPAID, selected: state.status === UNPAID }, '待收款（還沒付）'),
+      ...COMBOS.map(([v, label]) => h('option', { value: v, selected: v === state.status }, label)),
+      ...STATUSES.map((s) => h('option', { value: s, selected: s === state.status }, s)),
+      custom ? h('option', { value: custom, selected: true }, custom) : null),
     h('input', { type: 'search', placeholder: '訂單編號 / 暱稱', style: 'width:200px', onInput: (e) => { state.q = e.target.value; clearTimeout(state.t); state.t = setTimeout(load, 250); } }),
     session.can('payment.reconcile') ? h('button', { class: 'btn', onClick: reconcileDialog }, '付款對帳') : null,
     session.can('order.write') ? h('button', {
@@ -30,7 +42,9 @@ export async function render(root, ctx) {
 
   async function load() {
     const qs = new URLSearchParams();
-    if (state.status) qs.set('status', state.status);
+    if (state.status === UNPAID) qs.set('unpaid', '1');
+    else if (state.status) qs.set('status', state.status);
+    if (state.batch) qs.set('batch', state.batch);
     if (state.q) qs.set('q', state.q);
     const orders = await GET('/api/v1/orders/list?' + qs);
     tbody.innerHTML = '';

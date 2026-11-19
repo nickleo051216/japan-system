@@ -87,6 +87,7 @@ const SAY = {
   'wish.mark': (t, d) => [`把許願「${t}」標記為${q(d.status)}`, ''],
   'wish.wall': (t, d) => [d.to === 'public' ? `把許願「${t}」放上許願牆` : `把許願「${t}」從許願牆收下來`,
     d.renamed ? `品名從「${d.renamed.from}」改成「${d.renamed.to}」` : (d.reason || '')],
+  'wish.ai_name': (t, d) => [`AI 看照片替許願取名：「${d.name}」`, '原本是「照片許願」；店家放上牆時還可以改'],
   'wish.to_broadcast': (t, d) => [`把許願「${t}」轉成喊單 ${d.send_id}`, `LINE 通知想要的 ${d.notified} 個人`],
 
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, ''],
