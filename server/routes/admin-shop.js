@@ -826,4 +826,4 @@ post('/api/v1/orders/create', async ({ actor, body }) => {
 });
 
 
-module.exports = { autoStatementStatus };
+module.exports = { autoStatementStatus, createBroadcast, signedShape };

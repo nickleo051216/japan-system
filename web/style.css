@@ -390,3 +390,21 @@ tr:last-child td { border-bottom: 0; }
 .lc-card .lc-acts { display: flex; gap: 8px; }
 .lc-card .lc-acts .btn.primary { flex: 1; }
 .chips .chip.on { background: var(--accent); border-color: #e9c35f; color: var(--accent-ink); font-weight: 700; }
+
+/* ---- 多張照片上架（2026-11-25 照周小姐影片 1）---- */
+details.listing > summary { cursor: pointer; list-style: none; }
+details.listing > summary::-webkit-details-marker { display: none; }
+details.listing > summary h2::before { content: '▸ '; color: var(--ink-soft); }
+details.listing[open] > summary h2::before { content: '▾ '; }
+.ld-list { display: grid; gap: 12px; }
+.ld-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: #fffdf8; }
+.ld-row img { width: 96px; height: 96px; object-fit: cover; border-radius: 12px; border: 1px solid var(--line); }
+.ld-fields { display: grid; gap: 0; min-width: 0; }
+.ld-fields .field { margin-bottom: 8px; }
+.ld-fields .btn { justify-self: start; }
+.warn-ink { color: var(--brick); }
+.ld-foot { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 0 calc(4px + env(safe-area-inset-bottom, 0px)); background: linear-gradient(transparent, #fff 30%); }
+@media (max-width: 860px) {
+  .ld-row { grid-template-columns: 72px minmax(0, 1fr); }
+  .ld-row img { width: 72px; height: 72px; }
+}

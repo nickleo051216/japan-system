@@ -55,6 +55,8 @@ function boot() {
   require('./routes/helper');
   // 站內通知中心：客人看自己的通知紀錄（跟 LINE 同一份）。
   require('./routes/inbox');
+  // 多張照片一次上架（017）。
+  require('./routes/listings');
   // 後台設定：價目表、成員與權限。
   require('./routes/admin-config');
   // 綠界：付款結果回調、後台金流設定。

@@ -934,6 +934,53 @@ const login = async (id) =>
     check('稽核記下 AI 取了什麼名字，經手人是系統自動', aiLog?.detail.name === 'Combi 手口濕巾 80 抽' && aiLog.actor_label === '系統自動', aiLog);
     }
 
+    {
+    section('多張照片一次上架（017）：每張照片 = 一件商品，AI 讀品名和台幣售價，一起刊登');
+    const MK = { 'X-Notify-Token': 'smoke-notify-secret' };
+    const jpgL = 'data:image/jpeg;base64,' + Buffer.from('fake-listing-jpeg').toString('base64');
+    const up = async (body) => api('POST', '/api/v1/listings/upload', { token: owner, body });
+    const a1 = (await up({ data: jpgL, size_note: '90 / 100 / 110' })).json.data;
+    const a2 = (await up({ data: jpgL })).json.data;
+    const a3 = (await up({ data: jpgL })).json.data;
+    check('上傳 3 張 → 3 筆草稿，先顯示「正在辨識照片…」，照片放在喊單資料夾', [a1, a2, a3].every((d) => d && d.ocr === 'reading' && /正在辨識/.test(d.hint))
+      && storageMock.objects.has(`broadcast/draft-${a1.draft_id}.jpg`), [a1, a2, a3]);
+    check('不是圖片 → BAD_IMAGE', (await up({ data: 'nope' })).json.error?.code === 'BAD_IMAGE');
+    check('小幫手不能上架 → 403', (await api('POST', '/api/v1/listings/upload', { token: helper, body: { data: jpgL } })).status === 403);
+    const oldFlow = (await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_wishes: true } })).json.data.jobs;
+    check('舊版 n8n（沒帶 include_listings）領不到上架照片', !oldFlow.some((j) => j.kind === 'listing'));
+    const jobs = (await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_listings: true } })).json.data.jobs.filter((j) => j.kind === 'listing');
+    check('新版帶 include_listings → 3 張照上傳順序領走，附簽名網址', jobs.map((j) => j.listing_id).join() === [a1, a2, a3].map((d) => d.draft_id).join()
+      && jobs.every((j) => j.image_url.startsWith(STORAGE_MOCK_URL)), jobs);
+    await api('POST', '/api/v1/listings/update', { token: owner, body: { draft_id: a3.draft_id, name: '店主先打的名字' } });
+    const res = async (b) => (await api('POST', '/api/v1/ocr/result', { headers: MK, body: b })).json.data;
+    const r1 = await res({ listing_id: a1.draft_id, name: '小花刺繡圍兜', price_twd: 390, ai_confidence: 'high' });
+    const r2 = await res({ listing_id: a2.draft_id, name: '溫柔小花紗布巾', jpy_taxed: 1639, ai_confidence: 'medium' });
+    const r3 = await res({ listing_id: a3.draft_id, name: 'AI 的名字', price_twd: 500, ai_confidence: 'high' });
+    check('讀到台幣 $390 → 品名、售價都填好', r1.applied && r1.draft.name === '小花刺繡圍兜' && r1.draft.price_twd === 390 && /請確認/.test(r1.draft.hint), r1);
+    check('照片上只有日幣 → 用價目表換成台幣', r2.draft.price_twd > 0 && r2.draft.jpy_taxed === 1639, r2.draft);
+    check('店主已經改過的 → AI 結果不蓋掉', r3.applied === false && r3.draft.name === '店主先打的名字' && r3.draft.price_twd === null
+      && /未辨識到單一台幣售價/.test(r3.draft.hint), r3);
+    const nopub = await api('POST', '/api/v1/listings/publish', { token: owner, body: { items: [{ draft_id: a1.draft_id }, { draft_id: a3.draft_id }] } });
+    check('有一件還沒台幣售價 → BAD_PRICE，一件都不刊登', nopub.json.error?.code === 'BAD_PRICE'
+      && (await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.filter((d) => [a1, a3].some((x) => x.draft_id === d.draft_id)).length === 2, nopub.json);
+    const pub = await api('POST', '/api/v1/listings/publish', { token: owner, body: { quantity: 3,
+      items: [{ draft_id: a1.draft_id }, { draft_id: a2.draft_id, name: '紗布巾（改名）' }, { draft_id: a3.draft_id, price_twd: 450 }] } });
+    const bcs = pub.json.data?.broadcasts || [];
+    check('一起刊登 3 件 → 開出 3 張喊單，照片、名稱、價錢、數量都對', pub.status === 200 && pub.json.data.count === 3
+      && bcs[0].name === '小花刺繡圍兜' && bcs[0].price_twd === 390 && bcs[1].name === '紗布巾（改名）' && bcs[2].price_twd === 450
+      && bcs.every((b) => b.quantity === 3 && b.image_url && b.image_url.startsWith(STORAGE_MOCK_URL)), pub.json);
+    check('尺寸備註「90 / 100 / 110」→ 變成喊單的尺寸選項', JSON.stringify(bcs[0].sizes) === '["90","100","110"]', bcs[0].sizes);
+    check('刊登後草稿清單清空', !(await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.some((d) => [a1, a2, a3].some((x) => x.draft_id === d.draft_id)));
+    const again = await api('POST', '/api/v1/listings/publish', { token: owner, body: { items: [{ draft_id: a1.draft_id }] } });
+    check('同一張不能刊登兩次 → ALREADY_POSTED', again.json.error?.code === 'ALREADY_POSTED', again.json);
+    const a4 = (await up({ data: jpgL })).json.data;
+    await api('POST', '/api/v1/listings/remove', { token: owner, body: { draft_id: a4.draft_id } });
+    check('移除的照片不在清單，也不會再送去辨識', !(await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.some((d) => d.draft_id === a4.draft_id)
+      && !(await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_listings: true } })).json.data.jobs.some((j) => j.listing_id === a4.draft_id));
+    const home = (await B('GET', '/api/v1/home/summary')).json.data;
+    check('客人首頁看得到剛刊登的喊單', bcs.every((b) => home.broadcast.some((x) => x.send_id === b.send_id)));
+    }
+
     section('後台 — 訂單報價（0 元品項不能漏）');
     const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
     check('沒填日幣的文字品項價格為 null', nx.price_twd === null);

@@ -533,7 +533,9 @@ post('/api/v1/ocr/pending', async ({ body, req }) => {
     OCR_MAX_ATTEMPTS, String(OCR_LEASE_MINUTES), n);
   // 給 n8n 的是 15 分鐘就失效的簽名網址，不是永久連結。
   const jobs = await storage.resolve(res.rows.map((r) => ({ kind: 'cart', ...r })), 'image_url');
-  // 購物車優先（客人在等），剩下的名額才給許願。
+  // 購物車優先（客人在等），再來是店主正在上架的照片（017），剩下的名額才給許願。
+  // 舊版流程不認得上架照片，所以要 n8n 帶 include_listings: true 才給。
+  if (body && body.include_listings === true) jobs.push(...await require('./listings').claimListingJobs(n - jobs.length));
   if (body && body.include_wishes === true) jobs.push(...await claimWishJobs(n - jobs.length));
   return ok({ jobs, count: jobs.length, lease_minutes: OCR_LEASE_MINUTES });
 }, { idempotent: false });
@@ -581,6 +583,7 @@ async function wishResult(body) {
 post('/api/v1/ocr/result', async ({ body, req }) => {
   notify.requireMachine(req);
   if (body.wish_id !== undefined && body.wish_id !== null) return ok(await wishResult(body));
+  if (body.listing_id !== undefined && body.listing_id !== null) return ok(await require('./listings').listingResult(body));
   const cartId = String(body.cart_id ?? '');
   const row = await db.one(
     "SELECT * FROM cart_items WHERE cart_id = ? AND status IN ('pending','confirmed')", cartId);

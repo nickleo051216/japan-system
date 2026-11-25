@@ -169,6 +169,9 @@ export async function render(root, ctx) {
       formError,
       h('div', { class: 'row', style: 'margin-top:12px' }, submit))));
 
+  // ---- 多張照片上架（2026-11-25 照周小姐影片 1；017）----
+  root.append(await listingCard(ctx, info, b.batchName));
+
   if (batchCard) root.append(batchCard);
 
   // ---- 喊單列表 ----
@@ -251,4 +254,142 @@ export function compressImage(file, maxSide = 1200, quality = 0.85) {
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('讀不到這張照片，請換一張（JPG 或 PNG）')); };
     img.src = url;
   });
+}
+
+/**
+ * ▼ 多張照片上架：一次選好幾張，每張是一件商品。
+ * 每張上傳後交給 AI（n8n 拍照辨識）讀品名和照片上的台幣售價；讀不到就請店主填。
+ * 改過的欄位離開時就存回後端（之後才到的 AI 結果不會蓋掉）。最下面「一起刊登 N 件商品」一次開 N 張喊單。
+ */
+async function listingCard(ctx, info, batchNameInput) {
+  let drafts = [];
+  try { drafts = await GET('/api/v1/listings/drafts'); } catch { /* 017 還沒跑 */ return h('span'); }
+  const box = h('details', { class: 'card listing', open: drafts.length > 0 || ctx.query.multi === '1' });
+  const list = h('div', { class: 'ld-list' });
+  const errBox = h('div', { class: 'small', role: 'alert', style: 'color:var(--red)' });
+  const status = h('span', { class: 'tiny muted' });
+  const qty = h('input', { type: 'number', min: '1', value: '1', inputmode: 'numeric', style: 'width:90px' });
+  const publishBtn = h('button', { class: 'btn primary', type: 'button' }, '一起刊登 0 件商品');
+  const rows = new Map();   // draft_id → { d, name, price, size, hint, el }
+  let tick = 0;
+
+  const save = async (r, field) => {
+    const body = { draft_id: r.d.draft_id };
+    if (field === 'name') body.name = r.name.value;
+    if (field === 'price') body.price_twd = r.price.value === '' ? null : Number(r.price.value);
+    if (field === 'size') body.size_note = r.size.value;
+    try { r.d = await POST('/api/v1/listings/update', body); paintHint(r); } catch (e) { errBox.textContent = e.message; }
+  };
+  const paintHint = (r) => {
+    const reading = r.d.ocr === 'reading';
+    r.hint.textContent = reading ? (tick % 2 ? '正在讀取台幣售價…' : '正在辨識照片…')
+      : !r.price.value ? '未辨識到單一台幣售價，請填寫' : '請確認商品名稱，可直接修改';
+    r.hint.className = 'tiny ' + (reading ? 'muted' : !r.price.value ? 'warn-ink' : 'muted');
+  };
+  const refreshBtn = () => {
+    const n = rows.size;
+    publishBtn.textContent = `一起刊登 ${n} 件商品`;
+    publishBtn.disabled = !n;
+  };
+  const addRow = (d) => {
+    const r = {
+      d,
+      price: h('input', { type: 'number', min: '1', inputmode: 'numeric', placeholder: '台幣售價', value: d.price_twd ?? '' }),
+      name: h('input', { type: 'text', maxlength: '60', placeholder: '商品名稱', value: d.name || '' }),
+      size: h('input', { type: 'text', maxlength: '40', placeholder: '例如 90 / 100 / 110', value: d.size_note || '' }),
+      hint: h('div', { class: 'tiny muted' }),
+    };
+    r.price.addEventListener('change', () => save(r, 'price'));
+    r.name.addEventListener('change', () => save(r, 'name'));
+    r.size.addEventListener('change', () => save(r, 'size'));
+    r.el = h('div', { class: 'ld-row' },
+      h('img', { src: d.image_url, alt: '商品照', loading: 'lazy' }),
+      h('div', { class: 'ld-fields' },
+        h('label', { class: 'field' }, h('span', {}, '台幣售價'), r.price),
+        h('label', { class: 'field' }, h('span', {}, '商品名稱'), r.name, r.hint),
+        h('label', { class: 'field' }, h('span', {}, '尺寸備註（選填）'), r.size),
+        h('button', { class: 'btn ghost sm', type: 'button', onClick: async () => {
+          try { await POST('/api/v1/listings/remove', { draft_id: d.draft_id }); r.el.remove(); rows.delete(d.draft_id); refreshBtn(); }
+          catch (e) { errBox.textContent = e.message; }
+        } }, '移除')));
+    rows.set(d.draft_id, r);
+    paintHint(r);
+    list.append(r.el);
+    refreshBtn();
+  };
+  drafts.forEach(addRow);
+  refreshBtn();
+
+  // 辨識還沒好就每 4 秒問一次；人正在打字的欄位不動，空的欄位才填 AI 的結果。
+  let timer = null;
+  const poll = async () => {
+    timer = null;
+    if (!box.isConnected) return;
+    tick += 1;
+    const reading = [...rows.values()].some((r) => r.d.ocr === 'reading');
+    if (!reading) return;
+    try {
+      const fresh = await GET('/api/v1/listings/drafts');
+      for (const d of fresh) {
+        const r = rows.get(d.draft_id);
+        if (!r) continue;
+        r.d = d;
+        if (!r.name.value && d.name && document.activeElement !== r.name) r.name.value = d.name;
+        if (!r.price.value && d.price_twd && document.activeElement !== r.price) r.price.value = d.price_twd;
+      }
+    } catch { /* 下一輪再試 */ }
+    rows.forEach(paintHint);
+    timer = setTimeout(poll, 4000);
+  };
+  const kick = () => { if (!timer) timer = setTimeout(poll, 2500); };
+  kick();
+
+  const pick = async (input) => {
+    errBox.textContent = '';
+    const files = [...(input.files || [])];
+    input.value = '';
+    for (const [i, file] of files.entries()) {
+      status.textContent = `上傳中 ${i + 1}/${files.length}…`;
+      try {
+        // 一張一張傳：一次全部塞進同一個請求會超過伺服器 4.5 MB 的上限。
+        const data = await compressImage(file);
+        addRow(await POST('/api/v1/listings/upload', { data }));
+      } catch (e) { errBox.textContent = e.message; }
+    }
+    status.textContent = '';
+    kick();
+  };
+  const album = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true });
+  const camera = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true });
+  album.addEventListener('change', () => pick(album));
+  camera.addEventListener('change', () => pick(camera));
+
+  publishBtn.addEventListener('click', async () => {
+    errBox.textContent = '';
+    const items = [...rows.values()].map((r) => ({ draft_id: r.d.draft_id, name: r.name.value.trim(),
+      price_twd: r.price.value === '' ? null : Number(r.price.value), size_note: r.size.value.trim() }));
+    const bad = items.findIndex((x) => !x.name || !(x.price_twd > 0));
+    if (bad >= 0) { errBox.textContent = `第 ${bad + 1} 件還沒填${!items[bad].name ? '商品名稱' : '台幣售價'}`; return; }
+    if (!info.batch && !batchNameInput.value.trim()) { errBox.textContent = '還沒開團：請在上面「開喊單」填「這一趟叫什麼」'; return; }
+    publishBtn.disabled = true; publishBtn.textContent = '刊登中…';
+    try {
+      const res = await POST('/api/v1/listings/publish', { items, quantity: Number(qty.value) || 1,
+        batch_name: info.batch ? undefined : batchNameInput.value.trim() });
+      toast(`已刊登 ${res.count} 件商品`);
+      ctx.reload();
+    } catch (e) { errBox.textContent = e.message; refreshBtn(); }
+  });
+
+  box.append(
+    h('summary', { class: 'card-head' }, h('h2', {}, '多張照片上架'), h('span', { class: 'tiny muted' }, '一張照片＝一件商品，AI 讀品名和台幣售價')),
+    h('div', { class: 'card-body' },
+      h('div', { class: 'row', style: 'gap:8px' },
+        h('label', { class: 'btn primary' }, '選擇商品照片（可多選）', album),
+        h('label', { class: 'btn' }, '📷 拍照', camera), status),
+      h('div', { class: 'tiny muted', style: 'margin:8px 0' }, '照片上貼台幣價格標（例如 $390）最準。讀不到價錢的，請自己填。'),
+      list, errBox,
+      h('div', { class: 'ld-foot' },
+        h('label', { class: 'row tiny', style: 'gap:6px' }, '每件數量', qty),
+        h('span', { class: 'spacer', style: 'flex:1' }), publishBtn)));
+  return box;
 }
