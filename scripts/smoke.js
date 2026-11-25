@@ -657,6 +657,53 @@ const login = async (id) =>
       (await api('POST', '/api/v1/broadcast/close', { token: owner, body: { send_id: bc.send_id } })).status === 200
       && (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((b) => b.send_id === bc.send_id).open === false);
 
+    {
+    section('每日連線＋1（v1.6）：上架日期、多張照片、尺寸');
+    const pic = (t) => 'data:image/jpeg;base64,' + Buffer.from(t).toString('base64');
+    const BI2 = (body) => api('POST', '/api/v1/broadcast/image', { token: owner, body });
+    const sz = (await api('POST', '/api/v1/broadcast/create', { token: owner,
+      body: { name: '西松屋 連身衣', price_twd: 450, quantity: 5, sizes: '90, 100,110,90' } })).json.data;
+    check('開喊單帶尺寸 → 去掉重複、照順序存', JSON.stringify(sz.sizes) === '["90","100","110"]', sz.sizes);
+    check('尺寸太多 → BAD_SIZES', (await api('POST', '/api/v1/broadcast/create', { token: owner,
+      body: { name: 'x', price_twd: 100, quantity: 1, sizes: Array.from({ length: 21 }, (_, i) => String(i)) } })).json.error?.code === 'BAD_SIZES');
+    await BI2({ send_id: sz.send_id, data: pic('p1'), mode: 'append' });
+    await BI2({ send_id: sz.send_id, data: pic('p2'), mode: 'append' });
+    await BI2({ send_id: sz.send_id, data: pic('p3'), mode: 'append' });
+    const four = (await BI2({ send_id: sz.send_id, data: pic('p4'), mode: 'append' })).json.data;
+    check('一張一張加到 4 張，第 1 張是封面（image_url）', four.images.length === 4 && four.image_url === four.images[0]
+      && four.images.every((u) => /token=t900/.test(u)), four.images);
+    check('超過 4 張 → TOO_MANY_IMAGES', (await BI2({ send_id: sz.send_id, data: pic('p5'), mode: 'append' })).json.error?.code === 'TOO_MANY_IMAGES');
+    const rm = (await api('POST', '/api/v1/broadcast/image/remove', { token: owner, body: { send_id: sz.send_id, index: 0 } })).json.data;
+    check('拿掉第 1 張 → 剩 3 張，原本的第 2 張變封面', rm.images.length === 3 && rm.image_url === rm.images[0] && rm.images[0] === four.images[1], rm.images);
+    check('拿掉不存在的那張 → BAD_INDEX', (await api('POST', '/api/v1/broadcast/image/remove', { token: owner, body: { send_id: sz.send_id, index: 9 } })).json.error?.code === 'BAD_INDEX');
+    check('小幫手不能改照片與尺寸', (await api('POST', '/api/v1/broadcast/sizes', { token: helper, body: { send_id: sz.send_id, sizes: '80' } })).status === 403);
+    const hb = (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((x) => x.send_id === sz.send_id);
+    check('客人首頁：上架時間、3 張簽名照片、尺寸選項', !!hb && !!hb.listed_at && hb.images.length === 3
+      && hb.images.every((u) => /token=t900/.test(u)) && JSON.stringify(hb.sizes) === '["90","100","110"]', hb);
+    const plain = (await B('GET', '/api/v1/home/summary')).json.data.broadcast.find((x) => x.send_id === 'BC-SEED-002');
+    check('沒尺寸的喊單 sizes = null、沒照片 images = []', plain.sizes === null && Array.isArray(plain.images), plain);
+    const SH = (body) => B('POST', '/api/v1/broadcast/shout', { body: { send_id: sz.send_id, ...body } });
+    check('有尺寸的喊單沒選尺寸 → SIZE_REQUIRED（訊息列出可選的）', (await SH({ qty: 1 })).json.error?.code === 'SIZE_REQUIRED');
+    check('選了沒有的尺寸 → BAD_SIZE', (await SH({ qty: 1, size: '120' })).json.error?.code === 'BAD_SIZE');
+    const s90 = (await SH({ qty: 1, size: '90' })).json.data;
+    check('喊 90 → 購物車品項記住尺寸', s90.cart_item.size === '90', s90.cart_item);
+    const s90b = (await SH({ qty: 1, size: '90' })).json.data;
+    check('同一尺寸再喊 → 合併成同一筆、數量 2', s90b.cart_item.cart_id === s90.cart_item.cart_id && s90b.cart_item.qty === 2, s90b.cart_item);
+    const s100 = (await SH({ qty: 1, size: '100' })).json.data;
+    check('換尺寸 100 → 另一筆', s100.cart_item.cart_id !== s90.cart_item.cart_id && s100.cart_item.size === '100');
+    check('尺寸共用數量：剩 2（5 − 3）', s100.remaining === 2, s100);
+    const plainBc = (await api('POST', '/api/v1/broadcast/create', { token: owner, body: { name: '不分尺寸的襪子', price_twd: 120, quantity: 3 } })).json.data;
+    const plainShout = (await B('POST', '/api/v1/broadcast/shout', { body: { send_id: plainBc.send_id, qty: 1, size: '90' } })).json.data;
+    check('沒尺寸的喊單帶 size 也照常，不記尺寸', plainShout.granted === 1 && plainShout.cart_item.size === null, plainShout.cart_item);
+    const sizedIds = (await B('GET', '/api/v1/cart/list')).json.data.filter((c) => c.ref === sz.send_id || c.ref === plainBc.send_id).map((c) => c.cart_id);
+    const ord = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: sizedIds, pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    check('結帳後訂單品項帶著尺寸', ord && ord.items.some((i) => i.size === '90' && i.qty === 2) && ord.items.some((i) => i.size === '100'), ord && ord.items);
+    const adminOrd = (await api('GET', `/api/v1/orders/detail?order_id=${ord.order_id}`, { token: owner })).json.data;
+    check('後台訂單明細看得到尺寸（理貨照這個裝）', adminOrd.items.some((i) => i.size === '90'), adminOrd.items.map((i) => i.size));
+    const upd = (await api('POST', '/api/v1/broadcast/sizes', { token: owner, body: { send_id: sz.send_id, sizes: '' } })).json.data;
+    check('店主可以把尺寸選項拿掉 → null', upd.sizes === null);
+    }
+
     section('後台 — 許願報價');
     const aw = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: 'Combi 吸乳器', quantity: 1 } })).json.data;
     check('店主看得到待處理的許願',

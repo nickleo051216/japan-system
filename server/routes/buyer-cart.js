@@ -205,11 +205,13 @@ function mapShoutError(e, lim) {
  * 同一會員對同一喊單只留一筆（合約 §11）。shout() 每次都插新列，所以扣完量
  * 之後在同一筆交易裡併起來。併的是這位客人自己的列，數量總帳仍然由資料庫掌握。
  */
-async function mergeRows(user, sendId) {
+async function mergeRows(user, sendId, size = null) {
+  // 同一件、同一個尺寸才合成一筆；90 和 100 是兩筆。
   const rows = await db.all(
     `SELECT cart_id, qty FROM cart_items
       WHERE line_user_id = ? AND source = 'broadcast' AND ref = ? AND status IN ('pending','confirmed')
-      ORDER BY created_at, cart_id`, user, sendId);
+        ${size === null ? '' : 'AND size IS NOT DISTINCT FROM ?'}
+      ORDER BY created_at, cart_id`, user, sendId, ...(size === null ? [] : [size]));
   if (rows.length <= 1) return rows[0] ? rows[0].cart_id : null;
   const total = rows.reduce((a, r) => a + r.qty, 0);
   await db.run('UPDATE cart_items SET qty = ? WHERE cart_id = ?', total, rows[0].cart_id);
@@ -221,11 +223,27 @@ async function mergeRows(user, sendId) {
 bpost('/api/v1/broadcast/shout', async ({ me, body }) => {
   const sendId = String(body.send_id ?? '');
   const qty = qtyOf(body.qty);
+  // v1.6 尺寸：這件有尺寸選項就一定要選，而且要是選項裡的；沒有選項就不收尺寸。
+  const bc = await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId);
+  const sizes = bc && Array.isArray(bc.sizes) && bc.sizes.length ? bc.sizes : null;
+  let size = null;
+  if (sizes) {
+    size = String(body.size ?? '').trim();
+    if (!size) throw err('SIZE_REQUIRED', `請選尺寸：${sizes.join('／')}`);
+    if (!sizes.includes(size)) throw err('BAD_SIZE', `沒有這個尺寸，可以選：${sizes.join('／')}`);
+  }
   let result, cartId;
   try {
     ({ result, cartId } = await db.tx(async () => {
       const r = await db.one('SELECT granted, remaining FROM shout(?,?,?)', sendId, me.line_user_id, qty);
-      const id = r.granted > 0 ? await mergeRows(me.line_user_id, sendId) : null;
+      if (r.granted > 0 && size !== null) {
+        // shout() 剛插入的那一筆：同一筆交易裡 now() 不變，所以 created_at = now() 就是它。
+        await db.run(
+          `UPDATE cart_items SET size = ?
+            WHERE line_user_id = ? AND source = 'broadcast' AND ref = ? AND created_at = now()`,
+          size, me.line_user_id, sendId);
+      }
+      const id = r.granted > 0 ? await mergeRows(me.line_user_id, sendId, size) : null;
       return { result: r, cartId: id };
     }));
   } catch (e) { throw mapShoutError(e, e && e.code === 'P0002' ? await drops.limit() : null); }

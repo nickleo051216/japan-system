@@ -136,12 +136,18 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
+                   "listed_at": "2026-11-25T03:00:00.000Z", "images": ["https://…簽名網址"], "sizes": ["90","100"],
                    "open": true, "waitlisted": false } ],
   "todo": { "unpaid_statements": 1, "pending_cart": 0 } }
 ```
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
 - `image_url` = 喊單商品照片，**15 分鐘有效的簽名網址**（2026-11-09 起；沒有照片時是 `null`）。過期了重抓 `/home/summary` 就會拿到新的
+- v1.6 每日連線＋1：
+  - `listed_at` = 上架時間。前台依**台灣日期**分組。
+  - `images` = 這件商品的照片，最多 4 張，每張都是 15 分鐘的簽名網址。第 1 張就是 `image_url`；沒有照片時是 `[]`。
+  - `sizes` = 尺寸選項，例如 `["90","100","110"]`；`null` 表示這件不用選尺寸。各尺寸**共用**同一個 `remaining`。
+  - 回傳範圍：開著的喊單全部回；截止或搶完的只回**上架 7 天內**的（前台顯示「已截止／可候補」）。最多 200 筆，新的在前。
 - `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
 - `bank_ready` = 銀行名稱、代碼、帳號三者都有值才是 `true`；`false` 時前台引導改用信用卡／ATM（見 §8 #5）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
@@ -186,7 +192,11 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 請求 `{ send_id, qty }` → 回 `{ granted, remaining, rank, cart_item }`
 - **必須呼叫資料庫函式 `shout()`**（列鎖＋原子扣量），不得在程式端讀→算→寫
 - 餘量 0 → `409 SOLD_OUT`；過截止 → `409 DEADLINE_PASSED`；棄單達上限（`drops_limit`，預設 1）→ `403 SUSPENDED`，訊息會寫實際次數與恢復方式
-- 同一會員同一喊單已在購物車 → 數量累加到同一筆
+- 同一會員同一喊單已在購物車 → 數量累加到同一筆（v1.6：同一個尺寸才合併，不同尺寸各一筆）
+- v1.6 尺寸：請求多收 `size`。
+  - 喊單有 `sizes` 時一定要帶：沒帶 → `400 SIZE_REQUIRED`；不在選項裡 → `400 BAD_SIZE`。訊息都會列出可以選的尺寸。
+  - 喊單沒有 `sizes` 時，帶了也會被忽略。
+  - `cart_item.size`、訂單 `items[].size` 會記住客人選的尺寸，理貨照這個裝。
 
 ### 12. `POST /broadcast/waitlist`
 請求 `{ send_id, on: bool }` → 回 `{ send_id, waitlisted }`
@@ -303,6 +313,7 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | # | 變更 | 端點 |
 |---|---|---|
 | 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
+| 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
 
 ## 5.1 v1.5.2 變更（2026-11-19，後台改版配套）
 

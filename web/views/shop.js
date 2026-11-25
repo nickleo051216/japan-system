@@ -54,7 +54,8 @@ export async function render(root, ctx) {
     batchName: h('input', { type: 'text', maxlength: '40', placeholder: '例：11/20 大阪採買' }),
     // 「拍商品照」直接開相機（capture）；「從相簿選」給已經拍好的。兩個都藏在按鈕裡面。
     photo: h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true }),
-    album: h('input', { type: 'file', accept: 'image/*', hidden: true }),
+    album: h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true }),
+    sizes: h('input', { type: 'text', placeholder: '例：90,100,110（不用選尺寸就留空）' }),
   };
   const maxJpy = info.price_max_jpy;
   const priceHint = h('div', { class: 'tiny muted' }, maxJpy
@@ -76,18 +77,28 @@ export async function render(root, ctx) {
   const showError = (msg) => { formError.textContent = msg; formError.hidden = false; };
   for (const el of Object.values(b)) el.addEventListener('input', () => { formError.hidden = true; });
 
-  // 照片：選了就先在手機上壓縮（長邊 1200px、JPEG），再顯示預覽。
-  const preview = h('img', { class: 'thumb lg', alt: '', hidden: true });
-  let photoData = null;
+  // 照片：最多 4 張（客人「每日連線」看到的是 2×2）。拍一張加一張，相簿可以一次選好幾張。
+  // 選了就先在手機上壓縮（長邊 1200px、JPEG），再顯示預覽；第 1 張是封面。
+  const MAX_PHOTOS = 4;
+  const photos = [];
+  const previews = h('div', { class: 'row', style: 'gap:6px' });
+  const paint = () => {
+    previews.replaceChildren(...photos.map((src, i) => h('div', { style: 'position:relative' },
+      h('img', { class: 'thumb lg', src, alt: `第 ${i + 1} 張` }),
+      i === 0 ? h('span', { class: 'tag', style: 'position:absolute;left:4px;bottom:4px;font-size:10px;padding:0 6px' }, '封面') : null,
+      h('button', { class: 'btn sm', type: 'button', 'aria-label': '移除這張',
+        style: 'position:absolute;top:-6px;right:-6px;min-height:24px;padding:0 7px;border-radius:99px',
+        onClick: () => { photos.splice(i, 1); paint(); } }, '✕'))));
+  };
   const onPick = (input) => async () => {
-    const file = input.files && input.files[0];
-    if (!file) return;
-    photoData = null; preview.hidden = true;
-    try {
-      photoData = await compressImage(file);
-      preview.src = photoData; preview.hidden = false;
-      b.name.focus();
-    } catch (e) { showError(e.message); input.value = ''; }
+    const files = [...(input.files || [])];
+    input.value = '';
+    for (const file of files) {
+      if (photos.length >= MAX_PHOTOS) { showError(`一件商品最多 ${MAX_PHOTOS} 張照片`); break; }
+      try { photos.push(await compressImage(file)); } catch (e) { showError(e.message); }
+    }
+    paint();
+    if (photos.length) b.name.focus();
   };
   b.photo.addEventListener('change', onPick(b.photo));
   b.album.addEventListener('change', onPick(b.album));
@@ -110,16 +121,21 @@ export async function render(root, ctx) {
           price_twd: b.twd.value ? Number(b.twd.value) : null, quantity: Number(b.qty.value),
           deadline_at: b.deadline.value ? new Date(b.deadline.value).toISOString() : null,
           note: b.note.value.trim() || null,
+          sizes: b.sizes.value.trim() || null,
           batch_name: info.batch ? undefined : b.batchName.value.trim() });
       } catch (e) {
         showError(e.message || '開喊單失敗，請再試一次');
         submit.disabled = false; submit.textContent = '開喊單';
         return;
       }
-      if (photoData) {
-        submit.textContent = '上傳照片中…';
-        try { await POST('/api/v1/broadcast/image', { send_id: created.send_id, data: photoData }); }
-        catch (e) {
+      if (photos.length) {
+        try {
+          // 一張一張傳：一次全部塞進同一個請求會超過伺服器 4.5 MB 的上限。
+          for (const [i, data] of photos.entries()) {
+            submit.textContent = `上傳照片 ${i + 1}/${photos.length}…`;
+            await POST('/api/v1/broadcast/image', { send_id: created.send_id, data, mode: 'append' });
+          }
+        } catch (e) {
           // 喊單已經開出去了，照片之後在列表補上就好 —— 不要讓人以為整筆失敗而重開一張。
           toast(`已開喊單 ${created.send_id}，但照片沒上傳成功，可以在下面列表補上`, 'err');
           ctx.reload();
@@ -137,8 +153,9 @@ export async function render(root, ctx) {
       batchBanner,
       h('div', { class: 'row', style: 'gap:10px;margin-bottom:12px;align-items:center' },
         h('label', { class: 'btn primary', style: 'min-height:52px;font-size:16px;padding:10px 20px' }, '📷 拍商品照', b.photo),
-        h('label', { class: 'btn' }, '從相簿選', b.album),
-        preview),
+        h('label', { class: 'btn' }, '從相簿選（可多張）', b.album),
+        previews),
+      h('div', { class: 'tiny muted', style: 'margin:-6px 0 10px' }, `最多 ${MAX_PHOTOS} 張，第 1 張是封面；客人「每日連線」會拼成 2×2。`),
       h('div', { class: 'row', style: 'flex-wrap:wrap;gap:10px' },
         batchField,
         h('label', { class: 'field', style: 'min-width:240px' }, h('span', {}, '品名'), b.name),
@@ -146,7 +163,8 @@ export async function render(root, ctx) {
         h('label', { class: 'field' }, h('span', {}, '台幣（選填）'), b.twd),
         h('label', { class: 'field' }, h('span', {}, '數量'), b.qty),
         h('label', { class: 'field' }, h('span', {}, '截止時間'), b.deadline),
-        h('label', { class: 'field', style: 'min-width:200px' }, h('span', {}, '備註'), b.note)),
+        h('label', { class: 'field', style: 'min-width:200px' }, h('span', {}, '備註'), b.note),
+        h('label', { class: 'field', style: 'min-width:240px' }, h('span', {}, '尺寸選項（選填）'), b.sizes)),
       priceHint,
       formError,
       h('div', { class: 'row', style: 'margin-top:12px' }, submit))));
@@ -166,21 +184,34 @@ export async function render(root, ctx) {
   for (const x of list.broadcasts) {
     const delta = h('input', { type: 'number', value: '1', style: 'width:64px' });
     // 補上或更換照片：選了就壓縮、上傳。
-    const picker = h('input', { type: 'file', accept: 'image/*', hidden: true });
+    const count = (x.images || []).length;
+    const full = count >= 4;
+    const picker = h('input', { type: 'file', accept: 'image/*', multiple: !full, hidden: true });
     picker.addEventListener('change', async () => {
-      const file = picker.files && picker.files[0];
-      if (!file) return;
+      const files = [...(picker.files || [])];
+      if (!files.length) return;
       try {
-        const data = await compressImage(file);
-        await POST('/api/v1/broadcast/image', { send_id: x.send_id, data });
-        toast(`${x.send_id} 的照片已${x.image_url ? '更換' : '加上'}`);
+        // 還沒滿 4 張就一張一張加上去；滿了就是整組換掉（只留新選的第一張）。
+        let n = 0;
+        for (const file of files) {
+          if (!full && count + n >= 4) break;
+          const data = await compressImage(file);
+          await POST('/api/v1/broadcast/image', { send_id: x.send_id, data, mode: full ? 'replace' : 'append' });
+          n += 1;
+          if (full) break;
+        }
+        toast(full ? `${x.send_id} 的照片已換成新的一張` : `${x.send_id} 加了 ${n} 張照片`);
         ctx.reload();
       } catch (e) { fail(e); }
     });
     tbody.append(h('tr', {},
-      h('td', {}, x.image_url ? h('img', { class: 'thumb', src: x.image_url, alt: x.name }) : h('span', { class: 'tiny muted' }, '—')),
+      h('td', {}, x.image_url ? h('div', { style: 'position:relative;display:inline-block' },
+        h('img', { class: 'thumb', src: x.image_url, alt: x.name }),
+        count > 1 ? h('span', { class: 'tag', style: 'position:absolute;right:-6px;bottom:-6px;font-size:10px;padding:0 6px' }, `${count} 張`) : null)
+        : h('span', { class: 'tiny muted' }, '—')),
       h('td', { class: 'mono tiny' }, x.send_id),
-      h('td', {}, x.name, x.jpy_taxed ? h('div', { class: 'tiny muted' }, jpy(x.jpy_taxed)) : null),
+      h('td', {}, x.name, x.jpy_taxed ? h('div', { class: 'tiny muted' }, jpy(x.jpy_taxed)) : null,
+        x.sizes ? h('div', { class: 'tiny muted' }, `尺寸：${x.sizes.join('／')}`) : null),
       h('td', {}, nt(x.price_twd)),
       h('td', {}, `${x.sold} / ${x.quantity}`),
       h('td', { class: 'tiny' }, x.waitlist ? `${x.waitlist} 人` : '—'),
@@ -191,7 +222,7 @@ export async function render(root, ctx) {
         h('button', { class: 'btn sm', onClick: async () => {
           try { const r = await POST('/api/v1/broadcast/adjust', { send_id: x.send_id, delta: Number(delta.value) });
             toast(`${x.send_id} 剩餘 ${r.remaining}`); ctx.reload(); } catch (e) { fail(e); } } }, '加減量'),
-        h('button', { class: 'btn sm', onClick: () => picker.click() }, x.image_url ? '換照片' : '加照片'),
+        h('button', { class: 'btn sm', onClick: () => picker.click() }, full ? '換照片' : `加照片（${count}/4）`),
         picker,
         x.open ? h('button', { class: 'btn sm', onClick: async () => {
           try { await POST('/api/v1/broadcast/close', { send_id: x.send_id }); toast(`${x.send_id} 已截止`); ctx.reload(); }

@@ -95,4 +95,14 @@ async function resolve(rows, field) {
   return rows;
 }
 
-module.exports = { configured, put, signMany, resolve, PREFIX };
+/** 跟 resolve 一樣，但欄位是一串參照（例：喊單的多張照片）。簽不出來的那張直接拿掉。 */
+async function resolveList(rows, field) {
+  const list = Array.isArray(rows) ? rows : [rows];
+  const map = await signMany(list.flatMap((r) => (r && Array.isArray(r[field]) ? r[field] : [])));
+  for (const r of list) {
+    if (r && Array.isArray(r[field])) r[field] = r[field].map((x) => (map.has(x) ? map.get(x) : x)).filter(Boolean);
+  }
+  return rows;
+}
+
+module.exports = { configured, put, signMany, resolve, resolveList, PREFIX };

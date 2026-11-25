@@ -18,7 +18,7 @@ export async function render(root) {
       for (const i of o.items) {
         items.append(h('div', { style: 'text-align:center' },
           h('img', { class: 'thumb lg', src: i.source_image_url || i.image_url, alt: i.name_zh, style: 'width:100%;height:96px' }),
-          h('div', { class: 'tiny', style: 'margin-top:4px' }, i.name_zh),
+          h('div', { class: 'tiny', style: 'margin-top:4px' }, i.name_zh, i.size ? `（${i.size}）` : ''),
           h('div', { class: 'tiny muted' }, `×${i.qty}`)));
       }
       grid.append(h('div', { class: 'card', style: 'padding:14px' },
