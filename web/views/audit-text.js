@@ -116,6 +116,8 @@ const SAY = {
   'catalog.create': (t, d) => [`在商品資料庫新增「${d.name}」`, t],
   'catalog.update': (t, d) => [`修改商品 ${t}`, `改了：${(d.fields || []).map((f) => ({ line: '採購線', variant: '款式', sizes: '尺寸', price_twd: '售價', name: '品名', name_zh: '品名' }[f] || f)).join('、')}`],
 
+  'purchase.record': (t, d) => [`現場補登採買「${d.name}」×${d.qty}`, `給 ${d.member_no}，${d.to === 'order' ? `加進訂單 ${t}` : '放進購物車'}${d.code ? `・條碼 ${d.code}` : ''}`],
+
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, d && d.auto ? `每月自動結算（${d.date}）` : '手動按「結算」'],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
 

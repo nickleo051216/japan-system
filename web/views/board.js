@@ -48,6 +48,7 @@ export async function render(root, ctx) {
 
     const search = h('input', { type: 'search', placeholder: '搜尋商品、品牌、下單的客人…', value: q });
     search.addEventListener('input', () => { q = search.value.trim(); drawList(); });
+    wrap.append(h('button', { class: 'btn primary', type: 'button', style: 'width:100%;margin:12px 0 0', onClick: scanDialog }, '📷 掃標籤・補登漏喊商品'));
     wrap.append(h('div', { class: 'lc-tools' },
       h('div', { class: 'chips' }, ...FILTERS.map((f) => h('button', {
         type: 'button', class: 'chip' + (f.key === filter ? ' on' : ''), onClick: () => { filter = f.key; draw(); },
@@ -131,6 +132,89 @@ export async function render(root, ctx) {
       h('label', { class: 'field' }, h('span', {}, '實際買到件數'), qty)), [{
       label: '送出', primary: true,
       onClick: async (close) => { close(); await report(r, Number(qty.value)); },
+    }]);
+  }
+
+  /**
+   * 掃標籤登記採買（影片 3）：拍條碼／QR 或手打貨號 → 選客人 → 選訂單或新增到購物車 → 確認已採買 1 件。
+   * 瀏覽器支援 BarcodeDetector（Android Chrome）就自動讀條碼；iPhone Safari 讀不到，請手打貨號。
+   */
+  function scanDialog() {
+    const st = { match: null, member: null };
+    const photo = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true });
+    const code = h('input', { type: 'text', placeholder: '例如 336-0898 或商品編號', autocomplete: 'off' });
+    const matches = h('div', { class: 'scan-pick' });
+    const who = h('input', { type: 'search', placeholder: '客人暱稱或會員編號（HB-00012）' });
+    const people = h('div', { class: 'scan-pick' });
+    const order = h('select', {}, h('option', { value: '' }, '新增一筆到購物車'));
+    const name = h('input', { type: 'text', maxlength: '60', placeholder: '商品名稱' });
+    const priceIn = h('input', { type: 'number', min: '1', inputmode: 'numeric', placeholder: '台幣售價（選填）' });
+    const note = h('input', { type: 'text', maxlength: '80', placeholder: '商品／款式備註（選填）' });
+    const msg = h('div', { class: 'tiny', role: 'alert' });
+    const say = (t, bad) => { msg.textContent = t; msg.style.color = bad ? 'var(--red)' : 'var(--ink-soft)'; };
+
+    const lookup = async () => {
+      if (!code.value.trim()) return;
+      try {
+        const r = await GET('/api/v1/purchase/lookup?code=' + encodeURIComponent(code.value.trim()));
+        matches.replaceChildren(...(r.matches.length ? r.matches : []).map((x) => h('button', { type: 'button', class: 'chip', onClick: (e) => {
+          st.match = x; name.value = x.name; if (x.price_twd) priceIn.value = x.price_twd;
+          [...matches.children].forEach((c) => c.classList.toggle('on', c === e.currentTarget));
+        } }, `${x.source_zh} ${x.id}・${x.name}`)));
+        if (!r.matches.length) { st.match = null; say('找不到這個貨號，直接在下面填商品名稱也可以登記'); } else say('');
+      } catch (e) { say(e.message, true); }
+    };
+    code.addEventListener('change', lookup);
+    photo.addEventListener('change', async () => {
+      const f = photo.files && photo.files[0];
+      photo.value = '';
+      if (!f) return;
+      if (!('BarcodeDetector' in window)) { say('這支手機的瀏覽器讀不了條碼，請手打貨號', true); return; }
+      try {
+        const bmp = await createImageBitmap(f);
+        const found = await new window.BarcodeDetector().detect(bmp);
+        if (!found.length) { say('照片裡找不到條碼，請再拍清楚一點，或手打貨號', true); return; }
+        code.value = found[0].rawValue; lookup();
+      } catch (e) { say('讀條碼失敗：' + e.message, true); }
+    });
+    let t = null;
+    who.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(async () => {
+        try {
+          const rows = await GET('/api/v1/purchase/customers?q=' + encodeURIComponent(who.value.trim()));
+          people.replaceChildren(...rows.map((m) => h('button', { type: 'button', class: 'chip', onClick: async (e) => {
+            st.member = m; [...people.children].forEach((c) => c.classList.toggle('on', c === e.currentTarget));
+            const os = await GET('/api/v1/purchase/orders?member_no=' + encodeURIComponent(m.member_no));
+            order.replaceChildren(h('option', { value: '' }, '新增一筆到購物車'),
+              ...os.map((o) => h('option', { value: o.order_id }, `加進訂單 ${o.order_id}（${o.status}・${o.items} 件）`)));
+          } }, `${m.nickname}・${m.member_no}`)));
+        } catch (e) { say(e.message, true); }
+      }, 250);
+    });
+
+    modal('掃標籤・登記採買', h('div', {},
+      h('label', { class: 'field' }, h('span', {}, '拍攝商品條碼或專屬 QR'), h('label', { class: 'btn sm' }, '📷 拍條碼', photo)),
+      h('label', { class: 'field' }, h('span', {}, '條碼／商品貨號'), code), matches,
+      h('label', { class: 'field' }, h('span', {}, '喊單帳戶（客人）'), who), people,
+      h('label', { class: 'field' }, h('span', {}, '對應訂單'), order),
+      h('label', { class: 'field' }, h('span', {}, '商品名稱'), name),
+      h('label', { class: 'field' }, h('span', {}, '台幣售價'), priceIn),
+      h('label', { class: 'field' }, h('span', {}, '商品／款式備註（選填）'), note),
+      msg), [{
+      label: '確認已採買 1 件', primary: true,
+      onClick: async (close) => {
+        if (!st.member) { say('請先選客人', true); return; }
+        if (!name.value.trim()) { say('請填商品名稱（或先掃條碼）', true); return; }
+        try {
+          const r = await POST('/api/v1/purchase/record', { member_no: st.member.member_no, key: st.match ? st.match.key : null,
+            code: code.value.trim() || null, name: name.value.trim(), price_twd: priceIn.value === '' ? null : Number(priceIn.value),
+            note: note.value.trim() || null, order_id: order.value || null, qty: 1 });
+          close();
+          toast(`已登記：${r.name} → ${r.member.nickname}${r.type === 'order' ? ` 的訂單 ${r.order_id}` : ' 的購物車'}${r.notified ? '，已通知客人' : ''}`);
+          load();
+        } catch (e) { say(e.message, true); }
+      },
     }]);
   }
 

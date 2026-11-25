@@ -2016,6 +2016,48 @@ const login = async (id) =>
     check('沒登入 → 401', (await api('GET', '/api/v1/inbox/list')).status === 401);
     }
 
+    {
+    section('採買端：掃標籤登記採買・補登漏喊商品（020）');
+    const H = (m, u, o) => api(m, u, { token: helper, ...o });
+    const lk = (await H('GET', '/api/v1/purchase/lookup?code=p01')).json.data;
+    check('掃到貨號（不分大小寫）→ 找到型錄商品，附售價', lk.matches[0]?.key === 'sku:P01' && lk.matches[0].price_twd > 0, lk);
+    check('找不到的貨號 → 空的（可以手填品名登記）', (await H('GET', '/api/v1/purchase/lookup?code=ZZZ-NOPE')).json.data.matches.length === 0);
+    const cs = (await H('GET', '/api/v1/purchase/customers?q=HB-00005')).json.data;
+    check('用會員編號找客人，不給 LINE userId', cs.length === 1 && cs[0].member_no === 'HB-00005' && !JSON.stringify(cs).includes('U_buyer1'), cs);
+    const cid = (await B('POST', '/api/v1/cart/add-text', { body: { name: '補登測試 原本的奶嘴', qty: 1 } })).json.data.cart_id;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [cid] } });
+    const ord = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: [cid], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const os = (await H('GET', '/api/v1/purchase/orders?member_no=HB-00005')).json.data;
+    check('列出這位客人還能加的訂單（待確認／已報價、沒出對帳單、沒付款）', os.some((o) => o.order_id === ord.order_id)
+      && os.every((o) => ['待確認', '已報價'].includes(o.status)), os.map((o) => [o.order_id, o.status]));
+    const before = (await api('GET', `/api/v1/orders/detail?order_id=${ord.order_id}`, { token: owner })).json.data;
+    const r1 = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', key: 'sku:P01', code: 'P01', order_id: ord.order_id, note: '抹茶口味' } });
+    const after = (await api('GET', `/api/v1/orders/detail?order_id=${ord.order_id}`, { token: owner })).json.data;
+    const added = after.items.find((i) => /抹茶口味/.test(i.name_zh || i.name));
+    check('加進訂單 → 多一個「已到貨」的品項，訂單總額跟著加', r1.status === 200 && added && added.item_status === '已到貨'
+      && Number(after.total_twd) === Number(before.total_twd) + lk.matches[0].price_twd, [r1.json, added, before.total_twd, after.total_twd]);
+    const r2 = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', name: '漏喊的小熊襪', price_twd: 180, note: '粉紅 S' } });
+    const cart = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === r2.json.data?.cart_id);
+    check('新增一筆到購物車 → 客人購物車多一筆（待確認，附「小幫手現場幫你買到了」）', cart && cart.status === 'pending' && cart.price_twd === 180
+      && /小幫手現場幫你買到了/.test(cart.note), [r2.json, cart]);
+    const MKN = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const bought = (await api('POST', '/api/v1/notify/pending', { ...MKN, body: { limit: 100 } })).json.data.notifications.filter((n) => n.kind === 'bought');
+    const btxt = bought.map((n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).text);
+    check('兩筆都 LINE 通知客人（寫出商品、加到哪裡、連結）', bought.length === 2 && btxt.some((t) => /小熊襪/.test(t) && /購物車/.test(t) && /\?path=cart/.test(t))
+      && btxt.some((t) => t.includes(ord.order_id) && /\?path=orders/.test(t)), btxt);
+    const inbox = (await B('GET', '/api/v1/inbox/list?limit=5')).json.data.items;
+    check('客人的通知中心也看得到（標題「小幫手幫你買到了」）', inbox.some((n) => n.kind === 'bought' && n.title === '小幫手幫你買到了' && n.path === 'cart'), inbox.map((n) => n.title));
+    const stmtOrder = (await api('GET', '/api/v1/orders/list', { token: owner })).json.data.find((o) => o.line_user_id === 'U_buyer1' && o.statement_id && ['待確認', '已報價'].includes(o.status));
+    if (stmtOrder) {
+      const locked = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', name: 'x', price_twd: 1, order_id: stmtOrder.order_id } });
+      check('已經出對帳單的訂單不能加 → ORDER_LOCKED（請改加購物車）', locked.json.error?.code === 'ORDER_LOCKED', locked.json);
+    }
+    check('沒選客人 → MEMBER_NOT_FOUND', (await H('POST', '/api/v1/purchase/record', { body: { name: 'x' } })).json.error?.code === 'MEMBER_NOT_FOUND');
+    check('包貨人員不能登記採買 → 403', (await api('POST', '/api/v1/purchase/record', { token: packer, body: { member_no: 'HB-00005', name: 'x' } })).status === 403);
+    const pa = (await api('GET', '/api/v1/audit/list?limit=100', { token: owner })).json.data;
+    check('稽核記下是誰、幫誰、加到哪', pa.filter((l) => l.action === 'purchase.record').length >= 2);
+    }
+
     // 「還沒開團」只會發生在全新的資料庫（示範資料一定有團），所以另開一個空的資料庫測。
     section('還沒開團：開喊單順便開團（全新資料庫）');
     const FRESH_PORT = PORT + 8;

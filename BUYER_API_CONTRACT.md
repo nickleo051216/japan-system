@@ -359,6 +359,7 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
 | 3 | 三種 LINE 通知：`quoted`（訂單／許願報價）、`transfer_verified`（手動核帳）、`out_of_stock`（訂單缺貨／許願現場缺貨）；連結 `?path=orders`、`?path=wish` | — |
 | 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
+| 8 | 小幫手現場補登：購物車可能出現 `note` 是「小幫手現場幫你買到了」的待確認品項；通知中心多一種 `bought`（`path` = `cart`／`orders`） | 4、34 |
 | 7 | 許願的尋找進度：`/wishes/list`、`/wishes/board` 每則多 `progress_note`、`progress_at`（店家寫給客人看的一句話，沒有是 `null`） | 13、27 |
 | 6 | 站內通知中心：`/inbox/list`、`/inbox/unread-count`、`/inbox/read`；`home.todo.inbox_unread` | 3、34～36 |
 | 5 | 小幫手邀請碼：`/staff/join`（後台登入頁也能填）；小幫手工作台、請款審核都在後台 | 33 |

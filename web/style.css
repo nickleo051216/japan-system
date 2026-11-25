@@ -420,3 +420,5 @@ details.listing[open] > summary h2::before { content: '▾ '; }
 .wr-name { font-weight: 750; overflow-wrap: anywhere; }
 .wr-note { font-size: 13px; background: #fffaf0; border: 1px dashed var(--line); border-radius: 10px; padding: 6px 9px; overflow-wrap: anywhere; }
 .wr-body .btn { justify-self: start; }
+.scan-pick { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
+.scan-pick:empty { display: none; }
