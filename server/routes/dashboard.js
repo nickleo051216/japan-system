@@ -2,6 +2,7 @@
 const db = require('../lib/db');
 const { get, post, ok } = require('../lib/http');
 const auth = require('../lib/auth');
+const config = require('../lib/config');
 const audit = require('../lib/audit');
 const { STATUS } = require('../lib/state');
 const { uid, now } = require('../lib/ids');
@@ -112,6 +113,10 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
             count(*) FILTER (WHERE status IN ('缺貨','已取消')) AS failed
        FROM orders WHERE batch = ?`, batch);
   const batchRow = batch ? await db.one('SELECT batch, name, region, close_at, buy_at, back_at, ship_at FROM batches WHERE batch = ?', batch) : null;
+
+  // 營運總覽（2026-11-25 照周小姐影片 2）：彩色數字格＋「優先確認」。
+  // 數字格看這一團；「優先確認」看全部（逾期付款、缺貨不會只發生在這一團）。
+  const overview = await overviewNumbers(batch, batchRow, actor);
   const openBroadcasts = Number((await db.one(
     `SELECT count(*) AS n FROM broadcast WHERE batch = ? AND remaining > 0
         AND (deadline_at IS NULL OR deadline_at > now())`, batch)).n);
@@ -141,6 +146,9 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     todo,
     // 自動結算燈號（店主才有；其他角色是 null）
     auto_statement: autoStatement,
+    overview,
+    // 「開啟客人頁 ↗」：買家 LIFF 網址（不是機密，本來就印在 LINE 訊息裡）
+    buyer_url: config.buyerLiffUrl,
   };
   return ok(auth.redact(actor, data));
 });
@@ -190,6 +198,73 @@ post('/api/v1/settings/batch', async ({ actor, body }) => {
   await audit.record({ actor: actor.line_user_id, action: 'settings.batch', detail: { batch: body.batch }, result: 'ok' });
   return ok({ current_batch: body.batch });
 });
+
+/**
+ * 營運總覽的數字。每一格都附 link，點了跳到已經篩選好的清單 —— 數字跟清單要對得上。
+ *   tiles   待採買喊單、許願池人氣、待核對出貨、付款與發票資料、進行中訂單、七日內預計到貨、待處理問題
+ *           （待收款金額沿用 unpaid_twd）
+ *   action  優先確認：待確認、逾期付款、即將到貨、缺貨與延遲
+ * 「七日內預計到貨」= 已出貨、7 天內寄出的單（還在路上），加上這一團回台日在 7 天內、已報價的單。
+ */
+async function overviewNumbers(batch, batchRow, actor) {
+  const deadlineDays = parseInt(await db.setting('payment_deadline_days', '2'), 10) || 2;
+  const o = await db.one(
+    `SELECT count(*) FILTER (WHERE status IN ('待確認','已報價','已到貨','已出貨') AND batch = ?) AS active,
+            count(*) FILTER (WHERE status = '已到貨') AS to_ship,
+            count(*) FILTER (WHERE status = '待確認') AS pending,
+            count(*) FILTER (WHERE status = '缺貨') AS oos,
+            count(*) FILTER (WHERE status = '已報價' AND batch = ?) AS quoted_in_batch
+       FROM orders`, batch || '', batch || '');
+  const shippedRecent = Number((await db.one(
+    `SELECT count(DISTINCT o.order_id) AS n FROM orders o JOIN shipments s ON s.order_id = o.order_id
+      WHERE o.status = '已出貨' AND s.shipped_at > now() - interval '7 days'`)).n);
+  let backSoon = 0;
+  if (batchRow && batchRow.back_at) {
+    const back = new Date(batchRow.back_at);
+    const days = (back.getTime() - Date.now()) / 86400e3;
+    if (!Number.isNaN(back.getTime()) && days >= -1 && days <= 7) backSoon = Number(o.quoted_in_batch);
+  }
+  const st = await db.one(
+    `SELECT count(*) FILTER (WHERE payment_status = '待官方確認') AS to_check,
+            count(*) FILTER (WHERE payment_status = '待付款' AND created_at < now() - make_interval(days => ?::int)) AS overdue
+       FROM statements`, deadlineDays);
+  const votes = Number((await db.one(
+    `SELECT count(*) AS n FROM wish_votes v JOIN wishlist w ON w.wish_id = v.wish_id WHERE w.wall_status = 'public'`)).n);
+  const openBroadcasts = Number((await db.one(
+    'SELECT count(*) AS n FROM broadcast WHERE remaining > 0 AND (deadline_at IS NULL OR deadline_at > now())')).n);
+  const issues = Number((await db.one("SELECT count(*) AS n FROM notifications WHERE audience = 'owner' AND read_at IS NULL")).n);
+  const procIssues = batch ? Number((await db.one(
+    "SELECT count(*) AS n FROM procurements WHERE batch = ? AND state IN ('partial','out_of_stock')", batch)).n) : 0;
+  let claims = null;
+  if (auth.can(actor, 'payment.reconcile')) {
+    try {
+      const c = await db.one(
+        "SELECT count(*) FILTER (WHERE status = 'pending') AS pending, count(*) FILTER (WHERE status = 'approved') AS to_pay FROM helper_claims");
+      claims = { pending: Number(c.pending), to_pay: Number(c.to_pay) };
+    } catch { /* 015 還沒跑 */ }
+  }
+  const arriving = shippedRecent + backSoon;
+  const q = (v) => encodeURIComponent(v);
+  return {
+    tiles: {
+      to_buy: { n: openBroadcasts, link: '#/shop' },
+      wish_votes: { n: votes, link: '#/wishes?tab=' + q('牆上') },
+      to_ship: { n: Number(o.to_ship), link: '#/packing' },
+      payment_info: { n: Number(st.to_check), link: '#/statements?status=' + q('待官方確認') },
+      active_orders: { n: Number(o.active), link: '#/orders?status=' + q('待確認,已報價,已到貨,已出貨') + (batch ? '&batch=' + q(batch) : '') },
+      arriving_7d: { n: arriving, link: '#/orders?status=' + q('已出貨') },
+      open_issues: { n: issues, link: '#/board' },
+    },
+    action: {
+      pending: { n: Number(o.pending), link: '#/orders?status=' + q('待確認') },
+      overdue: { n: Number(st.overdue), link: '#/statements?status=' + q('待付款') },
+      arriving: { n: arriving, link: '#/orders?status=' + q('已出貨') },
+      delayed: { n: Number(o.oos) + procIssues, link: '#/orders?status=' + q('缺貨') },
+    },
+    helper_claims: claims,
+    payment_deadline_days: deadlineDays,
+  };
+}
 
 // ---- 店家與結算設定 -------------------------------------------------------
 /**

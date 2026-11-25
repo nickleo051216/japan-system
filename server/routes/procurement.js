@@ -80,8 +80,14 @@ async function boardRows(batch, actor) {
        LEFT JOIN members m ON m.line_user_id = pr.claimed_by
       WHERE pr.batch = ? ORDER BY pr.sku`, batch);
 
+  // 採購線（019）：另外查，正式庫還沒跑 019 時沒有這欄，看板照常（全部算「待分類」）。
+  let lineOf = new Map();
+  try {
+    lineOf = new Map((await db.all('SELECT sku, line FROM products WHERE sku = ANY(?::text[])', rows.map((r) => r.sku))).map((x) => [x.sku, x.line]));
+  } catch { /* 019 還沒跑 */ }
   const enriched = [];
   for (const r of rows) {
+    r.line = lineOf.get(r.sku) || null;
     const cost = await money.weightedCost(r.proc_id);
     const buyers = await db.all(
       `SELECT m.nickname, oi.qty FROM order_items oi

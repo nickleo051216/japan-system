@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>heeehababy 代購後台</title>
-  <meta name="theme-color" content="#faf8f4">
+  <meta name="theme-color" content="#fbf4e8">
   <script>
     // 後台可能掛在前台網域的 /admin 底下。網址少了結尾的斜線時，下面的相對路徑
     // （style.css、app.js）會指錯地方，所以先補上斜線再載入。
@@ -15,14 +15,13 @@
 </head>
 <body>
   <div id="app" class="app">
-    <aside class="sidebar" id="sidebar"></aside>
+    <!-- 2026-11-25 照周小姐影片 2：上方品牌列＋一排可以左右滑的頁籤，不再用側邊選單和底部分頁。 -->
+    <header class="masthead no-print" id="masthead"></header>
+    <nav class="pills no-print" id="pills" aria-label="工作空間頁籤"></nav>
     <main class="main">
-      <header class="topbar" id="topbar"></header>
       <div class="content" id="view"></div>
     </main>
   </div>
-  <nav class="tabbar no-print" id="tabbar" aria-label="主要分頁"></nav>
-  <div class="drawer-mask" onclick="document.body.classList.remove('nav-open')"></div>
   <div id="toast" class="toast" hidden></div>
   <div id="modal" class="modal" hidden></div>
   <script type="module" src="app.js"></script>

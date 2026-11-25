@@ -298,6 +298,8 @@ const wishShape = (w) => ({
   wall_status: w.wall_status || 'private',
   votes: Number(w.votes || 0),
   broadcast_send_id: w.broadcast_send_id || null,
+  // v1.6：店家寫的尋找進度（018），例如「大阪店問過了，下週補貨」；沒寫是 null
+  progress_note: w.progress_note || null, progress_at: w.progress_at || null,
 });
 /** 照片是私有 bucket 的參照，回給畫面前換成 15 分鐘的簽名網址。 */
 const wishesOut = async (rows) => storage.resolve(rows.map(wishShape), 'picture');
@@ -398,8 +400,7 @@ const BOARD_SORTS = {
 bget('/api/v1/wishes/board', async ({ me, query }) => {
   const order = BOARD_SORTS[query.sort] || BOARD_SORTS.hot;
   const rows = await db.all(
-    `SELECT w.wish_id, w.item_name, w.item_name_ja, w.brand, w.ref_url, w.picture, w.wish_status, w.quote_twd,
-            w.wall_at, w.broadcast_send_id, (w.line_user_id = ?) AS mine,
+    `SELECT w.*, (w.line_user_id = ?) AS mine,
             (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes,
             EXISTS (SELECT 1 FROM wish_votes v WHERE v.wish_id = w.wish_id AND v.line_user_id = ?) AS voted,
             b.price_twd AS bc_price, b.remaining AS bc_remaining, b.deadline_at AS bc_deadline
@@ -420,6 +421,7 @@ bget('/api/v1/wishes/board', async ({ me, query }) => {
       ? { send_id: r.broadcast_send_id, price_twd: num(r.bc_price), remaining: r.bc_remaining, deadline_at: r.bc_deadline }
       : null,
     wall_at: r.wall_at,
+    progress_note: r.progress_note || null, progress_at: r.progress_at || null,   // v1.6（018）
   }));
   return ok(await storage.resolve(shaped, 'picture'));
 });
@@ -533,7 +535,9 @@ post('/api/v1/ocr/pending', async ({ body, req }) => {
     OCR_MAX_ATTEMPTS, String(OCR_LEASE_MINUTES), n);
   // 給 n8n 的是 15 分鐘就失效的簽名網址，不是永久連結。
   const jobs = await storage.resolve(res.rows.map((r) => ({ kind: 'cart', ...r })), 'image_url');
-  // 購物車優先（客人在等），剩下的名額才給許願。
+  // 購物車優先（客人在等），再來是店主正在上架的照片（017），剩下的名額才給許願。
+  // 舊版流程不認得上架照片，所以要 n8n 帶 include_listings: true 才給。
+  if (body && body.include_listings === true) jobs.push(...await require('./listings').claimListingJobs(n - jobs.length));
   if (body && body.include_wishes === true) jobs.push(...await claimWishJobs(n - jobs.length));
   return ok({ jobs, count: jobs.length, lease_minutes: OCR_LEASE_MINUTES });
 }, { idempotent: false });
@@ -581,6 +585,7 @@ async function wishResult(body) {
 post('/api/v1/ocr/result', async ({ body, req }) => {
   notify.requireMachine(req);
   if (body.wish_id !== undefined && body.wish_id !== null) return ok(await wishResult(body));
+  if (body.listing_id !== undefined && body.listing_id !== null) return ok(await require('./listings').listingResult(body));
   const cartId = String(body.cart_id ?? '');
   const row = await db.one(
     "SELECT * FROM cart_items WHERE cart_id = ? AND status IN ('pending','confirmed')", cartId);

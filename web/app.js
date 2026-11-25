@@ -98,24 +98,50 @@ export const STATUS_TONE = {
 export const statusTag = (s) => h('span', { class: 'tag ' + (STATUS_TONE[s] || '') }, s);
 
 // ---- routes --------------------------------------------------------------
+//
+// 2026-11-25 照周小姐影片 2：上方一排頁籤（可以左右滑），順序就是她示範站的順序。
+// 頁籤依權限顯示：小幫手只看得到自己用得到的那幾個。
+// more: true 的是設定類，排在最後、用一條細線隔開。
+// sub 是每頁大標底下的灰色副標。
 const ROUTES = [
-  { path: 'dashboard', title: '首頁', icon: '⌂', cap: 'order.read', mod: () => import('./views/dashboard.js') },
-  { path: 'orders', title: '訂單管理', icon: '▤', cap: 'order.read', mod: () => import('./views/orders.js') },
-  { path: 'statements', title: '對帳單', icon: '$', cap: 'payment.reconcile', mod: () => import('./views/statements.js') },
-  { path: 'shop', title: '開團與喊單', icon: '✦', cap: 'broadcast', mod: () => import('./views/shop.js'), group: '上架' },
-  { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('./views/wishes.js') },
-  { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('./views/board.js'), group: '採購' },
-  { path: 'expense', title: '拍收據記帳', icon: '¥', cap: 'procurement.write', mod: () => import('./views/expense.js') },
-  { path: 'helper', title: '小幫手工作台', icon: '✎', cap: 'procurement.write', mod: () => import('./views/helper.js') },
-  { path: 'ship-requests', title: '出貨申請・出貨單', icon: '⇪', cap: 'order.read', mod: () => import('./views/ship-requests.js'), group: '出貨' },
-  { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('./views/packing.js') },
-  { path: 'labels', title: 'QR 標籤列印', icon: '▩', cap: 'shipment.write', mod: () => import('./views/labels.js') },
-  { path: 'scan', title: '掃碼核對工作站', icon: '⌁', cap: 'shipment.write', mod: () => import('./views/scan.js') },
-  { path: 'logistics', title: '進貨物流綁定', icon: '⇄', cap: 'shipment.write', mod: () => import('./views/logistics.js') },
-  { path: 'audit', title: '稽核軌跡', icon: '☰', cap: 'audit.read', mod: () => import('./views/audit.js'), group: '更多設定' },
-  { path: 'settings', title: '匯率、價目表與團別', icon: '⚙', cap: 'order.read', mod: () => import('./views/settings.js') },
-  { path: 'members', title: '成員與權限', icon: '☺', cap: 'settings.write', mod: () => import('./views/members.js') },
-  { path: 'payments', title: '金流設定', icon: '¤', cap: 'settings.write', mod: () => import('./views/payments.js') },
+  { path: 'dashboard', title: '營運總覽', eyebrow: 'OVERVIEW', cap: 'order.read', mod: () => import('./views/dashboard.js'),
+    sub: '先看照片需求，再確認許願與付款，最後安排出貨。' },
+  { path: 'shop', title: '照片喊單採買', cap: 'broadcast', mod: () => import('./views/shop.js'),
+    sub: '拍照開喊單、調整數量，客人在 LINE 上＋1。' },
+  { path: 'helper', title: '小幫手批次請款', cap: 'procurement.write', mod: () => import('./views/helper.js'),
+    sub: '採買完一批一起拍收據請款，送給代購主核對。' },
+  { path: 'board', title: '連線採買清單', cap: 'procurement.read', mod: () => import('./views/board.js'),
+    sub: '看照片、對款式、確認數量，一單一單帶回家。' },
+  { path: 'wishes', title: '許願報價與回覆', cap: 'order.read', mod: () => import('./views/wishes.js'),
+    sub: '找到可採購商品、先報價，再確認客人的購買意願。' },
+  { path: 'wish-rank', title: '許願與＋1 排行', cap: 'order.read', mod: () => import('./views/wish-rank.js'),
+    sub: '大家最想要的，排在最前面。' },
+  { path: 'ship-requests', title: '拆併單出貨', cap: 'order.read', mod: () => import('./views/ship-requests.js'),
+    sub: '客人申請併單或先寄，確認運費後產生出貨單。' },
+  { path: 'statements', title: '付款與發票備註', cap: 'payment.reconcile', mod: () => import('./views/statements.js'),
+    sub: '每月結算對帳單、核對客人匯款。' },
+  { path: 'orders', title: '訂單管理', cap: 'order.read', mod: () => import('./views/orders.js'),
+    sub: '商品、客人與每一步進度，都有對照紀錄。' },
+  { path: 'packing', title: '看圖理貨與出貨', cap: 'shipment.write', mod: () => import('./views/packing.js'),
+    sub: '對照客人當初的照片撿貨裝箱。' },
+  { path: 'labels', title: 'QR 標籤列印', cap: 'shipment.write', mod: () => import('./views/labels.js'),
+    sub: '把商品與包裹，一張張對好。' },
+  { path: 'scan', title: '掃碼核對工作站', cap: 'shipment.write', mod: () => import('./views/scan.js'),
+    sub: '先掃包裹，再逐件掃商品，掃到別的包裹會跳出警示。' },
+  { path: 'logistics', title: '進貨物流綁定', cap: 'shipment.write', mod: () => import('./views/logistics.js'),
+    sub: '把日本寄回來的物流單號綁到訂單。' },
+  { path: 'catalog', title: '商品資料庫', cap: 'order.read', mod: () => import('./views/catalog.js'),
+    sub: '型錄和喊單的商品都在這裡：採購線、款式、尺寸、售價、狀態。' },
+  { path: 'expense', title: '拍收據記帳', cap: 'procurement.write', more: true, mod: () => import('./views/expense.js'),
+    sub: '一張收據記一項商品的實際進價。' },
+  { path: 'members', title: '成員與邀請碼', cap: 'settings.write', more: true, mod: () => import('./views/members.js'),
+    sub: '員工角色、小幫手邀請碼、客人名冊。' },
+  { path: 'settings', title: '匯率・價目表・團別', cap: 'order.read', more: true, mod: () => import('./views/settings.js'),
+    sub: '匯率、日幣對台幣價目表、開團與店家設定。' },
+  { path: 'payments', title: '金流設定', cap: 'settings.write', more: true, mod: () => import('./views/payments.js'),
+    sub: '綠界刷卡與 ATM 的串接設定。' },
+  { path: 'audit', title: '稽核軌跡', cap: 'audit.read', more: true, mod: () => import('./views/audit.js'),
+    sub: '誰在什麼時候做了什麼，一筆一筆都留著。' },
 ];
 
 function parseHash() {
@@ -124,67 +150,94 @@ function parseHash() {
   return { path, query: Object.fromEntries(new URLSearchParams(qs || '')) };
 }
 
-function renderNav(active) {
-  const nav = document.getElementById('sidebar');
-  nav.innerHTML = '';
-  nav.append(h('div', { class: 'brand' }, h('span', { class: 'word' }, 'heeehababy'),
-    h('small', {}, 'LAUGH LIKE A BABY. LIVE LIKE A QUEEN.')));
-  let group = null;
-  for (const r of ROUTES) {
-    if (!session.can(r.cap)) continue;
-    if (r.group && r.group !== group) { group = r.group; nav.append(h('div', { class: 'nav-group' }, group)); }
-    nav.append(h('a', { class: 'navlink' + (r.path === active ? ' active' : ''), href: `#/${r.path}`, onClick: () => closeNav() },
-      h('span', { class: 'ico' }, r.icon), r.title));
-  }
-  nav.append(h('div', { class: 'sidebar-foot' },
-    h('div', {}, session.member ? `${session.member.nickname}（${roleLabel(session.member.role)}）` : ''),
-    h('button', { class: 'btn ghost sm', style: 'padding-left:0', onClick: logout }, '切換身分 / 登出')));
+/** 小花圖示（品牌列、歡迎卡、空白狀態共用）。 */
+export function flower(size = 22) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 32 32'); svg.setAttribute('width', size); svg.setAttribute('height', size);
+  svg.setAttribute('aria-hidden', 'true'); svg.classList.add('flower');
+  svg.innerHTML = [0, 60, 120, 180, 240, 300].map((r) =>
+    `<ellipse cx="16" cy="8.6" rx="4.6" ry="7" transform="rotate(${r} 16 16)" fill="#f5d075"/>`).join('')
+    + '<circle cx="16" cy="16" r="4.3" fill="#88362a"/>';
+  return svg;
 }
 
-/**
- * 手機底部的 5 個分頁（浮動膠囊）。最後一格「更多」打開側邊選單，
- * 金流設定、成員與權限這些店主才用的頁面都在那裡，不佔首頁。
- */
-const TABS = [
-  { path: 'dashboard', label: '首頁', icon: '⌂' },
-  { path: 'shop', label: '喊單', icon: '✦' },
-  { path: 'orders', label: '訂單', icon: '▤' },
-  { path: 'wishes', label: '許願', icon: '♡' },
-];
-function renderTabbar(active) {
-  const bar = document.getElementById('tabbar');
+function renderMasthead() {
+  const bar = document.getElementById('masthead');
   if (!bar) return;
   bar.innerHTML = '';
-  for (const t of TABS) {
-    const r = ROUTES.find((x) => x.path === t.path);
-    if (!r || !session.can(r.cap)) continue;
-    bar.append(h('a', { href: `#/${t.path}`, class: t.path === active ? 'on' : '', 'aria-current': t.path === active ? 'page' : null },
-      h('span', { class: 'ti', 'aria-hidden': 'true' }, t.icon), t.label));
+  bar.append(
+    h('a', { class: 'brand', href: '#/dashboard' }, flower(24),
+      h('span', {}, h('span', { class: 'word' }, 'heeehababy'), h('small', {}, 'LAUGH LIKE A BABY. LIVE LIKE A QUEEN.'))),
+    h('div', { class: 'spacer' }),
+    session.member ? h('button', { class: 'who', type: 'button', title: '帳號', onClick: accountSheet },
+      h('span', { class: 'who-name' }, session.member.nickname, h('span', { class: 'tiny muted' }, roleLabel(session.member.role))),
+      h('span', { class: 'avatar' }, session.member.nickname.slice(0, 1))) : null);
+}
+
+function accountSheet() {
+  modal('帳號', h('div', {},
+    h('div', { class: 'row' }, h('span', { class: 'avatar', style: 'width:40px;height:40px' }, session.member.nickname.slice(0, 1)),
+      h('div', {}, h('strong', {}, session.member.nickname), h('div', { class: 'tiny muted' },
+        `${roleLabel(session.member.role)}${session.member.member_no ? '・' + session.member.member_no : ''}`)))), [
+    { label: '切換身分／登出', onClick: (close) => { close(); logout(); } },
+  ]);
+}
+
+/** 頁籤：可以左右滑，選中的那一個會自動捲進畫面。 */
+function renderPills(active) {
+  const nav = document.getElementById('pills');
+  if (!nav) return;
+  nav.innerHTML = '';
+  const track = h('div', { class: 'pill-track' });
+  let shownMore = false;
+  for (const r of ROUTES) {
+    if (!session.can(r.cap)) continue;
+    if (r.more && !shownMore) { shownMore = true; track.append(h('span', { class: 'pill-sep', 'aria-hidden': 'true' })); }
+    track.append(h('a', { class: 'pill' + (r.path === active ? ' on' : '') + (r.more ? ' more' : ''), href: `#/${r.path}`,
+      'aria-current': r.path === active ? 'page' : null }, r.title));
   }
-  const inMore = !TABS.some((t) => t.path === active);
-  bar.append(h('button', { type: 'button', class: inMore ? 'on' : '', onClick: toggleNav },
-    h('span', { class: 'ti', 'aria-hidden': 'true' }, '⋯'), '更多'));
+  nav.append(track);
+  const on = track.querySelector('.pill.on');
+  if (on) requestAnimationFrame(() => on.scrollIntoView({ block: 'nearest', inline: 'center' }));
 }
 
 export const roleLabel = (r) => ({ owner: '店主', helper: '小幫手', packer: '理貨', buyer: '買家' }[r] || r);
 
-// 手機版的側邊選單是抽屜：☰ 打開，點遮罩或選了頁面就關。
-export const closeNav = () => document.body.classList.remove('nav-open');
-const toggleNav = () => document.body.classList.toggle('nav-open');
+// 舊的抽屜選單已經拿掉；保留這個名字給還在呼叫它的頁面，不做事。
+export const closeNav = () => {};
 
-function renderTop(title, extra) {
-  const bar = document.getElementById('topbar');
-  bar.innerHTML = '';
-  bar.append(
-    h('button', { class: 'menu-btn', type: 'button', 'aria-label': '打開選單', onClick: toggleNav }, '☰'),
-    // 首頁的標題就是品牌字（樣板：小寫 heeehababy、粗體）。
-    title === '首頁' ? h('h1', { class: 'brand-h' }, 'heeehababy') : h('h1', {}, title), h('div', { class: 'spacer' }));
-  if (extra) bar.append(extra);
-  if (session.member) {
-    bar.append(h('div', { class: 'who' },
-      h('div', { class: 'avatar' }, session.member.nickname.slice(0, 1)),
-      h('div', {}, session.member.nickname, h('div', { class: 'tiny muted' }, roleLabel(session.member.role)))));
+/**
+ * 每頁的頁首：麵包屑「工作空間 / 頁名」、eyebrow、大標、灰色副標、右上動作（例如匯出備份）。
+ * 頁面要放「↗ 匯出備份」就 export 一個 exportBackup()，這裡會自動加按鈕。
+ */
+function pageHead(r, mod, ctx) {
+  const actions = h('div', { class: 'ph-actions' });
+  if (mod && typeof mod.exportBackup === 'function') {
+    actions.append(h('button', { class: 'btn sm', type: 'button', onClick: async () => {
+      try { await mod.exportBackup(ctx); } catch (e) { fail(e); }
+    } }, '↗ 匯出備份'));
   }
+  return h('div', { class: 'page-head' },
+    h('div', { class: 'crumbs' }, h('a', { href: '#/dashboard' }, '工作空間'), ' / ', h('span', {}, r.title)),
+    h('div', { class: 'ph-row' },
+      h('div', { class: 'ph-text' },
+        h('div', { class: 'eyebrow' }, `HEEEHABABY / ${r.eyebrow || 'WORKSPACE'}`),
+        h('h1', {}, r.title),
+        r.sub ? h('p', { class: 'ph-sub' }, r.sub) : null),
+      actions));
+}
+
+/** 把資料存成 CSV 下載（Excel 打得開：加 BOM，避免中文亂碼）。檔名用英文：中文檔名在部分瀏覽器會變成「download」。 */
+export function downloadCsv(filename, cols, rows) {
+  const cell = (v) => {
+    const t = v == null ? '' : String(v);
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  const text = [cols.map((c) => cell(c.label)).join(','), ...rows.map((r) => cols.map((c) => cell(typeof c.get === 'function' ? c.get(r) : r[c.key])).join(','))].join('\r\n');
+  const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: filename });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
 export function logout() {
@@ -254,7 +307,8 @@ async function lineLogin(liffId, interactive) {
 
 async function renderLogin(err = null) {
   document.getElementById('app').style.display = 'none';
-  document.getElementById('tabbar')?.replaceChildren();
+  document.getElementById('masthead')?.replaceChildren();
+  document.getElementById('pills')?.replaceChildren();
   document.querySelectorAll('.login').forEach((n) => n.remove());
 
   let cfg = { line: { ready: false }, password: true };
@@ -389,10 +443,8 @@ async function route() {
     const first = ROUTES.find((x) => session.can(x.cap));
     if (first && first.path !== path) { location.hash = `#/${first.path}`; return; }
   }
-  closeNav();
-  renderNav(r.path);
-  renderTabbar(r.path);
-  renderTop(r.title);
+  renderMasthead();
+  renderPills(r.path);
   const view = document.getElementById('view');
   // 轉圈圈一直顯示到這一頁的資料都拿到為止。頁面先畫在隱藏的容器裡，畫完才換上 ——
   // 不然會先清空、再等 API，中間是一段白畫面，看起來像當掉。
@@ -402,7 +454,11 @@ async function route() {
   view.replaceChildren(spinner, holder);
   try {
     const mod = await r.mod();
-    await mod.render(holder, { query, setTopbar: (node) => renderTop(r.title, node), reload: route });
+    const ctx = { query, setTopbar: () => {}, reload: route };
+    holder.append(pageHead(r, mod, ctx));
+    const body = h('div', { class: 'page-body' });
+    holder.append(body);
+    await mod.render(body, ctx);
     if (seq !== routeSeq) return; // 載入途中又換了頁：這一頁作廢，不要蓋掉新的
     spinner.remove();
     holder.hidden = false;

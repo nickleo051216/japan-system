@@ -872,6 +872,20 @@ const login = async (id) =>
     check('小幫手也看得到首頁（但看不到營收）',
       (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.status_counts !== undefined);
 
+    section('營運總覽（2026-11-25 照影片 2）：彩色數字格、優先確認，點了跳到篩選好的清單');
+    const ov = dash.overview;
+    check('數字格 7 格都有數字和連結', ov && ['to_buy', 'wish_votes', 'to_ship', 'payment_info', 'active_orders', 'arriving_7d', 'open_issues']
+      .every((k) => Number.isInteger(ov.tiles[k]?.n) && /^#\//.test(ov.tiles[k].link)), ov && ov.tiles);
+    check('優先確認 4 個 chip：待確認、逾期付款、即將到貨、缺貨與延遲', ['pending', 'overdue', 'arriving', 'delayed']
+      .every((k) => Number.isInteger(ov.action[k]?.n) && /^#\//.test(ov.action[k].link)), ov && ov.action);
+    const pendAll = (await api('GET', '/api/v1/orders/list?status=' + encodeURIComponent('待確認'), { token: owner })).json.data;
+    check('「待確認」chip 的數字跟點進去的清單一樣（不分團）', pendAll.length === ov.action.pending.n, [pendAll.length, ov.action.pending.n]);
+    const activeList = await listOf('status=' + encodeURIComponent('待確認,已報價,已到貨,已出貨'));
+    check('「進行中訂單」的數字跟點進去的清單一樣（這一團）', activeList.length === ov.tiles.active_orders.n, [activeList.length, ov.tiles.active_orders.n]);
+    check('首頁附客人頁網址（開啟客人頁 ↗）', /^https:\/\/liff\.line\.me\//.test(dash.buyer_url), dash.buyer_url);
+    const ovHelper = (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.overview;
+    check('小幫手看得到數字格，但看不到小幫手請款的待核對數（那是店主的）', !!ovHelper && ovHelper.helper_claims === null);
+
     section('客人首頁的團卡開關（show_trip_card）');
     const tripOf = async () => (await B('GET', '/api/v1/home/summary')).json.data.shop.show_trip_card;
     check('沒設定 → null（前台照有沒有開團自動決定）', (await tripOf()) === null);
@@ -918,6 +932,109 @@ const login = async (id) =>
     check('找不到的許願 → 404', (await api('POST', '/api/v1/ocr/result', { ...MK, body: { wish_id: 'W_none', name: 'x', ai_confidence: 'high' } })).status === 404);
     const aiLog = (await api('GET', '/api/v1/audit/list?limit=30', { token: owner })).json.data.find((l) => l.action === 'wish.ai_name' && l.target === pw1.wish_id);
     check('稽核記下 AI 取了什麼名字，經手人是系統自動', aiLog?.detail.name === 'Combi 手口濕巾 80 抽' && aiLog.actor_label === '系統自動', aiLog);
+    }
+
+    {
+    section('多張照片一次上架（017）：每張照片 = 一件商品，AI 讀品名和台幣售價，一起刊登');
+    const MK = { 'X-Notify-Token': 'smoke-notify-secret' };
+    const jpgL = 'data:image/jpeg;base64,' + Buffer.from('fake-listing-jpeg').toString('base64');
+    const up = async (body) => api('POST', '/api/v1/listings/upload', { token: owner, body });
+    const a1 = (await up({ data: jpgL, size_note: '90 / 100 / 110' })).json.data;
+    const a2 = (await up({ data: jpgL })).json.data;
+    const a3 = (await up({ data: jpgL })).json.data;
+    check('上傳 3 張 → 3 筆草稿，先顯示「正在辨識照片…」，照片放在喊單資料夾', [a1, a2, a3].every((d) => d && d.ocr === 'reading' && /正在辨識/.test(d.hint))
+      && storageMock.objects.has(`broadcast/draft-${a1.draft_id}.jpg`), [a1, a2, a3]);
+    check('不是圖片 → BAD_IMAGE', (await up({ data: 'nope' })).json.error?.code === 'BAD_IMAGE');
+    check('小幫手不能上架 → 403', (await api('POST', '/api/v1/listings/upload', { token: helper, body: { data: jpgL } })).status === 403);
+    const oldFlow = (await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_wishes: true } })).json.data.jobs;
+    check('舊版 n8n（沒帶 include_listings）領不到上架照片', !oldFlow.some((j) => j.kind === 'listing'));
+    const jobs = (await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_listings: true } })).json.data.jobs.filter((j) => j.kind === 'listing');
+    check('新版帶 include_listings → 3 張照上傳順序領走，附簽名網址', jobs.map((j) => j.listing_id).join() === [a1, a2, a3].map((d) => d.draft_id).join()
+      && jobs.every((j) => j.image_url.startsWith(STORAGE_MOCK_URL)), jobs);
+    await api('POST', '/api/v1/listings/update', { token: owner, body: { draft_id: a3.draft_id, name: '店主先打的名字' } });
+    const res = async (b) => (await api('POST', '/api/v1/ocr/result', { headers: MK, body: b })).json.data;
+    const r1 = await res({ listing_id: a1.draft_id, name: '小花刺繡圍兜', price_twd: 390, ai_confidence: 'high' });
+    const r2 = await res({ listing_id: a2.draft_id, name: '溫柔小花紗布巾', jpy_taxed: 1639, ai_confidence: 'medium' });
+    const r3 = await res({ listing_id: a3.draft_id, name: 'AI 的名字', price_twd: 500, ai_confidence: 'high' });
+    check('讀到台幣 $390 → 品名、售價都填好', r1.applied && r1.draft.name === '小花刺繡圍兜' && r1.draft.price_twd === 390 && /請確認/.test(r1.draft.hint), r1);
+    check('照片上只有日幣 → 用價目表換成台幣', r2.draft.price_twd > 0 && r2.draft.jpy_taxed === 1639, r2.draft);
+    check('店主已經改過的 → AI 結果不蓋掉', r3.applied === false && r3.draft.name === '店主先打的名字' && r3.draft.price_twd === null
+      && /未辨識到單一台幣售價/.test(r3.draft.hint), r3);
+    const nopub = await api('POST', '/api/v1/listings/publish', { token: owner, body: { items: [{ draft_id: a1.draft_id }, { draft_id: a3.draft_id }] } });
+    check('有一件還沒台幣售價 → BAD_PRICE，一件都不刊登', nopub.json.error?.code === 'BAD_PRICE'
+      && (await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.filter((d) => [a1, a3].some((x) => x.draft_id === d.draft_id)).length === 2, nopub.json);
+    const pub = await api('POST', '/api/v1/listings/publish', { token: owner, body: { quantity: 3,
+      items: [{ draft_id: a1.draft_id }, { draft_id: a2.draft_id, name: '紗布巾（改名）' }, { draft_id: a3.draft_id, price_twd: 450 }] } });
+    const bcs = pub.json.data?.broadcasts || [];
+    check('一起刊登 3 件 → 開出 3 張喊單，照片、名稱、價錢、數量都對', pub.status === 200 && pub.json.data.count === 3
+      && bcs[0].name === '小花刺繡圍兜' && bcs[0].price_twd === 390 && bcs[1].name === '紗布巾（改名）' && bcs[2].price_twd === 450
+      && bcs.every((b) => b.quantity === 3 && b.image_url && b.image_url.startsWith(STORAGE_MOCK_URL)), pub.json);
+    check('尺寸備註「90 / 100 / 110」→ 變成喊單的尺寸選項', JSON.stringify(bcs[0].sizes) === '["90","100","110"]', bcs[0].sizes);
+    check('刊登後草稿清單清空', !(await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.some((d) => [a1, a2, a3].some((x) => x.draft_id === d.draft_id)));
+    const again = await api('POST', '/api/v1/listings/publish', { token: owner, body: { items: [{ draft_id: a1.draft_id }] } });
+    check('同一張不能刊登兩次 → ALREADY_POSTED', again.json.error?.code === 'ALREADY_POSTED', again.json);
+    const a4 = (await up({ data: jpgL })).json.data;
+    await api('POST', '/api/v1/listings/remove', { token: owner, body: { draft_id: a4.draft_id } });
+    check('移除的照片不在清單，也不會再送去辨識', !(await api('GET', '/api/v1/listings/drafts', { token: owner })).json.data.some((d) => d.draft_id === a4.draft_id)
+      && !(await api('POST', '/api/v1/ocr/pending', { headers: MK, body: { limit: 50, include_listings: true } })).json.data.jobs.some((j) => j.listing_id === a4.draft_id));
+    const home = (await B('GET', '/api/v1/home/summary')).json.data;
+    check('客人首頁看得到剛刊登的喊單', bcs.every((b) => home.broadcast.some((x) => x.send_id === b.send_id)));
+    }
+
+    {
+    section('許願與＋1 排行（018）：依想要人數排、搜尋、篩選、更新尋找進度');
+    const rk = async (qs = '') => (await api('GET', '/api/v1/wishes/ranking' + qs, { token: helper })).json.data;
+    const all = await rk();
+    check('依想要人數由多到少排，名次從 1 開始', all.length > 0 && all[0].rank === 1 && all.every((w, i) => i === 0 || all[i - 1].wants >= w.wants), all.map((w) => w.wants));
+    check('預設不含已下單的', all.every((w) => w.wish_status !== '已下單'));
+    const top = all.find((w) => !w.broadcast_send_id) || all[0];
+    const found = await rk('?q=' + encodeURIComponent(top.item_name.slice(0, 3)));
+    check('搜尋品名找得到', found.some((w) => w.wish_id === top.wish_id), found.map((w) => w.item_name));
+    check('搜尋客人暱稱也找得到', (await rk('?q=' + encodeURIComponent(top.nickname))).some((w) => w.wish_id === top.wish_id));
+    const pg = await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, note: '大阪店問過了，下週補貨' } });
+    check('更新尋找進度（一句話）', pg.status === 200 && pg.json.data.progress_note === '大阪店問過了，下週補貨' && !!pg.json.data.progress_at, pg.json);
+    const mineList = (await api('GET', '/api/v1/wishes/list', { token: buyer })).json.data;
+    const mineHit = mineList.find((w) => w.wish_id === top.wish_id);
+    check('客人「我的許願」看得到尋找進度（如果是他的）', !mineHit || mineHit.progress_note === '大阪店問過了，下週補貨', mineHit);
+    check('沒寫進度也沒選狀態 → BAD_REQUEST', (await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id } })).json.error?.code === 'BAD_REQUEST');
+    check('包貨人員不能改進度 → 403', (await api('POST', '/api/v1/wishes/progress', { token: packer, body: { wish_id: top.wish_id, note: 'x' } })).status === 403);
+    const later = await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, status: '保留下團' } });
+    check('順便改狀態 → 保留下團，進度那句話還在', later.json.data?.progress === '保留下團' && later.json.data.progress_note === '大阪店問過了，下週補貨', later.json);
+    check('篩「保留下團」看得到它', (await rk('?progress=later')).some((w) => w.wish_id === top.wish_id));
+    await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, status: '待處理' } });
+    }
+
+    {
+    section('商品資料庫（019）：型錄＋喊單合在一起看、搜尋、篩選、新增、改採購線');
+    const cat = async (qs = '', token = owner) => (await api('GET', '/api/v1/catalog/list' + qs, { token })).json.data;
+    const all = await cat();
+    check('型錄和喊單都在同一張表，每列有來源、狀態', all.rows.some((r) => r.source === 'catalog') && all.rows.some((r) => r.source === 'broadcast')
+      && all.rows.every((r) => r.key && r.status_zh), all.rows.slice(0, 3));
+    check('一開始全部是「待分類」', all.untagged === all.total && all.lines.length === 0, [all.untagged, all.total]);
+    const nw = await api('POST', '/api/v1/catalog/create', { token: owner, body: { name: '小花刺繡圍兜', line: '日本線', variant: '粉紅', sizes: '90 / 100', price_twd: 390 } });
+    check('＋新增商品 → 寫進型錄，自動配商品編號', nw.status === 200 && /^P\d+$/.test(nw.json.data.id) && nw.json.data.line === '日本線'
+      && JSON.stringify(nw.json.data.sizes) === '["90","100"]', nw.json);
+    check('新增要店主權限（小幫手 403）', (await api('POST', '/api/v1/catalog/create', { token: helper, body: { name: 'x' } })).status === 403);
+    const p01 = all.rows.find((r) => r.key === 'sku:P01');
+    const up = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: 'sku:P01', line: '日本線' } });
+    check('補上採購線', up.json.data?.line === '日本線', up.json);
+    const bcRow = all.rows.find((r) => r.source === 'broadcast' && r.sold > 0);
+    if (bcRow) {
+      const lock = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: bcRow.key, price_twd: 1 } });
+      check('喊單已經有人搶 → 售價不能改（PRICE_LOCKED）', lock.json.error?.code === 'PRICE_LOCKED', lock.json);
+    }
+    const kr = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: all.rows.find((r) => r.source === 'broadcast').key, line: '韓國線' } });
+    check('喊單也可以標採購線', kr.json.data?.line === '韓國線', kr.json);
+    const jp = await cat('?line=' + encodeURIComponent('日本線'));
+    check('照採購線篩：日本線 2 件', jp.total === 2 && jp.rows.every((r) => r.line === '日本線') && jp.lines.join() === '日本線,韓國線', jp);
+    check('「待分類」少了 3 件', (await cat('?line=__none')).total === all.untagged - 2, all.untagged);
+    check('搜尋款式找得到', (await cat('?q=' + encodeURIComponent('粉紅'))).rows.some((r) => r.name === '小花刺繡圍兜'));
+    check('只看喊單', (await cat('?source=broadcast')).rows.every((r) => r.source === 'broadcast'));
+    const pk = await cat('', packer);
+    check('包貨人員看得到商品，但看不到售價', pk.rows.length > 0 && pk.rows.every((r) => !('price_twd' in r)));
+    const bd = (await api('GET', '/api/v1/procurement/board?batch=' + encodeURIComponent(p01.batch), { token: helper })).json.data.rows;
+    check('連線採買清單的每項帶採購線（商品資料庫填的）', bd.some((r) => r.sku === 'P01' && r.line === '日本線') && bd.every((r) => 'line' in r), bd.map((r) => [r.sku, r.line]));
+    void p01;
     }
 
     section('後台 — 訂單報價（0 元品項不能漏）');
@@ -1897,6 +2014,48 @@ const login = async (id) =>
     const after = (await B('GET', '/api/v1/inbox/list?limit=5')).json.data;
     check('「全部標成已讀」→ 未讀 0，但通知都還在', ra.unread === 0 && after.items.length === 5 && after.items.every((n) => n.read && n.read_at), ra);
     check('沒登入 → 401', (await api('GET', '/api/v1/inbox/list')).status === 401);
+    }
+
+    {
+    section('採買端：掃標籤登記採買・補登漏喊商品（020）');
+    const H = (m, u, o) => api(m, u, { token: helper, ...o });
+    const lk = (await H('GET', '/api/v1/purchase/lookup?code=p01')).json.data;
+    check('掃到貨號（不分大小寫）→ 找到型錄商品，附售價', lk.matches[0]?.key === 'sku:P01' && lk.matches[0].price_twd > 0, lk);
+    check('找不到的貨號 → 空的（可以手填品名登記）', (await H('GET', '/api/v1/purchase/lookup?code=ZZZ-NOPE')).json.data.matches.length === 0);
+    const cs = (await H('GET', '/api/v1/purchase/customers?q=HB-00005')).json.data;
+    check('用會員編號找客人，不給 LINE userId', cs.length === 1 && cs[0].member_no === 'HB-00005' && !JSON.stringify(cs).includes('U_buyer1'), cs);
+    const cid = (await B('POST', '/api/v1/cart/add-text', { body: { name: '補登測試 原本的奶嘴', qty: 1 } })).json.data.cart_id;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [cid] } });
+    const ord = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: [cid], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const os = (await H('GET', '/api/v1/purchase/orders?member_no=HB-00005')).json.data;
+    check('列出這位客人還能加的訂單（待確認／已報價、沒出對帳單、沒付款）', os.some((o) => o.order_id === ord.order_id)
+      && os.every((o) => ['待確認', '已報價'].includes(o.status)), os.map((o) => [o.order_id, o.status]));
+    const before = (await api('GET', `/api/v1/orders/detail?order_id=${ord.order_id}`, { token: owner })).json.data;
+    const r1 = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', key: 'sku:P01', code: 'P01', order_id: ord.order_id, note: '抹茶口味' } });
+    const after = (await api('GET', `/api/v1/orders/detail?order_id=${ord.order_id}`, { token: owner })).json.data;
+    const added = after.items.find((i) => /抹茶口味/.test(i.name_zh || i.name));
+    check('加進訂單 → 多一個「已到貨」的品項，訂單總額跟著加', r1.status === 200 && added && added.item_status === '已到貨'
+      && Number(after.total_twd) === Number(before.total_twd) + lk.matches[0].price_twd, [r1.json, added, before.total_twd, after.total_twd]);
+    const r2 = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', name: '漏喊的小熊襪', price_twd: 180, note: '粉紅 S' } });
+    const cart = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === r2.json.data?.cart_id);
+    check('新增一筆到購物車 → 客人購物車多一筆（待確認，附「小幫手現場幫你買到了」）', cart && cart.status === 'pending' && cart.price_twd === 180
+      && /小幫手現場幫你買到了/.test(cart.note), [r2.json, cart]);
+    const MKN = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const bought = (await api('POST', '/api/v1/notify/pending', { ...MKN, body: { limit: 100 } })).json.data.notifications.filter((n) => n.kind === 'bought');
+    const btxt = bought.map((n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).text);
+    check('兩筆都 LINE 通知客人（寫出商品、加到哪裡、連結）', bought.length === 2 && btxt.some((t) => /小熊襪/.test(t) && /購物車/.test(t) && /\?path=cart/.test(t))
+      && btxt.some((t) => t.includes(ord.order_id) && /\?path=orders/.test(t)), btxt);
+    const inbox = (await B('GET', '/api/v1/inbox/list?limit=5')).json.data.items;
+    check('客人的通知中心也看得到（標題「小幫手幫你買到了」）', inbox.some((n) => n.kind === 'bought' && n.title === '小幫手幫你買到了' && n.path === 'cart'), inbox.map((n) => n.title));
+    const stmtOrder = (await api('GET', '/api/v1/orders/list', { token: owner })).json.data.find((o) => o.line_user_id === 'U_buyer1' && o.statement_id && ['待確認', '已報價'].includes(o.status));
+    if (stmtOrder) {
+      const locked = await H('POST', '/api/v1/purchase/record', { body: { member_no: 'HB-00005', name: 'x', price_twd: 1, order_id: stmtOrder.order_id } });
+      check('已經出對帳單的訂單不能加 → ORDER_LOCKED（請改加購物車）', locked.json.error?.code === 'ORDER_LOCKED', locked.json);
+    }
+    check('沒選客人 → MEMBER_NOT_FOUND', (await H('POST', '/api/v1/purchase/record', { body: { name: 'x' } })).json.error?.code === 'MEMBER_NOT_FOUND');
+    check('包貨人員不能登記採買 → 403', (await api('POST', '/api/v1/purchase/record', { token: packer, body: { member_no: 'HB-00005', name: 'x' } })).status === 403);
+    const pa = (await api('GET', '/api/v1/audit/list?limit=100', { token: owner })).json.data;
+    check('稽核記下是誰、幫誰、加到哪', pa.filter((l) => l.action === 'purchase.record').length >= 2);
     }
 
     // 「還沒開團」只會發生在全新的資料庫（示範資料一定有團），所以另開一個空的資料庫測。

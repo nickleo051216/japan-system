@@ -393,6 +393,34 @@ function startHarness() {
     await run(ocrWf, '每分鐘');
     check('認不出來的也算辨識結束，不會一直重送', mock.claude.length === 0);
 
+    section('多張照片上架：同一條流程，讀品名和照片上的台幣售價（017）');
+    const up = async () => (await api('POST', '/api/v1/listings/upload', { token: owner, body: { data: jpg } })).data;
+    const l1 = await up();
+    const l2 = await up();
+    check('上傳後先顯示「正在辨識照片…」', l1.ocr === 'reading' && /正在辨識/.test(l1.hint), l1);
+    mock.claude.length = 0;
+    mock.claudeScript.push(claudeSays({ name: '小花刺繡圍兜', name_ja: null, price_twd: 390, jpy_taxed: null, confidence: 'high' }));
+    mock.claudeScript.push(claudeSays({ name: '吊飾', name_ja: null, price_twd: null, jpy_taxed: null, confidence: 'medium' }));
+    out = await run(ocrWf, '每分鐘');
+    const lcall = mock.claude[0];
+    const ltext = lcall && lcall.body.messages.find((m) => m.role === 'user').content.find((c) => c.type === 'text').text;
+    check('上架照片用自己的提示語：要台幣售價、讀不到就回 null', /台幣售價/.test(ltext)
+      && lcall.body.response_format.json_schema.schema.properties.price_twd, ltext);
+    check('兩張都送去辨識，回寫帶 listing_id', out['組請求'].filter((j) => j.kind === 'listing').length === 2
+      && out['回寫辨識結果'].every((r) => r.ok && r.data.listing_id), out['回寫辨識結果']);
+    const drafts = (await api('GET', '/api/v1/listings/drafts', { token: owner })).data;
+    const d1 = drafts.find((d) => d.draft_id === l1.draft_id);
+    const d2 = drafts.find((d) => d.draft_id === l2.draft_id);
+    check('讀到台幣 $390 → 品名、售價填好，提示「請確認商品名稱」', d1 && d1.name === '小花刺繡圍兜' && d1.price_twd === 390 && d1.ocr === 'done' && /請確認/.test(d1.hint), [d1, out['回寫辨識結果'], drafts.length]);
+    check('讀不到單一台幣售價 → 留空，提示「請填寫」', d2.name === '吊飾' && d2.price_twd === null && /未辨識到單一台幣售價/.test(d2.hint), d2);
+    mock.claude.length = 0;
+    await run(ocrWf, '每分鐘');
+    check('辨識過的上架照片不會再送一次', mock.claude.length === 0);
+    const pub = await api('POST', '/api/v1/listings/publish', { token: owner,
+      body: { items: [{ draft_id: l1.draft_id }, { draft_id: l2.draft_id, price_twd: 300 }] } });
+    check('一起刊登 2 件 → 開出 2 張喊單（手填的價錢也算）', pub.ok && pub.data.count === 2
+      && pub.data.broadcasts.map((b) => b.price_twd).join(',') === '390,300', pub);
+
     const parse = ocrWf.nodes.find((n) => n.name === '解析結果');
     const wishParsed = await runCode(parse, { json: { statusCode: 200, body: claudeSays({ name: 'X', name_ja: null, jpy_taxed: null, confidence: 'high' }).body },
       lineage: { 組請求: { kind: 'wish', wish_id: 'W_x' } } });
