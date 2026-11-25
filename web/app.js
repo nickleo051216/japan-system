@@ -130,6 +130,8 @@ const ROUTES = [
     sub: '先掃包裹，再逐件掃商品，掃到別的包裹會跳出警示。' },
   { path: 'logistics', title: '進貨物流綁定', cap: 'shipment.write', mod: () => import('./views/logistics.js'),
     sub: '把日本寄回來的物流單號綁到訂單。' },
+  { path: 'catalog', title: '商品資料庫', cap: 'order.read', mod: () => import('./views/catalog.js'),
+    sub: '型錄和喊單的商品都在這裡：採購線、款式、尺寸、售價、狀態。' },
   { path: 'expense', title: '拍收據記帳', cap: 'procurement.write', more: true, mod: () => import('./views/expense.js'),
     sub: '一張收據記一項商品的實際進價。' },
   { path: 'members', title: '成員與邀請碼', cap: 'settings.write', more: true, mod: () => import('./views/members.js'),

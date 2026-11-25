@@ -23,6 +23,7 @@ export async function render(root, ctx) {
   const showCost = session.can('order.read.cost');
   const isOwner = session.member.role === 'owner';
   let filter = FILTERS.some((f) => f.key === ctx.query.f) ? ctx.query.f : 'all';
+  let line = '';   // 採購線（商品資料庫填的）：'' = 全部、'__none' = 待分類
   let q = '';
   const wrap = h('div', {});
   root.append(wrap);
@@ -53,13 +54,19 @@ export async function render(root, ctx) {
       }, f.label, ' ', h('b', {}, String(rows.filter(f.test).length))))),
       search,
       h('button', { class: 'btn sm', type: 'button', onClick: () => load().catch(fail) }, '↻ 更新清單')));
+    // 採購線（日本線／韓國線…）：商品資料庫有填才會出現；沒填的算「待分類」。
+    const lines = [...new Set(rows.map((r) => r.line).filter(Boolean))].sort();
+    if (lines.length) {
+      wrap.append(h('div', { class: 'chips', style: 'margin:-4px 0 12px' }, ...[['', '全部採購線'], ['__none', '待分類'], ...lines.map((l) => [l, l])].map(([k, label]) =>
+        h('button', { type: 'button', class: 'chip' + (line === k ? ' on' : ''), onClick: () => { line = k; draw(); } }, label))));
+    }
     const list = h('div', { class: 'lc-grid' });
     wrap.append(list);
     const drawList = () => {
       list.innerHTML = '';
       const f = FILTERS.find((x) => x.key === filter);
       const kw = q.toLowerCase();
-      const shown = rows.filter(f.test).filter((r) => !kw || [r.name_zh, r.name_local, r.brand, r.sku, ...r.buyers.map((b) => b.nickname)]
+      const shown = rows.filter(f.test).filter((r) => !line || (line === '__none' ? !r.line : r.line === line)).filter((r) => !kw || [r.name_zh, r.name_local, r.brand, r.sku, ...r.buyers.map((b) => b.nickname)]
         .some((v) => String(v || '').toLowerCase().includes(kw)));
       if (!shown.length) list.append(h('div', { class: 'card', style: 'grid-column:1/-1' }, h('div', { class: 'empty' },
         rows.length ? '沒有符合的商品' : `${batch ? `團別 ${batch}` : '本團'}目前沒有要採買的商品`)));

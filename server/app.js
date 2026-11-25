@@ -57,6 +57,8 @@ function boot() {
   require('./routes/inbox');
   // 多張照片一次上架（017）。
   require('./routes/listings');
+  // 商品資料庫（型錄＋喊單合在一起看；019）。
+  require('./routes/catalog');
   // 後台設定：價目表、成員與權限。
   require('./routes/admin-config');
   // 綠界：付款結果回調、後台金流設定。

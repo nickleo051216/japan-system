@@ -1004,6 +1004,39 @@ const login = async (id) =>
     await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, status: '待處理' } });
     }
 
+    {
+    section('商品資料庫（019）：型錄＋喊單合在一起看、搜尋、篩選、新增、改採購線');
+    const cat = async (qs = '', token = owner) => (await api('GET', '/api/v1/catalog/list' + qs, { token })).json.data;
+    const all = await cat();
+    check('型錄和喊單都在同一張表，每列有來源、狀態', all.rows.some((r) => r.source === 'catalog') && all.rows.some((r) => r.source === 'broadcast')
+      && all.rows.every((r) => r.key && r.status_zh), all.rows.slice(0, 3));
+    check('一開始全部是「待分類」', all.untagged === all.total && all.lines.length === 0, [all.untagged, all.total]);
+    const nw = await api('POST', '/api/v1/catalog/create', { token: owner, body: { name: '小花刺繡圍兜', line: '日本線', variant: '粉紅', sizes: '90 / 100', price_twd: 390 } });
+    check('＋新增商品 → 寫進型錄，自動配商品編號', nw.status === 200 && /^P\d+$/.test(nw.json.data.id) && nw.json.data.line === '日本線'
+      && JSON.stringify(nw.json.data.sizes) === '["90","100"]', nw.json);
+    check('新增要店主權限（小幫手 403）', (await api('POST', '/api/v1/catalog/create', { token: helper, body: { name: 'x' } })).status === 403);
+    const p01 = all.rows.find((r) => r.key === 'sku:P01');
+    const up = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: 'sku:P01', line: '日本線' } });
+    check('補上採購線', up.json.data?.line === '日本線', up.json);
+    const bcRow = all.rows.find((r) => r.source === 'broadcast' && r.sold > 0);
+    if (bcRow) {
+      const lock = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: bcRow.key, price_twd: 1 } });
+      check('喊單已經有人搶 → 售價不能改（PRICE_LOCKED）', lock.json.error?.code === 'PRICE_LOCKED', lock.json);
+    }
+    const kr = await api('POST', '/api/v1/catalog/update', { token: owner, body: { key: all.rows.find((r) => r.source === 'broadcast').key, line: '韓國線' } });
+    check('喊單也可以標採購線', kr.json.data?.line === '韓國線', kr.json);
+    const jp = await cat('?line=' + encodeURIComponent('日本線'));
+    check('照採購線篩：日本線 2 件', jp.total === 2 && jp.rows.every((r) => r.line === '日本線') && jp.lines.join() === '日本線,韓國線', jp);
+    check('「待分類」少了 3 件', (await cat('?line=__none')).total === all.untagged - 2, all.untagged);
+    check('搜尋款式找得到', (await cat('?q=' + encodeURIComponent('粉紅'))).rows.some((r) => r.name === '小花刺繡圍兜'));
+    check('只看喊單', (await cat('?source=broadcast')).rows.every((r) => r.source === 'broadcast'));
+    const pk = await cat('', packer);
+    check('包貨人員看得到商品，但看不到售價', pk.rows.length > 0 && pk.rows.every((r) => !('price_twd' in r)));
+    const bd = (await api('GET', '/api/v1/procurement/board?batch=' + encodeURIComponent(p01.batch), { token: helper })).json.data.rows;
+    check('連線採買清單的每項帶採購線（商品資料庫填的）', bd.some((r) => r.sku === 'P01' && r.line === '日本線') && bd.every((r) => 'line' in r), bd.map((r) => [r.sku, r.line]));
+    void p01;
+    }
+
     section('後台 — 訂單報價（0 元品項不能漏）');
     const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
     check('沒填日幣的文字品項價格為 null', nx.price_twd === null);
