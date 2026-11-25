@@ -1031,6 +1031,54 @@ const login = async (id) =>
       auditRows.some((l) => l.action === 'members.drops_reset' && l.detail?.reason === 'paid'
         && l.subject_label && !/U_buyer1/.test(l.subject_label)));
 
+    {
+    section('三種客人通知（v1.6）：報價好了、收到款項、缺貨');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const txt = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).text;
+    const tv = (await pending()).filter((n) => n.kind === 'transfer_verified' && n.statement_id === mine1.statement_id);
+    check('店主核對對帳單 → 排一則「已確認收到您的付款」（附金額）', tv.length === 1 && /已確認收到您的付款/.test(txt(tv[0]))
+      && txt(tv[0]).includes(mine1.statement_id), tv.map(txt));
+    // 一張新訂單：文字下單 → 結帳 → 店主報價
+    const c1 = (await B('POST', '/api/v1/cart/add-text', { body: { name: '通知測試 布丁', qty: 2 } })).json.data;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [c1.cart_id] } });
+    const o1 = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: [c1.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const od = (await api('GET', `/api/v1/orders/detail?order_id=${o1.order_id}`, { token: owner })).json.data;
+    await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o1.order_id, items: [{ item_id: od.items[0].item_id, unit_price_twd: 300 }] } });
+    const q1 = (await pending()).filter((n) => n.kind === 'quoted' && n.order_id === o1.order_id);
+    check('訂單報價（待確認 → 已報價）→ 排一則「報價好了」，寫出金額、結算日與訂單連結',
+      q1.length === 1 && /報價好了/.test(txt(q1[0])) && /NT\$600/.test(txt(q1[0])) && /\?path=orders/.test(txt(q1[0])) && /結算/.test(txt(q1[0])), q1.map(txt));
+    await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o1.order_id, items: [{ item_id: od.items[0].item_id, unit_price_twd: 320 }] } });
+    check('之後改價不再通知（同一張訂單只通知一次）', (await pending()).filter((n) => n.kind === 'quoted' && n.order_id === o1.order_id).length === 0);
+    await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: o1.order_id, to: '缺貨' } });
+    const oos = (await pending()).filter((n) => n.kind === 'out_of_stock' && n.order_id === o1.order_id);
+    check('訂單標成「缺貨」→ 排一則缺貨通知（店家會聯絡補買／換貨／退款）', oos.length === 1 && /缺貨通知/.test(txt(oos[0])) && /退款/.test(txt(oos[0])), oos.map(txt));
+    // 單張訂單收款
+    const c2 = (await B('POST', '/api/v1/cart/add-text', { body: { name: '通知測試 果凍', qty: 1 } })).json.data;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [c2.cart_id] } });
+    const o2 = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: [c2.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+    const od2 = (await api('GET', `/api/v1/orders/detail?order_id=${o2.order_id}`, { token: owner })).json.data;
+    await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o2.order_id, advance: false, items: [{ item_id: od2.items[0].item_id, unit_price_twd: 200 }] } });
+    const o2fresh = (await api('GET', `/api/v1/orders/detail?order_id=${o2.order_id}`, { token: owner })).json.data;
+    check('報價但不推進狀態（advance:false）→ 不通知', (await pending()).filter((n) => n.kind === 'quoted' && n.order_id === o2.order_id).length === 0);
+    await api('POST', '/api/v1/payments/reconcile', { token: owner, body: { order_id: o2.order_id, amount_twd: Number(o2fresh.total_twd) } });
+    const tv2 = (await pending()).filter((n) => n.kind === 'transfer_verified' && n.order_id === o2.order_id);
+    check('單張訂單收款認列 → 也排「已確認收到您的付款」', tv2.length === 1 && txt(tv2[0]).includes(o2.order_id), tv2.map(txt));
+    // 許願
+    const wq = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '通知測試 許願奶瓶' } })).json.data;
+    await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: wq.wish_id, quote_twd: 650 } });
+    const wqn = (await pending()).filter((n) => n.kind === 'quoted' && !n.order_id);
+    check('許願報價 → 排「你許的願有報價了」（附我的許願連結）', wqn.some((n) => /許願奶瓶/.test(txt(n)) && /NT\$650/.test(txt(n)) && /\?path=wish/.test(txt(n))), wqn.map(txt));
+    await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: wq.wish_id, quote_twd: 700 } });
+    check('許願改價不重複通知', (await pending()).filter((n) => n.kind === 'quoted' && !n.order_id).length === 0);
+    const wo = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '通知測試 缺貨的許願' } })).json.data;
+    await api('POST', '/api/v1/wishes/mark', { token: helper, body: { wish_id: wo.wish_id, status: '現場缺貨' } });
+    const won = (await pending()).filter((n) => n.kind === 'out_of_stock' && !n.order_id);
+    check('許願標「現場缺貨」→ 排缺貨通知', won.some((n) => /缺貨的許願/.test(txt(n))), won.map(txt));
+    await api('POST', '/api/v1/wishes/mark', { token: helper, body: { wish_id: wq.wish_id, status: '保留下團' } });
+    check('標成其他狀態（保留下團）不通知', (await pending()).filter((n) => n.kind === 'out_of_stock' && !n.order_id).length === 0);
+    }
+
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
     const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
     const shot = (await B('POST', '/api/v1/cart/add-image',

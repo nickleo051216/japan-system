@@ -4,6 +4,7 @@ const { get, post, ok } = require('../lib/http');
 const auth = require('../lib/auth');
 const audit = require('../lib/audit');
 const { STATUS, transition } = require('../lib/state');
+const customerNotify = require('../lib/customer-notify');
 const { uid, now } = require('../lib/ids');
 const { round2 } = require('../lib/money');
 const notify = require('../lib/notify');
@@ -240,6 +241,8 @@ post('/api/v1/orders/transition', async ({ actor, body }) => {
   const force = !!body.force;
   if (force) auth.requireCap(actor, 'override.blocked');
   const result = await transition(body.order_id, body.to, { actor: actor.line_user_id, reason: body.reason || null, force });
+  // v1.6：訂單變成「缺貨」就通知客人（店家會再聯絡補買、換貨或退款）。
+  if (body.to === STATUS.OUT_OF_STOCK && result.status === STATUS.OUT_OF_STOCK) await customerNotify.orderOutOfStock(result);
   return ok({ order_id: result.order_id, status: result.status });
 });
 
@@ -272,6 +275,7 @@ post('/api/v1/payments/reconcile', async ({ actor, body }) => {
   await db.run("UPDATE orders SET payment_status = '已核對', paid_at = ? WHERE order_id = ?", now(), order.order_id);
   await transition(order.order_id, STATUS.QUOTED, { actor: actor.line_user_id, reason: '收款認列' });
   await audit.record({ actor: actor.line_user_id, action: 'payment.reconcile', target: order.order_id, detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
+  await customerNotify.transferVerified({ lineUserId: order.line_user_id, orderId: order.order_id, amount });
   return ok({ order_id: order.order_id, status: STATUS.QUOTED, difference_twd: diff });
 });
 

@@ -313,6 +313,7 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | # | 變更 | 端點 |
 |---|---|---|
 | 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
+| 3 | 三種 LINE 通知：`quoted`（訂單／許願報價）、`transfer_verified`（手動核帳）、`out_of_stock`（訂單缺貨／許願現場缺貨）；連結 `?path=orders`、`?path=wish` | — |
 | 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
 
 ## 5.1 v1.5.2 變更（2026-11-19，後台改版配套）

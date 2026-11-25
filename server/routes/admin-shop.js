@@ -24,6 +24,7 @@ const drops = require('../lib/drops');
 const storage = require('../lib/storage');
 const config = require('../lib/config');
 const wishRule = require('../lib/wish');
+const customerNotify = require('../lib/customer-notify');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -428,7 +429,9 @@ post('/api/v1/wishes/quote', async ({ actor, body }) => {
     twd, body.item_name || null, body.item_name_ja || null, body.brand || null, w.wish_id);
   await audit.record({ actor: actor.line_user_id, action: 'wish.quote', target: w.wish_id,
     detail: { quote_twd: twd }, result: 'ok' });
-  return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id));
+  const quotedWish = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id);
+  await customerNotify.wishQuoted(quotedWish);
+  return ok(quotedWish);
 });
 
 post('/api/v1/wishes/mark', async ({ actor, body }) => {
@@ -440,7 +443,9 @@ post('/api/v1/wishes/mark', async ({ actor, body }) => {
   if (res.changes === 0) throw err('NOT_EDITABLE', '找不到這個許願，或客人已經下單了', 409);
   await audit.record({ actor: actor.line_user_id, action: 'wish.mark', target: body.wish_id,
     detail: { status: body.status }, result: 'ok' });
-  return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', body.wish_id));
+  const marked = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', body.wish_id);
+  if (body.status === '現場缺貨') await customerNotify.wishOutOfStock(marked);
+  return ok(marked);
 });
 
 // ---- 訂單報價 -------------------------------------------------------------
@@ -497,6 +502,11 @@ post('/api/v1/orders/quote', async ({ actor, body }) => {
     // 推到「已報價」時 state.transition 會再檢查一次沒有 0 元品項。
     if (advance) await transition(order.order_id, STATUS.QUOTED, { actor: actor.line_user_id, reason: '報價' });
   });
+  // v1.6：第一次報好價（待確認 → 已報價）就 LINE 通知客人。之後改價不再通知（同一張訂單只通知一次）。
+  if (advance) {
+    const quoted = await db.one('SELECT * FROM orders WHERE order_id = ?', order.order_id);
+    await customerNotify.orderQuoted(quoted, { itemCount: current.length, statementDaysRaw: await db.setting('statement_days', '') });
+  }
   await audit.record({ actor: actor.line_user_id, action: 'order.quote', target: order.order_id,
     detail: { items: planned.map((p) => ({ item_id: p.it.item_id, unit_price_twd: p.twd })), ship_fee_twd: shipFee, ship_fee_auto: manualFee === null },
     result: 'ok' });
@@ -659,6 +669,7 @@ post('/api/v1/statements/reconcile', async ({ actor, body }) => {
     detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
   // 業主確認單：對帳單付款完成就恢復喊單資格（還有別張沒付清的不算）。
   const shoutRestored = await drops.restoreIfPaidUp(s.line_user_id, actor.line_user_id);
+  await customerNotify.transferVerified({ lineUserId: s.line_user_id, statementId: s.statement_id, amount });
   return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff, shout_restored: shoutRestored });
 });
 // ---- 代客下單 ---------------------------------------------------------------
