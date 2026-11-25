@@ -70,6 +70,8 @@ const statementShape = (s) => ({
   total_amount: num(s.total_amount), payment_status: s.payment_status, payway: s.payway || null,
   last_five_matched: s.last_five_matched || null, created_at: s.created_at, paid_at: s.paid_at || null,
   invoice_no: s.invoice_no || null, invoice_at: s.invoice_at || null, v_account: s.v_account || null,
+  // v1.8：回報匯款時有沒有附截圖（截圖本身只有店家看得到）、回報時間
+  has_transfer_proof: !!s.transfer_proof, transfer_reported_at: s.transfer_reported_at || null,
 });
 
 /** 訂單附品項、狀態紀錄、出貨紀錄。只給這位客人自己的單。 */

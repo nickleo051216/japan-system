@@ -1478,6 +1478,213 @@ const login = async (id) =>
     await B('POST', '/api/v1/ship-requests/cancel', { body: { request_id: old.json.data.request_id } });
     }
 
+    {
+    section('v1.8 ① 許願預算：報價 ≤ 自動買、> 自動不要、中間的問你（022）');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const pl = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
+    const B2 = (m, u, o) => api(m, u, { token: buyer2, ...o });
+    await pending();
+    const badB = await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '預算 錯的', auto_buy_max: 2000, reject_above: 1000 } });
+    check('自動買上限比自動不要還高 → 400 BAD_BUDGET', badB.status === 400 && badB.json.error.code === 'BAD_BUDGET', badB.json);
+    const zeroB = await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '預算 零', auto_buy_max: 0 } });
+    check('預算要大於 0 → 400 BAD_BUDGET', zeroB.status === 400 && zeroB.json.error.code === 'BAD_BUDGET', zeroB.json);
+    const w = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '預算測試 木頭積木', public: true, auto_buy_max: 1000, reject_above: 2000 } })).json.data;
+    check('許願時設預算 → my_budget 回來，附一句規則', w.my_budget && w.my_budget.auto_buy_max === 1000 && w.my_budget.reject_above === 2000
+      && /報價 ≤ NT\$1,000 自動幫你買；超過 NT\$2,000 自動略過；中間的會問你/.test(w.my_budget.rule_text), w.my_budget);
+    await api('POST', '/api/v1/wishes/wall', { token: owner, body: { wish_id: w.wish_id, status: 'public' } });
+    const notVoted = await B2('POST', '/api/v1/wishes/budget', { body: { wish_id: w.wish_id, auto_buy_max: 500 } });
+    check('沒按 +1 不能設預算 → 409 NOT_VOTED', notVoted.status === 409 && notVoted.json.error.code === 'NOT_VOTED', notVoted.json);
+    const plus = (await B2('POST', '/api/v1/wishes/plus', { body: { wish_id: w.wish_id, auto_buy_max: 500, reject_above: 800 } })).json.data;
+    check('按 +1 時一起設預算', plus.voted && plus.my_budget && plus.my_budget.auto_buy_max === 500 && plus.my_budget.reject_above === 800, plus);
+    const onlyOne = (await B2('POST', '/api/v1/wishes/budget', { body: { wish_id: w.wish_id, auto_buy_max: 500, reject_above: 800 } })).json.data;
+    check('可以改預算（/wishes/budget）', onlyOne.my_budget.reject_above === 800, onlyOne);
+    const board2 = (await B2('GET', '/api/v1/wishes/board')).json.data.find((x) => x.wish_id === w.wish_id);
+    check('許願牆上看得到「我的預算」（只有自己的）', board2 && board2.my_budget && board2.my_budget.auto_buy_max === 500, board2);
+    const boardB = (await B('GET', '/api/v1/wishes/board')).json.data.find((x) => x.wish_id === w.wish_id);
+    check('許願的人在牆上看到的是自己的預算，不是別人的', boardB && boardB.my_budget.auto_buy_max === 1000, boardB && boardB.my_budget);
+    const al = (await api('GET', '/api/v1/wishes/admin-list?status=待處理', { token: owner })).json.data.find((x) => x.wish_id === w.wish_id);
+    check('店家看得到「幾個人設了預算、分布」，看不到是誰', al && al.budget.count === 2 && JSON.stringify(al.budget.auto_buy_max) === '[500,1000]'
+      && JSON.stringify(al.budget.reject_above) === '[800,2000]' && !JSON.stringify(al.budget).includes('U_buyer'), al && al.budget);
+    const alPk = (await api('GET', '/api/v1/wishes/admin-list?status=待處理', { token: packer })).json.data.find((x) => x.wish_id === w.wish_id);
+    check('包貨的人（看不到售價）也看不到預算', alPk && alPk.budget === null, alPk && alPk.budget);
+    const pv = (await api('GET', `/api/v1/wishes/budget-preview?wish_id=${w.wish_id}&quote_twd=900`, { token: owner })).json.data;
+    check('報價前試算 NT$900：1 人自動買（≤1000）、1 人略過（>800）', pv.auto_buy === 1 && pv.auto_reject === 1 && pv.pending === 0, pv);
+
+    const q = (await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: w.wish_id, quote_twd: 900 } })).json.data;
+    check('報價 → 回傳自動處理的人數', q.auto && q.auto.auto_buy === 1 && q.auto.auto_reject === 1, q.auto);
+    const cartB = (await B('GET', '/api/v1/cart/list')).json.data;
+    const auto = cartB.find((c) => c.ref === w.wish_id);
+    check('許願的人：預算內 → 自動放進購物車（已確認、數量 1、NT$900、預算內自動確認）', auto && auto.status === 'confirmed' && auto.qty === 1
+      && Number(auto.price_twd) === 900 && /預算內自動確認/.test(auto.note), auto);
+    const listB = (await B('GET', '/api/v1/wishes/decisions')).json.data.find((d) => d.wish_id === w.wish_id);
+    check('自動決定記下報價和預算快照（authorization_max）', listB && listB.decision === 'auto_buy' && listB.authorization_max === 1000
+      && listB.quote_twd === 900 && listB.decision_zh === '預算內自動確認' && listB.can_cancel === true, listB);
+    const n1 = await pending();
+    const nb = n1.filter((n) => n.kind === 'wish_auto' && n.line_user_id === 'U_buyer1');
+    const n2 = n1.filter((n) => n.kind === 'wish_auto' && n.line_user_id === 'U_buyer2');
+    check('通知許願的人「報價 NT$900，在你設的 NT$1,000 以內，已幫你保留」（附購物車連結）', nb.length === 1
+      && /報價 NT\$900，在你設的 NT\$1,000 以內/.test(pl(nb[0]).text) && pl(nb[0]).path === 'cart' && /付款前都可以取消/.test(pl(nb[0]).text), nb.map((n) => pl(n).text));
+    check('許願的人被自動處理 → 不再另外發一般的「報價好了」', !n1.some((n) => n.kind === 'quoted' && n.line_user_id === 'U_buyer1' && pl(n).wish_id === w.wish_id));
+    check('按 +1 的人：超過預算 → 自動略過並通知', n2.length === 1 && /超過你設的 NT\$800/.test(pl(n2[0]).text)
+      && !(await B2('GET', '/api/v1/cart/list')).json.data.some((c) => c.ref === w.wish_id), n2.map((n) => pl(n).text));
+    const inboxB = (await B('GET', '/api/v1/inbox/list?limit=5')).json.data.items.find((n) => n.kind === 'wish_auto');
+    check('站內通知中心看得到（標題「許願預算自動處理」，點了去購物車）', inboxB && inboxB.title === '許願預算自動處理' && inboxB.path === 'cart', inboxB);
+
+    const cx = await B('POST', '/api/v1/wishes/auto-cancel', { body: { wish_id: w.wish_id } });
+    check('付款前取消自動保留 → 購物車拿掉，許願回到「已報價」', cx.status === 200 && cx.json.data.my_decision.status === 'cancelled'
+      && !(await B('GET', '/api/v1/cart/list')).json.data.some((c) => c.ref === w.wish_id && c.status !== 'removed')
+      && (await B('GET', '/api/v1/wishes/list')).json.data.find((x) => x.wish_id === w.wish_id)?.wish_status === '已報價', cx.json);
+    const q2 = (await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: w.wish_id, quote_twd: 700 } })).json.data;
+    check('重新報價 NT$700：自動成立過的人不會成立第二筆；+1 的人 700 在 500～800 中間 → 等他決定', q2.auto.auto_buy === 0 && q2.auto.pending === 1
+      && !(await B('GET', '/api/v1/cart/list')).json.data.some((c) => c.ref === w.wish_id && c.status !== 'removed'), q2.auto);
+    const n3 = (await pending()).filter((n) => n.kind === 'wish_auto' && n.line_user_id === 'U_buyer2');
+    check('+1 的人收到「你按 +1 的許願有報價了，這次在中間」', n3.length === 1 && /這次在中間/.test(pl(n3[0]).text) && pl(n3[0]).path === 'wish', n3.map((n) => pl(n).text));
+    const bd = (await B2('GET', '/api/v1/wishes/board')).json.data.find((x) => x.wish_id === w.wish_id);
+    check('牆上 my_decision 顯示「等你決定」', bd && bd.my_decision && bd.my_decision.status === 'open' && bd.my_decision.can_decide === true, bd && bd.my_decision);
+    const acc = (await B2('POST', '/api/v1/wishes/decide', { body: { wish_id: w.wish_id, accept: true } })).json.data;
+    check('+1 的人按「要」→ 放進他的購物車（NT$700、數量 1）', acc.cart_item && Number(acc.cart_item.price_twd) === 700 && acc.cart_item.qty === 1
+      && acc.my_decision.status === 'accepted', acc);
+    const again = await B2('POST', '/api/v1/wishes/decide', { body: { wish_id: w.wish_id, accept: true } });
+    check('同一個報價不能決定兩次 → NOTHING_TO_DECIDE', again.status === 409 && again.json.error.code === 'NOTHING_TO_DECIDE', again.json);
+    await B2('POST', '/api/v1/wishes/plus', { body: { wish_id: w.wish_id, on: false } });
+    const al2 = (await api('GET', '/api/v1/wishes/admin-list?status=已報價', { token: owner })).json.data.find((x) => x.wish_id === w.wish_id);
+    check('取消 +1 → 從預算名單移除（只剩許願的人 1 個）', al2 && al2.budget.count === 1, al2 && al2.budget);
+    const clr = (await B('POST', '/api/v1/wishes/budget', { body: { wish_id: w.wish_id, auto_buy_max: null, reject_above: null } })).json.data;
+    check('兩個都送 null → 清掉預算', clr.my_budget === null, clr);
+    }
+
+    {
+    section('v1.8 ② 匯款自動對帳：提前結帳、回報＋截圖、銀行入帳配對、逾期提醒（022）');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const pl = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
+    const B2 = (m, u, o) => api(m, u, { token: buyer2, ...o });
+    const sql = async (q, args = []) => {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      try { return (await c.query(q, args)).rows; } finally { await c.end(); }
+    };
+    const quotedOrder = async (who, name, price) => {
+      const id = (await who('POST', '/api/v1/cart/add-text', { body: { name, qty: 1 } })).json.data.cart_id;
+      await who('POST', '/api/v1/cart/confirm', { body: { cart_ids: [id] } });
+      const o = (await who('POST', '/api/v1/orders/checkout', { body: { cart_ids: [id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+      const d = (await api('GET', `/api/v1/orders/detail?order_id=${o.order_id}`, { token: owner })).json.data;
+      await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o.order_id, items: d.items.map((i) => ({ item_id: i.item_id, unit_price_twd: price })) } });
+      return (await api('GET', `/api/v1/orders/detail?order_id=${o.order_id}`, { token: owner })).json.data;
+    };
+    // 先把兩位客人之前留下、還沒結算的單結掉，後面的金額才算得準。
+    await B('POST', '/api/v1/statements/early', {}); await B2('POST', '/api/v1/statements/early', {});
+    const none = await B('POST', '/api/v1/statements/early', {});
+    check('沒有可以結帳的單 → 409 NOTHING_TO_BILL', none.status === 409 && none.json.error.code === 'NOTHING_TO_BILL', none.json);
+    const oa = await quotedOrder(B, '對帳 A 浴巾', 1234);
+    const early = await B('POST', '/api/v1/statements/early', {});
+    const sa = early.json.data;
+    check('客人提前結帳 → 現在就開一張帳單（只包含已報價、還沒結算的單）', early.status === 200 && sa.order_ids.length === 1 && sa.order_ids[0] === oa.order_id
+      && sa.total_amount === Number(oa.total_twd) && sa.payment_status === '待付款', early.json);
+    check('提前結帳也會收到對帳單通知', (await pending()).some((n) => n.kind === 'statement' && n.statement_id === sa.statement_id));
+    const jpg = 'data:image/jpeg;base64,' + Buffer.from('fake-transfer-proof').toString('base64');
+    const badImg = await B('POST', '/api/v1/statements/report-transfer', { body: { statement_id: sa.statement_id, last5: '54321', screenshot: 'data:text/plain;base64,aGk=' } });
+    check('截圖格式不對 → BAD_IMAGE', badImg.status === 400 && badImg.json.error.code === 'BAD_IMAGE', badImg.json);
+    const rep = (await B('POST', '/api/v1/statements/report-transfer', { body: { statement_id: sa.statement_id, last5: '54321', screenshot: jpg } })).json.data;
+    check('回報匯款：末五碼＋截圖 → 待官方確認、有截圖', rep.payment_status === '待官方確認' && rep.has_transfer_proof === true && !!rep.transfer_reported_at, rep);
+    const adm = (await api('GET', '/api/v1/statements/admin-list', { token: owner })).json.data.find((x) => x.statement_id === sa.statement_id);
+    check('店主在對帳單列表看得到匯款截圖（簽名網址）', adm && typeof adm.transfer_proof === 'string' && adm.transfer_proof.length > 0, adm);
+    check('只有店主能輸入銀行入帳 → 小幫手 403', (await api('GET', '/api/v1/bank-credits/list', { token: helper })).status === 403);
+    const ok1 = await api('POST', '/api/v1/bank-credits/create', { token: owner, body: { ref_no: 'SMK-REF-001', amount_twd: sa.total_amount, last5: '54321', credited_at: new Date().toISOString() } });
+    check('銀行入帳：末五碼＋金額剛好對到一張 → 自動配對、帳單已核對', ok1.status === 200 && ok1.json.data.status === 'matched'
+      && ok1.json.data.statement.statement_id === sa.statement_id && ok1.json.data.statement.payment_status === '已核對', ok1.json);
+    const tv = (await pending()).filter((n) => n.kind === 'transfer_verified' && n.statement_id === sa.statement_id);
+    check('配對成功 → 客人收到「已確認收到您的付款」', tv.length === 1, tv.map((n) => pl(n).text));
+    check('底下的訂單一起變成已付款', (await api('GET', `/api/v1/orders/detail?order_id=${oa.order_id}`, { token: owner })).json.data.payment_status === '已核對');
+    const dup = await api('POST', '/api/v1/bank-credits/create', { token: owner, body: { ref_no: 'SMK-REF-001', amount_twd: 1, last5: '54321' } });
+    check('同一個參考號不能用兩次 → 409 DUPLICATE_REF', dup.status === 409 && dup.json.error.code === 'DUPLICATE_REF', dup.json);
+
+    // 兩張帳單金額一樣、末五碼也一樣 → 不自動核，列出來等店主挑
+    const ob = await quotedOrder(B, '對帳 B 圍兜', 555);
+    const oc = await quotedOrder(B2, '對帳 C 圍兜', 555);
+    const sb = (await B('POST', '/api/v1/statements/early', {})).json.data;
+    const sc = (await B2('POST', '/api/v1/statements/early', {})).json.data;
+    await B('POST', '/api/v1/statements/report-transfer', { body: { statement_id: sb.statement_id, last5: '22222' } });
+    await B2('POST', '/api/v1/statements/report-transfer', { body: { statement_id: sc.statement_id, last5: '22222' } });
+    check('準備：兩張帳單同金額', sb.total_amount === sc.total_amount && ob.total_twd === oc.total_twd, [sb.total_amount, sc.total_amount]);
+    const amb = (await api('POST', '/api/v1/bank-credits/create', { token: owner, body: { ref_no: 'SMK-REF-002', amount_twd: sb.total_amount, last5: '22222' } })).json.data;
+    check('對到好幾張 → 待人工確認，列出可能的帳單，不自動核帳', amb.status === 'needs_review' && amb.candidates.length === 2
+      && amb.candidates.every((c) => c.payment_status === '待官方確認'), amb);
+    const cf = await api('POST', '/api/v1/bank-credits/confirm', { token: owner, body: { credit_id: amb.credit_id, statement_id: sc.statement_id } });
+    check('店主挑一張按確認 → 那張變已核對，入帳標成店主確認', cf.status === 200 && cf.json.data.status === 'confirmed'
+      && cf.json.data.statement.statement_id === sc.statement_id && cf.json.data.statement.payment_status === '已核對', cf.json);
+    const cf2 = await api('POST', '/api/v1/bank-credits/confirm', { token: owner, body: { credit_id: amb.credit_id, statement_id: sb.statement_id } });
+    check('同一筆入帳不能用兩次（確認過就不能再確認）→ ALREADY_DECIDED', cf2.status === 409 && cf2.json.error.code === 'ALREADY_DECIDED', cf2.json);
+    const nf = (await api('POST', '/api/v1/bank-credits/create', { token: owner, body: { ref_no: 'SMK-REF-003', amount_twd: sb.total_amount + 1, last5: '22222' } })).json.data;
+    check('金額對不上 → 待人工確認，同末五碼的帳單列為可能', nf.status === 'needs_review' && nf.candidates.some((c) => c.statement_id === sb.statement_id), nf);
+    const diff = await api('POST', '/api/v1/bank-credits/confirm', { token: owner, body: { credit_id: nf.credit_id, statement_id: sb.statement_id } });
+    check('金額不同要店主明確同意差額 → AMOUNT_MISMATCH', diff.status === 409 && diff.json.error.code === 'AMOUNT_MISMATCH', diff.json);
+    const ign = (await api('POST', '/api/v1/bank-credits/ignore', { token: owner, body: { credit_id: nf.credit_id, note: '轉錯' } })).json.data;
+    check('不是貨款 → 標成不處理', ign.status === 'ignored', ign);
+    const lst = (await api('GET', '/api/v1/bank-credits/list', { token: owner })).json.data;
+    check('入帳列表：三筆、待人工確認 0 筆', lst.items.filter((c) => /^SMK-REF-/.test(c.ref_no)).length === 3 && lst.needs_review === 0, lst.needs_review);
+
+    // 逾期提醒：帳單開出超過付款期限（預設 2 天）還沒付 → 提醒一次
+    const od = await quotedOrder(B2, '對帳 D 逾期', 300);
+    const sd = (await B2('POST', '/api/v1/statements/early', {})).json.data;
+    await sql("UPDATE statements SET created_at = now() - interval '3 days' WHERE statement_id = $1", [sd.statement_id]);
+    await pending();
+    const r1 = (await api('POST', '/api/v1/statements/remind-overdue', { token: owner })).json.data;
+    const rem = (await pending()).filter((n) => n.kind === 'payment_reminder' && n.statement_id === sd.statement_id);
+    check('超過付款期限還沒付 → 發一則付款提醒（附對帳單連結）', r1.reminded >= 1 && rem.length === 1 && /付款提醒/.test(pl(rem[0]).text)
+      && /\?path=stmt/.test(pl(rem[0]).text) && pl(rem[0]).path === 'stmt', [r1, rem.map((n) => pl(n).text)]);
+    const r2 = (await api('POST', '/api/v1/statements/remind-overdue', { token: owner })).json.data;
+    check('同一張帳單不重複提醒', r2.reminded === 0 && !(await pending()).some((n) => n.kind === 'payment_reminder' && n.statement_id === sd.statement_id), r2);
+    check('只有店主能手動發提醒 → 小幫手 403', (await api('POST', '/api/v1/statements/remind-overdue', { token: helper })).status === 403);
+    check('準備好的單有扣到（避免空測）', !!od.order_id);
+    // 收尾：這段替 U_buyer1 開的帳單都核掉，後面的測試（例如綠界付清後恢復喊單資格）才不會被沒付的帳單卡住。
+    for (const st of (await B('GET', '/api/v1/statements/list')).json.data.statements.filter((x) => x.payment_status !== '已核對')) {
+      await api('POST', '/api/v1/statements/reconcile', { token: owner, body: { statement_id: st.statement_id, amount_twd: st.total_amount } });
+    }
+    await pending();
+    }
+
+    {
+    section('v1.8 ④ 結帳偏好：付款、寄送、發票、特殊備註（022；寄送地點跟出貨申請同一套）');
+    const p0 = (await B('GET', '/api/v1/me/checkout-prefs')).json.data;
+    check('還沒設 → 都是 null；電子發票沒串接 integration_status = not_connected', p0.payway === null && p0.invoice === null
+      && p0.integration_status === 'not_connected', p0);
+    const bc = await B('POST', '/api/v1/me/checkout-prefs', { body: { invoice: { type: 'carrier', carrier: 'AB12345' } } });
+    check('載具不是 / 開頭加 7 碼 → BAD_CARRIER', bc.status === 400 && bc.json.error.code === 'BAD_CARRIER', bc.json);
+    const bd = await B('POST', '/api/v1/me/checkout-prefs', { body: { invoice: { type: 'donate', donate_code: '12' } } });
+    check('捐贈碼不是 3～7 位數字 → BAD_DONATE_CODE', bd.status === 400 && bd.json.error.code === 'BAD_DONATE_CODE', bd.json);
+    const bt = await B('POST', '/api/v1/me/checkout-prefs', { body: { invoice: { type: 'tax', tax_id: '12345678' } } });
+    check('統編沒填公司名稱 → BAD_COMPANY', bt.status === 400 && bt.json.error.code === 'BAD_COMPANY', bt.json);
+    const bp = await B('POST', '/api/v1/me/checkout-prefs', { body: { payway: 'cash' } });
+    check('付款方式不在清單 → BAD_PAYWAY', bp.status === 400 && bp.json.error.code === 'BAD_PAYWAY', bp.json);
+    const t1 = (await B('POST', '/api/v1/me/checkout-prefs', { body: { invoice: { type: 'tax', tax_id: '12345678', company: '好好股份有限公司', carrier: '/ABC1234' } } })).json.data;
+    check('統編＋公司抬頭；沒用到的欄位（載具）不會存', t1.invoice.type === 'tax' && t1.invoice.company === '好好股份有限公司' && !('carrier' in t1.invoice), t1.invoice);
+    const t2 = (await B('POST', '/api/v1/me/checkout-prefs', { body: { invoice: { type: 'donate', donate_code: '168001' } } })).json.data;
+    check('切換成捐贈 → 統編和公司都清掉', JSON.stringify(t2.invoice) === JSON.stringify({ type: 'donate', donate_code: '168001' }), t2.invoice);
+    const ADDR = '台北市大安區仁愛路四段 1 號';
+    const t3 = (await B('POST', '/api/v1/me/checkout-prefs', { body: { payway: 'bank', pickup: { type: 'home', addr: ADDR }, note: '送禮請勿附價錢' } })).json.data;
+    check('付款方式、宅配地址、特殊備註一起存', t3.payway === 'bank' && t3.payway_zh === '匯款' && t3.pickup.type === 'home' && t3.pickup.addr === ADDR
+      && /宅配到府/.test(t3.pickup.text) && t3.note === '送禮請勿附價錢', t3);
+    check('宅配地址寫回會員資料（跟出貨申請、結帳同一份）', (await B('GET', '/api/v1/me/profile')).json.data.home_addr === ADDR);
+    const t4 = (await B('POST', '/api/v1/me/checkout-prefs', { body: { pickup: { type: 'cvs' } } })).json.data;
+    check('改回超商、不帶門市 → 用會員原本的預設門市', t4.pickup.type === 'cvs' && t4.pickup.from_default === true && t4.pickup.store_name === '板橋溪城店', t4.pickup);
+    const cid = (await B('POST', '/api/v1/cart/add-text', { body: { name: '偏好結帳 小襪子', qty: 1 } })).json.data.cart_id;
+    await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [cid] } });
+    const co = await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: [cid] } });
+    check('結帳沒帶取貨、發票、備註 → 照結帳偏好帶入', co.status === 200 && co.json.data.pickup === '全家 板橋溪城店'
+      && co.json.data.invoice === '捐贈發票 168001' && co.json.data.note === '送禮請勿附價錢', co.json);
+    const od = (await api('GET', `/api/v1/orders/detail?order_id=${co.json.data.order_id}`, { token: owner })).json.data;
+    check('店主在訂單明細看得到客人的偏好（含特殊備註）', od.customer_prefs && /送禮請勿附價錢/.test(od.customer_prefs.summary)
+      && /捐贈 168001/.test(od.customer_prefs.summary), od.customer_prefs);
+    const g = (await api('GET', '/api/v1/ship-groups/list', { token: packer })).json.data;
+    check('出貨單列表也帶客人的偏好（包貨時看得到備註）', g.filter((x) => x.nickname === od.nickname).every((x) => x.customer_prefs && x.customer_prefs.note === '送禮請勿附價錢'), g.slice(0, 2));
+    const other = (await api('GET', '/api/v1/me/checkout-prefs', { token: buyer2 })).json.data;
+    check('只有本人看得到自己的偏好（別的客人看到的是他自己的，空的）', other.note === null && other.invoice === null, other);
+    const cl = (await B('POST', '/api/v1/me/checkout-prefs', { body: { payway: null, invoice: null, note: null, pickup: null } })).json.data;
+    check('帶 null 清掉', cl.payway === null && cl.invoice === null && cl.note === null && cl.pickup === null, cl);
+    }
+
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
     const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
     const shot = (await B('POST', '/api/v1/cart/add-image',
@@ -2069,18 +2276,49 @@ const login = async (id) =>
     check('店主核准 → 已核准，收據上的品項單價記成成本（經手人是小幫手）', ap.status === 200 && ap.json.data.status === 'approved'
       && expAfter.length === expBefore + 1 && expAfter.some((e) => Number(e.unit_cost_jpy) === 1100 && e.created_by === 'U_helper1'), [ap.json, expAfter.slice(0, 2)]);
     check('核准過的不能再核准 → ILLEGAL_STATE', (await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'approve' } })).json.error?.code === 'ILLEGAL_STATE');
+    const costOf = async (claimId) => (await api('GET', '/api/v1/costs/list', { token: owner })).json.data.items.filter((r) => r.source_id === claimId);
+    const cost1 = await costOf(c1.claim_id);
+    check('v1.8 營運成本表：請款單核准 → 自動多一筆「未付」成本（日幣、金額＝請款日幣合計）', cost1.length === 1 && cost1[0].status === 'unpaid'
+      && cost1[0].currency === 'JPY' && cost1[0].amount === Number(ap.json.data.total_jpy) && cost1[0].source === 'helper_claim' && cost1[0].editable === false, cost1);
     const pd = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'paid' } });
     check('付錢給小幫手後按「已付款」', pd.status === 200 && pd.json.data.status === 'paid' && !!pd.json.data.paid_at
       && (await api('GET', `/api/v1/procurement/expenses?proc_id=${mineRow.proc_id}`, { token: owner })).json.data.length === expBefore + 1, pd.json);
+    const cost2 = await costOf(c1.claim_id);
+    check('v1.8 標成已付款 → 同一筆改成「已付」，不會多一筆', cost2.length === 1 && cost2[0].status === 'paid' && !!cost2[0].paid_at, cost2);
     const up4 = (await H('POST', '/api/v1/helper/receipts/upload', { body: { data: jpg } })).json.data;
     const c2 = (await H('POST', '/api/v1/helper/claims/create', { body: { receipts: [{ receipt_id: up4.receipt_id, amount_jpy: 99999 }] } })).json.data;
     const rj = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c2.claim_id, action: 'reject', note: '金額多打一個 9' } });
     check('店主退回 → 收據放回去，小幫手改好金額可以重新送', rj.json.data?.status === 'rejected'
       && (await H('POST', '/api/v1/helper/claims/create', { body: { receipts: [{ receipt_id: up4.receipt_id, amount_jpy: 9999 }] } })).json.data?.total_jpy === 9999, rj.json);
+    check('v1.8 退回的請款單不會出現在成本表', (await costOf(c2.claim_id)).length === 0);
     const ml2 = (await H('GET', `/api/v1/helper/my-list?batch=${encodeURIComponent(pick.batch)}`)).json.data;
     check('採買清單上方顯示還沒拿到錢的請款單', ml2.summary.unpaid_claims === 1, ml2.summary);
     const ha = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data;
     check('稽核：送出請款、核准、退回、已付款都有紀錄', ha.filter((l) => l.action === 'helper.claim_decide').length >= 3 && ha.some((l) => l.action === 'helper.claim_create'));
+    }
+
+    {
+    section('v1.8 ③ 營運成本表：只有店主看得到、三種幣別分開加總（022）');
+    check('小幫手看不到成本表 → 403', (await api('GET', '/api/v1/costs/list', { token: helper })).status === 403);
+    check('包貨的人看不到成本表 → 403', (await api('GET', '/api/v1/costs/list', { token: packer })).status === 403);
+    const badCur = await api('POST', '/api/v1/costs/create', { token: owner, body: { spent_on: '2026-11-20', category: '包材', currency: 'USD', amount: 10 } });
+    check('幣別只能是 JPY／KRW／TWD → BAD_CURRENCY', badCur.status === 400 && badCur.json.error.code === 'BAD_CURRENCY', badCur.json);
+    const k1 = (await api('POST', '/api/v1/costs/create', { token: owner, body: { spent_on: '2026-11-20', category: '韓國線費用', currency: 'KRW', amount: 50000, payee: '東大門', paid: true } })).json.data;
+    const t1 = (await api('POST', '/api/v1/costs/create', { token: owner, body: { spent_on: '2026-11-21', category: '包材', currency: 'TWD', amount: 320 } })).json.data;
+    check('手動記一筆（韓幣已付、台幣未付）', k1.currency === 'KRW' && k1.status === 'paid' && t1.currency === 'TWD' && t1.status === 'unpaid' && k1.editable, [k1, t1]);
+    const l = (await api('GET', '/api/v1/costs/list?from=2026-11-01&to=2026-11-30', { token: owner })).json.data;
+    check('分幣別加總：韓幣 50,000、台幣 320，各自算，不混在日幣裡', l.totals.KRW.total === 50000 && l.totals.KRW.paid === 50000
+      && l.totals.TWD.total === 320 && l.totals.TWD.unpaid === 320 && l.totals.JPY.total >= 0
+      && !Object.values(l.totals).some((t) => t.total === 50000 + 320), l.totals);
+    const claimRow = l.items.find((r) => r.source === 'helper_claim');
+    if (claimRow) {
+      const fc = await api('POST', '/api/v1/costs/update', { token: owner, body: { cost_id: claimRow.cost_id, amount: 1 } });
+      check('請款單來的那筆不能在成本表改 → FROM_CLAIM', fc.status === 409 && fc.json.error.code === 'FROM_CLAIM', fc.json);
+    }
+    const up = (await api('POST', '/api/v1/costs/update', { token: owner, body: { cost_id: t1.cost_id, paid: true, note: '月底一起付' } })).json.data;
+    check('手動那筆可以改成已付、加備註', up.status === 'paid' && up.note === '月底一起付', up);
+    const rm = await api('POST', '/api/v1/costs/remove', { token: owner, body: { cost_id: k1.cost_id } });
+    check('手動那筆可以刪', rm.status === 200 && !(await api('GET', '/api/v1/costs/list', { token: owner })).json.data.items.some((r) => r.cost_id === k1.cost_id));
     }
 
     {

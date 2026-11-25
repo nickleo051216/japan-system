@@ -5,6 +5,7 @@ const auth = require('../lib/auth');
 const audit = require('../lib/audit');
 const { STATUS, transition } = require('../lib/state');
 const customerNotify = require('../lib/customer-notify');
+const checkoutPrefs = require('../lib/checkout-prefs');
 const { uid, now } = require('../lib/ids');
 const { round2 } = require('../lib/money');
 const notify = require('../lib/notify');
@@ -79,6 +80,7 @@ get('/api/v1/orders/detail', async ({ actor, query }) => {
   if (!order) throw err('ORDER_NOT_FOUND', '查無此訂單', 404);
   if (actor.role === 'buyer' && order.line_user_id !== actor.line_user_id) throw err('FORBIDDEN', '權限不足', 403);
   if (actor.role === 'buyer') return ok(await buyerShape.orderShape(order));
+  const memberRow = await db.one('SELECT * FROM members WHERE line_user_id = ?', order.line_user_id);
   const data = {
     ...order,
     paid: !!order.paid,
@@ -88,6 +90,8 @@ get('/api/v1/orders/detail', async ({ actor, query }) => {
     shipments: await db.all('SELECT * FROM shipments WHERE order_id = ?', order.order_id),
     children: await db.all('SELECT order_id, status, total_twd FROM orders WHERE parent_order_id = ?', order.order_id),
     status_log: await db.all('SELECT * FROM order_status_log WHERE order_id = ? ORDER BY ts', order.order_id),
+    // v1.8：這位客人的結帳偏好（付款方式、取貨方式、發票、特殊備註）；沒設是 null。
+    customer_prefs: checkoutPrefs.forOwner(memberRow),
   };
   return ok(auth.redact(actor, data));
 });

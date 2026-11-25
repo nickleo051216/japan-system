@@ -25,6 +25,7 @@ const storage = require('../lib/storage');
 const config = require('../lib/config');
 const wishRule = require('../lib/wish');
 const customerNotify = require('../lib/customer-notify');
+const wishBudget = require('../lib/wish-budget');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -326,8 +327,12 @@ get('/api/v1/wishes/admin-list', async ({ actor, query }) => {
       WHERE (?::text IS NOT NULL AND w.wall_status = ?)
          OR (?::text IS NULL AND (? = '全部' OR w.wish_status = ?))
       ORDER BY votes DESC, w.wished_at`, wall, wall, wall, status, status);
+  const budgets = await wishBudget.summaryMany(rows.map((w) => w.wish_id));
   const shaped = rows.map((w) => ({ ...w, quote_twd: num(w.quote_twd), votes: Number(w.votes),
-    unreadable: wishRule.isUnreadable(w) }));
+    unreadable: wishRule.isUnreadable(w),
+    // v1.8：幾個人設了預算、數字的分布（不給是誰）
+    // 預算是金額資訊：看不到售價的人（包貨）也不給。
+    budget: auth.can(actor, 'order.read.price') ? (budgets.get(w.wish_id) || { count: 0, auto_buy_max: [], reject_above: [] }) : null }));
   return ok(auth.redact(actor, await storage.resolve(shaped, 'picture')));
 });
 
@@ -427,11 +432,28 @@ post('/api/v1/wishes/quote', async ({ actor, body }) => {
             item_name = coalesce(?, item_name), item_name_ja = coalesce(?, item_name_ja), brand = coalesce(?, brand)
       WHERE wish_id = ?`,
     twd, body.item_name || null, body.item_name_ja || null, body.brand || null, w.wish_id);
+  // v1.8：照每個人設的預算各自判斷（自動放進購物車／自動略過／等他決定），並排通知。
+  const auto = await wishBudget.onQuote(w.wish_id, actor);
   await audit.record({ actor: actor.line_user_id, action: 'wish.quote', target: w.wish_id,
-    detail: { quote_twd: twd }, result: 'ok' });
+    detail: { quote_twd: twd, auto: auto.counts || {} }, result: 'ok' });
   const quotedWish = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id);
-  await customerNotify.wishQuoted(quotedWish);
-  return ok(quotedWish);
+  // 許願的人被自動處理了，就只發那一則（「已幫你保留」或「先幫你略過」），不再發一般的「報價好了」。
+  if (!auto.owner_auto) await customerNotify.wishQuoted(quotedWish);
+  return ok({ ...quotedWish, quote_twd: num(quotedWish.quote_twd),
+    auto: { auto_buy: 0, auto_reject: 0, pending: 0, ...(auto.counts || {}) } });
+});
+
+/** 報價前試算：報這個價會自動幫幾個人放進購物車、略過幾個、要問幾個（不給是誰）。 */
+get('/api/v1/wishes/budget-preview', async ({ actor, query }) => {
+  auth.requireCap(actor, 'order.write');
+  const w = await db.one('SELECT wish_id FROM wishlist WHERE wish_id = ?', String(query.wish_id ?? ''));
+  if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+  const jpy = num(query.jpy_taxed);
+  let twd = num(query.quote_twd);
+  if (twd === null && jpy !== null) twd = await price.twdOf(jpy);
+  if (!(twd > 0)) throw err('BAD_PRICE', '請填日幣金額或台幣售價');
+  return ok({ wish_id: w.wish_id, quote_twd: twd, ...(await wishBudget.preview(w.wish_id, twd)),
+    budget: await wishBudget.summary(w.wish_id) });
 });
 
 post('/api/v1/wishes/mark', async ({ actor, body }) => {
@@ -476,7 +498,9 @@ get('/api/v1/wishes/ranking', async ({ actor, query }) => {
       WHERE ${filter}
         ${q ? 'AND (w.item_name ILIKE ? OR w.brand ILIKE ? OR w.item_name_ja ILIKE ? OR m.nickname ILIKE ? OR m.member_no ILIKE ?)' : ''}
       ORDER BY votes DESC, w.wished_at LIMIT 200`, ...(q ? [like, like, like, like, like] : []));
+  const budgets = await wishBudget.summaryMany(rows.map((w) => w.wish_id));
   const shaped = rows.map((w, i) => ({
+    budget: auth.can(actor, 'order.read.price') ? (budgets.get(w.wish_id) || { count: 0, auto_buy_max: [], reject_above: [] }) : null,
     rank: i + 1, wish_id: w.wish_id, item_name: w.item_name, brand: w.brand || null, picture: w.picture || null,
     nickname: w.nickname, member_no: w.member_no || null, quantity: w.quantity, note: w.note || '',
     wants: Number(w.votes) + 1, votes: Number(w.votes), wall_status: w.wall_status,
@@ -597,7 +621,8 @@ get('/api/v1/statements/admin-list', async ({ actor, query }) => {
        FROM statements s JOIN members m ON m.line_user_id = s.line_user_id
       WHERE (?::text IS NULL OR s.payment_status = ?) ORDER BY s.created_at DESC LIMIT 500`,
     query.status || null, query.status || null);
-  return ok(rows.map((s) => ({ ...s, total_amount: num(s.total_amount) })));
+  // v1.8：客人回報匯款附的截圖（私有 Storage），換成 15 分鐘的簽名網址。
+  return ok(await storage.resolve(rows.map((s) => ({ ...s, total_amount: num(s.total_amount), transfer_proof: s.transfer_proof || null })), 'transfer_proof'));
 });
 
 /**
@@ -684,7 +709,10 @@ async function runAutoStatements(req) {
   const today = statementDays.taipeiToday();
   const [days, autoMode, last] = await Promise.all([
     db.setting('statement_days', ''), db.setting('statement_auto', ''), db.setting('statements_auto_last', '')]);
-  const base = { date: today.ymd, statement_days: days || statementDays.DEFAULT };
+  // 逾期提醒每天都跑（跟今天是不是結算日無關）；提醒失敗不擋結算。
+  let reminded = 0;
+  try { reminded = await remindOverdue(); } catch (e) { console.error('[cron] 逾期提醒失敗：', e.message); }
+  const base = { date: today.ymd, statement_days: days || statementDays.DEFAULT, reminded };
   if (autoMode === 'off') return { ...base, ran: false, reason: '店主關掉了自動結算' };
   if (!statementDays.isDue(days)) return { ...base, ran: false, reason: '今天不是結算日', next: statementDays.nextDue(days) };
   if (last === today.ymd) return { ...base, ran: false, reason: '今天已經結算過了' };
@@ -768,29 +796,76 @@ post('/api/v1/statements/reconcile', async ({ actor, body }) => {
   auth.requireCap(actor, 'payment.reconcile');
   const s = await db.one('SELECT * FROM statements WHERE statement_id = ?', String(body.statement_id ?? ''));
   if (!s) throw err('STATEMENT_NOT_FOUND', '找不到這張對帳單', 404);
+  return ok(await reconcileStatement(s, { amount: body.amount_twd, by: actor.line_user_id, method: body.method,
+    last5: body.last5, acceptDifference: !!body.accept_difference }));
+});
+
+/**
+ * 核帳本體：手動核帳（/statements/reconcile）和銀行入帳配對（/bank-credits，v1.8）共用。
+ * 對帳單與底下每張訂單一起標成已核對、記一筆 payments、恢復喊單資格、發「收到款項」通知。
+ * extra() 會在同一筆交易裡執行（銀行入帳要把入帳紀錄一起標成已配對，兩件事不能只成功一半）。
+ */
+async function reconcileStatement(s, { amount, by, method = 'transfer', last5 = null, acceptDifference = false, auditExtra = {}, extra = null }) {
   if (s.payment_status === '已核對') throw err('ALREADY_PAID', '這張對帳單已經核對過了', 409);
-  const amount = Number(body.amount_twd);
+  amount = Number(amount);
   if (!(amount > 0)) throw err('BAD_AMOUNT', '金額必須大於 0');
   const diff = round(amount - Number(s.total_amount));
-  if (Math.abs(diff) > 0.01 && !body.accept_difference) {
+  if (Math.abs(diff) > 0.01 && !acceptDifference) {
     throw err('AMOUNT_MISMATCH', `金額與對帳單相差 NT$${diff}，請確認後再認列`, 409);
   }
   await db.tx(async () => {
+    const res = await db.run("UPDATE statements SET payment_status = '已核對', paid_at = ? WHERE statement_id = ? AND payment_status <> '已核對'", now(), s.statement_id);
+    if (!res.changes) throw err('ALREADY_PAID', '這張對帳單剛剛已經核對過了', 409);
     await db.run(
       `INSERT INTO payments (payment_id, statement_id, amount_twd, method, last5, received_at, reconciled_by)
        VALUES (?,?,?,?,?,?,?)`,
-      uid('pay'), s.statement_id, amount, body.method || 'transfer',
-      body.last5 || s.last_five_matched || null, now(), actor.line_user_id);
-    await db.run("UPDATE statements SET payment_status = '已核對', paid_at = ? WHERE statement_id = ?", now(), s.statement_id);
+      uid('pay'), s.statement_id, amount, method || 'transfer',
+      last5 || s.last_five_matched || null, now(), by);
     // orders.paid 是生成欄位，寫 payment_status 就好。
     await db.run("UPDATE orders SET payment_status = '已核對', paid_at = ? WHERE statement_id = ?", now(), s.statement_id);
+    if (extra) await extra();
   });
-  await audit.record({ actor: actor.line_user_id, action: 'statement.reconcile', target: s.statement_id,
-    detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
+  await audit.record({ actor: by, action: 'statement.reconcile', target: s.statement_id,
+    detail: { amount, diff, ...auditExtra }, result: diff ? 'warn' : 'ok' });
   // 業主確認單：對帳單付款完成就恢復喊單資格（還有別張沒付清的不算）。
-  const shoutRestored = await drops.restoreIfPaidUp(s.line_user_id, actor.line_user_id);
+  const shoutRestored = await drops.restoreIfPaidUp(s.line_user_id, by);
   await customerNotify.transferVerified({ lineUserId: s.line_user_id, statementId: s.statement_id, amount });
-  return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff, shout_restored: shoutRestored });
+  return { statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff, shout_restored: shoutRestored };
+}
+
+/**
+ * 逾期提醒（v1.8）：對帳單開出超過付款期限天數（settings.payment_deadline_days，預設 2）還是「待付款」，
+ * 發一次 LINE 提醒（payment_reminder）。每張帳單只發一次（022 的唯一索引）。
+ * 客人已經回報匯款（待官方確認）的不提醒 —— 他付了，只是店家還沒核。
+ * 每天的自動結算排程會順便跑；店主也可以在後台按。
+ */
+async function remindOverdue() {
+  const days = parseInt(await db.setting('payment_deadline_days', '2'), 10) || 2;
+  const rows = await db.all(
+    `SELECT s.* FROM statements s
+      WHERE s.payment_status = '待付款' AND s.created_at < now() - (? || ' days')::interval
+        AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.kind = 'payment_reminder' AND n.statement_id = s.statement_id)
+      ORDER BY s.created_at LIMIT 200`, String(days));
+  let reminded = 0;
+  for (const s of rows) {
+    const due = new Date(new Date(s.created_at).getTime() + days * 86400e3);
+    const text = `⏰ 付款提醒\n\n對帳單 ${s.statement_id} 合計 NT$${Math.round(Number(s.total_amount)).toLocaleString('en-US')}，`
+      + `付款期限 ${customerNotify.mdOf(due.toISOString())} 已經過了。\n已經付了的話可以忽略這則，或到對帳單回報匯款末五碼 🙏\n\n`
+      + `查看對帳單 👉\n${customerNotify.link('stmt')}`;
+    try {
+      if (await notify.queue({ kind: 'payment_reminder', lineUserId: s.line_user_id, statementId: s.statement_id,
+        payload: { statement_id: s.statement_id, total_amount: num(s.total_amount), path: 'stmt', text } })) reminded++;
+    } catch (e) { console.warn('[remind] 提醒沒排進佇列：', s.statement_id, e.code || '', e.message); }
+  }
+  if (reminded) notify.poke();
+  return reminded;
+}
+
+post('/api/v1/statements/remind-overdue', async ({ actor }) => {
+  auth.requireCap(actor, 'payment.reconcile');
+  const reminded = await remindOverdue();
+  await audit.record({ actor: actor.line_user_id, action: 'statements.remind', detail: { reminded }, result: 'ok' });
+  return ok({ reminded });
 });
 // ---- 代客下單 ---------------------------------------------------------------
 //
@@ -890,4 +965,4 @@ post('/api/v1/orders/create', async ({ actor, body }) => {
 });
 
 
-module.exports = { autoStatementStatus, createBroadcast, signedShape };
+module.exports = { autoStatementStatus, createBroadcast, signedShape, generateStatements, reconcileStatement, remindOverdue };

@@ -33,6 +33,7 @@ const { round2 } = require('../lib/money');
 const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
 const pk = require('../lib/pickup');
+const checkoutPrefs = require('../lib/checkout-prefs');
 const { bget, bpost, err, num } = require('./buyer');
 const { shipOrder } = require('./orders');
 
@@ -417,13 +418,15 @@ post('/api/v1/ship-requests/reject', async ({ actor, body }) => {
 get('/api/v1/ship-groups/list', async ({ actor, query }) => {
   auth.requireCap(actor, 'order.read');
   const rows = await db.all(
-    `SELECT g.*, m.nickname, m.member_no FROM ship_groups g JOIN members m ON m.line_user_id = g.line_user_id
+    `SELECT g.*, m.nickname, m.member_no, (to_jsonb(m) -> 'checkout_prefs') AS checkout_prefs, m.cvs_brand, m.cvs_store_id, m.cvs_store_name, m.cvs_addr, m.home_addr
+       FROM ship_groups g JOIN members m ON m.line_user_id = g.line_user_id
       WHERE g.status <> '已取消' ORDER BY g.created_at DESC LIMIT 200`);
   const out = [];
   for (const g of rows) {
     const shaped = await groupShape(g);
     if (query.status && shaped.status !== query.status) continue;
-    out.push({ ...shaped, nickname: g.nickname, member_no: g.member_no || null });
+    // v1.8：客人的結帳偏好（例如「送禮請勿附價錢」），包貨時看得到。
+    out.push({ ...shaped, nickname: g.nickname, member_no: g.member_no || null, customer_prefs: checkoutPrefs.forOwner(g) });
   }
   return ok(auth.redact(actor, out));
 });

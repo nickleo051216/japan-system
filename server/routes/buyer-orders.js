@@ -14,6 +14,8 @@ const { currentBatch } = require('../lib/batch');
 const { feeFor, HOME_PICKUP } = require('../lib/shipfee');
 const { ok } = require('../lib/http');
 const { now, uid, nextOrderId } = require('../lib/ids');
+const storage = require('../lib/storage');
+const checkoutPrefs = require('../lib/checkout-prefs');
 const { orderShape, statementShape, bget, bpost, err, num, int } = require('./buyer');
 
 async function myOrder(orderId, user) {
@@ -27,11 +29,17 @@ async function myOrder(orderId, user) {
 
 function invoiceText(inv) {
   const type = String((inv && inv.type) || 'carrier');
-  if (type === 'donate') return '捐贈發票';
+  if (type === 'donate') {
+    // v1.8：可以帶捐贈碼（3～7 位數字）
+    const code = inv && inv.donate_code ? String(inv.donate_code) : '';
+    if (code && !/^\d{3,7}$/.test(code)) throw err('BAD_DONATE_CODE', '捐贈碼是 3～7 位數字');
+    return code ? `捐贈發票 ${code}` : '捐贈發票';
+  }
   if (type === 'tax') {
     const id = String((inv && inv.tax_id) || '');
     if (!/^\d{8}$/.test(id)) throw err('BAD_TAX_ID', '統一編號必須是 8 碼數字');
-    return `統編 ${id}`;
+    const company = inv && inv.company ? String(inv.company).trim().slice(0, 60) : '';
+    return company ? `統編 ${id} ${company}` : `統編 ${id}`;
   }
   if (type !== 'carrier') throw err('BAD_INVOICE', '發票類型不正確');
   const carrier = String((inv && inv.carrier) || '');
@@ -43,9 +51,11 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
   const ids = Array.isArray(body.cart_ids) ? body.cart_ids.map(String) : [];
   if (!ids.length) throw err('EMPTY_CART', '購物車是空的');
 
-  const pickupType = String((body.pickup && body.pickup.type) || '');
+  // v1.8：沒帶取貨方式、發票、備註的，用客人存的結帳偏好補（/me/checkout-prefs）。
+  const filled = checkoutPrefs.fill(me, body);
+  const pickupType = String((filled.pickup && filled.pickup.type) || '');
   if (!['cvs', 'home'].includes(pickupType)) throw err('BAD_PICKUP', '請選擇取貨方式');
-  const invoice = invoiceText(body.invoice);
+  const invoice = invoiceText(filled.invoice);
 
   const items = await db.all(
     `SELECT * FROM cart_items WHERE line_user_id = ? AND cart_id = ANY(?::text[])
@@ -72,7 +82,7 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
                            ship_fee_twd, pickup, pickup_addr, invoice, note, created_at)
        VALUES (?,?,?,'待確認','待付款',?,?,?,?,?,?,?)`,
       id, me.line_user_id, batch, subtotal + fee, fee,
-      pickup, pickupAddr, invoice, body.note || null, now());
+      pickup, pickupAddr, invoice, filled.note || null, now());
     for (const i of items) {
       // 尺寸（012）有選才寫，正式庫還沒跑 012 時結帳照常。
       const sized = i.size !== undefined && i.size !== null;
@@ -182,13 +192,46 @@ bget('/api/v1/statements/list', async ({ me }) => {
   });
 });
 
+// ---- v1.8 提前結帳 --------------------------------------------------------
+//
+// 客人不想等月結：把自己「已報價以上、還沒進對帳單、還沒付」的訂單，現在就開成一張對帳單。
+// 跟店主按「結算」、每月自動結算走同一段（generateStatements）：同一把鎖、同一套挑單規則，
+// 不會跟排程撞在一起結兩次。開出來一樣會收到「對帳單通知」。
+bpost('/api/v1/statements/early', async ({ me }) => {
+  const created = await require('./admin-shop').generateStatements(me.line_user_id, me.line_user_id);
+  if (!created.length) throw err('NOTHING_TO_BILL', '目前沒有可以結帳的訂單（要店家報好價的訂單才能結帳）', 409);
+  await require('../lib/audit').record({ actor: me.line_user_id, action: 'statements.early', target: created[0].statement_id,
+    detail: { order_count: created[0].order_count, total_amount: created[0].total_amount }, result: 'ok' });
+  const s = await db.one('SELECT * FROM statements WHERE statement_id = ?', created[0].statement_id);
+  const ids = await db.all('SELECT order_id FROM orders WHERE statement_id = ? ORDER BY order_id', s.statement_id);
+  return ok(statementShape({ ...s, order_ids: ids.map((o) => o.order_id) }));
+});
+
 // ---- 25 回報末五碼 ---------------------------------------------------------
+
+const PROOF_EXT = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const PROOF_MAX = 3 * 1024 * 1024;
 
 bpost('/api/v1/statements/report-transfer', async ({ me, body }) => {
   const s = await myStatement(String(body.statement_id ?? ''), me.line_user_id);
   const last5 = String(body.last5 ?? '');
   if (!/^\d{5}$/.test(last5)) throw err('BAD_LAST5', '請填轉帳帳號末五碼（5 碼數字）');
   if (s.payment_status === '已核對') throw err('ALREADY_PAID', '這張對帳單已經付清了', 409);
+  // v1.8 選填：匯款截圖（data URL）。存私有 Storage，只有店家看得到。
+  let proof = null;
+  if (body.screenshot) {
+    const m = /^data:(image\/[a-z]+);base64,([A-Za-z0-9+/=]+)$/i.exec(String(body.screenshot));
+    const ext = m && PROOF_EXT[m[1].toLowerCase()];
+    if (!ext) throw err('BAD_IMAGE', '截圖格式不對，請選 JPG、PNG 或 WebP');
+    const buf = Buffer.from(m[2], 'base64');
+    if (!buf.length || buf.length > PROOF_MAX) throw err('BAD_IMAGE', '截圖太大（上限 3 MB）');
+    try {
+      proof = await storage.put(`transfer/${s.statement_id}-${Date.now()}.${ext}`, buf, m[1]);
+    } catch (e) {
+      console.error('[buyer] 匯款截圖上傳失敗：', e.message);
+      throw Object.assign(new Error('截圖上傳失敗，請再試一次'), { code: 'UPLOAD_FAILED', status: 503 });
+    }
+  }
   await db.tx(async () => {
     await db.run(
       `UPDATE statements SET payment_status = '待官方確認', payway = 'bank', last_five_matched = ?
@@ -199,6 +242,13 @@ bpost('/api/v1/statements/report-transfer', async ({ me, body }) => {
        VALUES (?,?,?,'transfer',?,?)`,
       uid('PAY'), s.statement_id, num(s.total_amount), last5, now());
   });
+  try {
+    await db.run('UPDATE statements SET transfer_reported_at = ?, transfer_proof = coalesce(?, transfer_proof) WHERE statement_id = ?',
+      now(), proof, s.statement_id);
+  } catch (e) {
+    if (e.code !== '42703') throw e;   // 022 還沒跑：截圖先不存，回報本身照常
+    if (proof) console.warn('[buyer] 022 還沒跑，匯款截圖沒有記到對帳單上：', proof);
+  }
   return ok(statementShape(await db.one('SELECT * FROM statements WHERE statement_id = ?', s.statement_id)));
 });
 

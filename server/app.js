@@ -65,6 +65,10 @@ function boot() {
   require('./routes/admin-config');
   // 綠界：付款結果回調、後台金流設定。
   require('./routes/ecpay');
+  // v1.8（022）：銀行入帳自動對帳、營運成本表、結帳偏好。
+  require('./routes/bank-credits');
+  require('./routes/costs');
+  require('./routes/checkout-prefs');
   booted = true;
   return true;
 }

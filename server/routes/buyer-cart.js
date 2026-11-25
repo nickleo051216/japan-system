@@ -16,6 +16,7 @@ const { now, uid } = require('../lib/ids');
 const { READABLE_SQL, PHOTO_PLACEHOLDER } = require('../lib/wish');
 const audit = require('../lib/audit');
 const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
+const budget = require('../lib/wish-budget');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
 const IMAGE_NAME = /^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$/i;
@@ -301,12 +302,23 @@ const wishShape = (w) => ({
   // v1.6：店家寫的尋找進度（018），例如「大阪店問過了，下週補貨」；沒寫是 null
   progress_note: w.progress_note || null, progress_at: w.progress_at || null,
 });
-/** 照片是私有 bucket 的參照，回給畫面前換成 15 分鐘的簽名網址。 */
-const wishesOut = async (rows) => storage.resolve(rows.map(wishShape), 'picture');
+/** 照片是私有 bucket 的參照，回給畫面前換成 15 分鐘的簽名網址。
+ *  user 有帶的話，每一則多 my_budget（我的預算，v1.8）和 my_decision（我最新一次的自動決定）。 */
+const wishesOut = async (rows, user = null) => {
+  const out = rows.map(wishShape);
+  if (user) {
+    const { budgets, decisions } = await budget.mineMany(out.map((w) => w.wish_id), user);
+    for (const w of out) {
+      w.my_budget = budget.shape(budgets.get(w.wish_id));
+      w.my_decision = budget.decisionShape(decisions.get(w.wish_id));
+    }
+  }
+  return storage.resolve(out, 'picture');
+};
 
 const WISH_COLS = `w.*, (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes`;
-const oneWish = async (wishId) =>
-  (await wishesOut([await db.one(`SELECT ${WISH_COLS} FROM wishlist w WHERE w.wish_id = ?`, wishId)]))[0];
+const oneWish = async (wishId, user = null) =>
+  (await wishesOut([await db.one(`SELECT ${WISH_COLS} FROM wishlist w WHERE w.wish_id = ?`, wishId)], user))[0];
 
 async function myWish(wishId, user) {
   const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ? AND line_user_id = ?', wishId, user);
@@ -317,7 +329,7 @@ async function myWish(wishId, user) {
 bget('/api/v1/wishes/list', async ({ me }) => ok(await wishesOut(await db.all(
   `SELECT ${WISH_COLS} FROM wishlist w
     WHERE w.line_user_id = ? AND w.wish_status <> '已下單' ORDER BY w.wished_at DESC`,
-  me.line_user_id))));
+  me.line_user_id), me.line_user_id)));
 
 const WISH_IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
   'image/heic': 'heic', 'image/heif': 'heif' };
@@ -337,6 +349,7 @@ bpost('/api/v1/wishes/create', async ({ me, body }) => {
     if (!body.file_name || !body.data) throw err('BAD_IMAGE', '請附上商品照片');
     if (!name) name = '照片許願';
   }
+  const myBudget = budget.parse(body);   // v1.8 選填：報價 ≤ auto_buy_max 自動買、> reject_above 自動不要
   const wishId = uid('W');
   // 照片許願的圖要存下來：店家報價要看，上了許願牆大家也要看。
   // 以前只存檔名、圖本身丟掉了（v1.5 修正）。
@@ -364,7 +377,8 @@ bpost('/api/v1/wishes/create', async ({ me, body }) => {
     wishId, me.line_user_id, name, body.ref_url || null,
     Math.max(1, parseInt(body.quantity, 10) || 1), body.note || null,
     picture, body.file_name || null, wall, now());
-  return ok(await oneWish(wishId));
+  if (myBudget) await budget.save(wishId, me.line_user_id, myBudget);
+  return ok(await oneWish(wishId, me.line_user_id));
 });
 
 /**
@@ -383,7 +397,7 @@ bpost('/api/v1/wishes/share', async ({ me, body }) => {
   } else if (w.wall_status !== 'hidden') {
     await db.run("UPDATE wishlist SET wall_status = 'private' WHERE wish_id = ?", w.wish_id);
   }
-  return ok(await oneWish(w.wish_id));
+  return ok(await oneWish(w.wish_id, me.line_user_id));
 });
 
 /**
@@ -423,6 +437,12 @@ bget('/api/v1/wishes/board', async ({ me, query }) => {
     wall_at: r.wall_at,
     progress_note: r.progress_note || null, progress_at: r.progress_at || null,   // v1.6（018）
   }));
+  // v1.8：我按過 +1（或是我許的）那幾則，附上我的預算和我最新的自動決定。
+  const { budgets, decisions } = await budget.mineMany(shaped.filter((w) => w.voted || w.mine).map((w) => w.wish_id), me.line_user_id);
+  for (const w of shaped) {
+    w.my_budget = budget.shape(budgets.get(w.wish_id));
+    w.my_decision = budget.decisionShape(decisions.get(w.wish_id));
+  }
   return ok(await storage.resolve(shaped, 'picture'));
 });
 
@@ -433,15 +453,19 @@ bpost('/api/v1/wishes/plus', async ({ me, body }) => {
     `SELECT w.wish_id, w.line_user_id FROM wishlist w WHERE w.wish_id = ? AND w.wall_status = 'public' AND ${READABLE_SQL}`, wishId);
   if (!w) throw err('NOT_FOUND', '這則許願已經不在許願牆上了', 404);
   if (w.line_user_id === me.line_user_id) throw err('OWN_WISH', '這是你自己的許願，不用再 +1 喔', 409);
+  const myBudget = body.on === false ? undefined : budget.parse(body);
   if (body.on === false) {
     await db.run('DELETE FROM wish_votes WHERE wish_id = ? AND line_user_id = ?', wishId, me.line_user_id);
+    await budget.dropVoter(wishId, me.line_user_id);   // 取消 +1 就從預算名單移除
   } else {
     await db.run(
       'INSERT INTO wish_votes (wish_id, line_user_id, created_at) VALUES (?,?,?) ON CONFLICT DO NOTHING',
       wishId, me.line_user_id, now());
+    await budget.save(wishId, me.line_user_id, myBudget);
   }
   const { n } = await db.one('SELECT count(*) AS n FROM wish_votes WHERE wish_id = ?', wishId);
-  return ok({ wish_id: wishId, voted: body.on !== false, votes: Number(n), wants: Number(n) + 1 });
+  const mineB = body.on === false ? null : await budget.mine(wishId, me.line_user_id);
+  return ok({ wish_id: wishId, voted: body.on !== false, votes: Number(n), wants: Number(n) + 1, my_budget: budget.shape(mineB) });
 });
 
 bpost('/api/v1/wishes/to-cart', async ({ me, body }) => {
@@ -456,17 +480,102 @@ bpost('/api/v1/wishes/to-cart', async ({ me, body }) => {
       cartId, me.line_user_id, w.wish_id, w.item_name, num(w.quote_twd), w.quantity,
       w.note || null, now());
     await db.run("UPDATE wishlist SET wish_status = '已下單' WHERE wish_id = ?", w.wish_id);
+    // 有在等我決定的（報價在預算中間），就當作我說「要」了。
+    try {
+      await db.run(`UPDATE wish_decisions SET status = 'accepted', cart_id = ?, decided_at = ?
+                     WHERE wish_id = ? AND line_user_id = ? AND status = 'open'`, cartId, now(), w.wish_id, me.line_user_id);
+    } catch (e) { if (!budget.missing(e)) throw e; }
   });
   return ok({
-    wish: await oneWish(w.wish_id),
+    wish: await oneWish(w.wish_id, me.line_user_id),
     cart_item: cartShape(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)),
   });
+});
+
+// ---- v1.8 許願預算（022）-------------------------------------------------
+
+/** 許願的人或按了 +1 的人，才能對這則設預算。 */
+async function budgetable(wishId, user) {
+  const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', wishId);
+  if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+  if (w.line_user_id === user) return { w, role: 'owner' };
+  const v = await db.one('SELECT 1 AS ok FROM wish_votes WHERE wish_id = ? AND line_user_id = ?', wishId, user);
+  if (!v) throw err('NOT_VOTED', '要先按「我也想要 +1」才能設預算', 409);
+  return { w, role: 'voter' };
+}
+
+/** 設定／修改／清掉我的預算。兩個都送 null = 清掉。改預算不影響已經報過價的結果（報價當下存了快照）。 */
+bpost('/api/v1/wishes/budget', async ({ me, body }) => {
+  const wishId = String(body.wish_id ?? '');
+  await budgetable(wishId, me.line_user_id);
+  const b = budget.parse(body);
+  if (b === undefined) throw err('BAD_BUDGET', '請帶 auto_buy_max 或 reject_above（兩個都送 null 是清掉）');
+  await budget.save(wishId, me.line_user_id, b);
+  return ok({ wish_id: wishId, my_budget: budget.shape(await budget.mine(wishId, me.line_user_id)) });
+});
+
+/** 我所有的自動決定（新的在前），「我的許願」頁的「自動處理紀錄」用。 */
+bget('/api/v1/wishes/decisions', async ({ me }) => {
+  let rows = [];
+  try {
+    rows = await db.all(
+      `SELECT d.*, w.item_name, w.picture FROM wish_decisions d JOIN wishlist w ON w.wish_id = d.wish_id
+        WHERE d.line_user_id = ? ORDER BY d.created_at DESC LIMIT 50`, me.line_user_id);
+  } catch (e) { if (!budget.missing(e)) throw e; }
+  return ok(await storage.resolve(rows.map((d) => ({ wish_id: d.wish_id, item_name: d.item_name, picture: d.picture || null,
+    role: d.role, ...budget.decisionShape(d) })), 'picture'));
+});
+
+/** 報價在預算中間（等我決定）：accept:true 放進購物車（數量 1），false 不要。 */
+bpost('/api/v1/wishes/decide', async ({ me, body }) => {
+  const wishId = String(body.wish_id ?? '');
+  if (typeof body.accept !== 'boolean') throw err('BAD_REQUEST', 'accept 要是 true 或 false');
+  let d;
+  try {
+    d = await db.one(`SELECT * FROM wish_decisions WHERE wish_id = ? AND line_user_id = ? AND status = 'open'
+                       ORDER BY created_at DESC LIMIT 1`, wishId, me.line_user_id);
+  } catch (e) { if (budget.missing(e)) d = null; else throw e; }
+  if (!d) throw err('NOTHING_TO_DECIDE', '這則許願沒有在等你決定的報價', 409);
+  const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', wishId);
+  let cartId = null;
+  await db.tx(async () => {
+    if (body.accept) {
+      cartId = await budget.addToCart(w, me.line_user_id, num(d.quote_twd), '報價在預算中間，自己確認要');
+      if (d.role === 'owner') await db.run("UPDATE wishlist SET wish_status = '已下單' WHERE wish_id = ?", wishId);
+    }
+    const res = await db.run(`UPDATE wish_decisions SET status = ?, cart_id = ?, decided_at = ? WHERE decision_id = ? AND status = 'open'`,
+      body.accept ? 'accepted' : 'declined', cartId, now(), d.decision_id);
+    if (!res.changes) throw err('NOTHING_TO_DECIDE', '剛剛已經決定過了', 409);
+  });
+  await audit.record({ actor: me.line_user_id, action: 'wish.decide', target: wishId, detail: { accept: body.accept, decision_id: d.decision_id }, result: 'ok' });
+  const fresh = await db.one('SELECT * FROM wish_decisions WHERE decision_id = ?', d.decision_id);
+  return ok({ wish_id: wishId, my_decision: budget.decisionShape(fresh),
+    cart_item: cartId ? cartShape(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)) : null });
+});
+
+/** 取消自動保留：還沒結帳（購物車裡）才能取消。許願的人取消後，許願回到「已報價」。 */
+bpost('/api/v1/wishes/auto-cancel', async ({ me, body }) => {
+  const wishId = String(body.wish_id ?? '');
+  let d;
+  try {
+    d = await db.one(`SELECT * FROM wish_decisions WHERE wish_id = ? AND line_user_id = ? AND decision = 'auto_buy'`, wishId, me.line_user_id);
+  } catch (e) { if (budget.missing(e)) d = null; else throw e; }
+  if (!d || d.status !== 'accepted') throw err('NOTHING_TO_CANCEL', '這則許願沒有自動保留的品項', 409);
+  const c = d.cart_id ? await db.one('SELECT * FROM cart_items WHERE cart_id = ?', d.cart_id) : null;
+  if (c && c.status === 'ordered') throw err('ALREADY_ORDERED', '已經結帳了，要取消請直接聯絡店家', 409);
+  await db.tx(async () => {
+    if (c && c.status !== 'removed') await db.run("UPDATE cart_items SET status = 'removed' WHERE cart_id = ?", c.cart_id);
+    await db.run("UPDATE wish_decisions SET status = 'cancelled', decided_at = ? WHERE decision_id = ?", now(), d.decision_id);
+    if (d.role === 'owner') await db.run("UPDATE wishlist SET wish_status = '已報價' WHERE wish_id = ? AND wish_status = '已下單'", wishId);
+  });
+  await audit.record({ actor: me.line_user_id, action: 'wish.auto_cancel', target: wishId, detail: { decision_id: d.decision_id }, result: 'ok' });
+  return ok({ wish_id: wishId, my_decision: budget.decisionShape(await db.one('SELECT * FROM wish_decisions WHERE decision_id = ?', d.decision_id)) });
 });
 
 bpost('/api/v1/wishes/keep', async ({ me, body }) => {
   const w = await myWish(String(body.wish_id ?? ''), me.line_user_id);
   await db.run("UPDATE wishlist SET wish_status = '保留下團' WHERE wish_id = ?", w.wish_id);
-  return ok(await oneWish(w.wish_id));
+  return ok(await oneWish(w.wish_id, me.line_user_id));
 });
 
 bpost('/api/v1/wishes/remove', async ({ me, body }) => {

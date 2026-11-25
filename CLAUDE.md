@@ -9,9 +9,9 @@
 
 ## 不能碰的
 - repo 是公開的：不要 commit 金鑰、連線字串或 token。交接檔裡只寫變數名稱。
-- `supabase/migrations/001`～`016` 已經在正式庫執行過，不要修改。`017`～`021` 也已經執行過（2026-11-25）。要改 schema 就新增下一號（`022` 起）。
+- `supabase/migrations/001`～`016` 已經在正式庫執行過，不要修改。`017`～`022` 也已經執行過（2026-11-26）。要改 schema 就新增下一號（`023` 起）。
 - 程式碼裡不要建表或改表。
 - 綠界官方的 ECPay-API-Skill（`~/.claude/skills/ecpay`）是 All Rights Reserved：可以參考它寫程式，但不要把它的檔案或內容 commit 進 repo。
 
 ## 驗收
-`npm run smoke`（後端 670 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑，45 項）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。
+`npm run smoke`（後端 745 項）、`npm run test:contract`（前端 47 項，對真後端）、`npm run test:n8n`（n8n 流程逐節點跑，45 項）。三個都只對本機的 PGlite harness 執行，不會碰正式資料庫。

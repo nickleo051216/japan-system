@@ -20,6 +20,7 @@ const KIND = {
   payment_reminder: ['付款提醒', 'stmt'], payment_received: ['付款成功', 'stmt'], transfer_verified: ['收到款項', 'stmt'],
   wish_broadcast: ['許願開喊單了', 'live'], quoted: ['報價好了', 'orders'], out_of_stock: ['缺貨通知', 'orders'],
   ship_request: ['出貨申請', 'orders'], bought: ['小幫手幫你買到了', 'cart'],
+  wish_auto: ['許願預算自動處理', 'wish'],
 };
 const MAX = 50;
 

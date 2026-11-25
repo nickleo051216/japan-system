@@ -83,7 +83,19 @@ const SAY = {
   'broadcast.close': (t) => [`關閉喊單：「${t}」`, ''],
   'broadcast.image': (t, d) => [`${d && d.replaced ? '更換' : '加上'}喊單「${t}」的照片`, ''],
   'broadcast.adjust': (t, d) => [`調整喊單「${t}」的數量`, `${d.delta > 0 ? '增加' : '減少'} ${Math.abs(d.delta)} 個`],
-  'wish.quote': (t, d) => [`替許願「${t}」報價 ${ntd(d.quote_twd)}`, ''],
+  'wish.quote': (t, d) => [`替許願「${t}」報價 ${ntd(d.quote_twd)}`,
+    d.auto && (d.auto.auto_buy || d.auto.auto_reject || d.auto.pending)
+      ? `照客人的預算：自動保留 ${d.auto.auto_buy || 0} 人、略過 ${d.auto.auto_reject || 0} 人、問 ${d.auto.pending || 0} 人` : ''],
+  'wish.decide': (t, d) => [d.accept ? '客人決定要這則許願（報價在預算中間）' : '客人決定不要這則許願', ''],
+  'wish.auto_cancel': () => ['客人取消了預算內自動保留的品項', ''],
+  'bank_credit.create': (t, d) => [`輸入銀行入帳 ${ntd(d.amount)}（參考號 ${d.ref_no}）`,
+    d.status === 'matched' ? `自動配對到 ${d.statement_id}` : `沒有自動配對，待人工確認（可能的帳單 ${d.candidates} 張）`],
+  'bank_credit.ignore': (t, d) => ['把一筆銀行入帳標成不處理', d.note || ''],
+  'statements.remind': (t, d) => [`發逾期付款提醒 ${d.reminded} 則`, ''],
+  'statements.early': (t, d) => [`客人提前結帳，開出對帳單 ${t}`, `${d.order_count} 張訂單，合計 ${ntd(d.total_amount)}`],
+  'cost.create': (t, d) => [`記一筆成本：${d.category}`, `${d.currency} ${d.amount}`],
+  'cost.update': () => ['修改一筆成本', ''],
+  'cost.remove': (t, d) => [`刪掉一筆成本：${d.category}`, `${d.currency} ${d.amount}`],
   'wish.mark': (t, d) => [`把許願「${t}」標記為${q(d.status)}`, ''],
   'wish.wall': (t, d) => [d.to === 'public' ? `把許願「${t}」放上許願牆` : `把許願「${t}」從許願牆收下來`,
     d.renamed ? `品名從「${d.renamed.from}」改成「${d.renamed.to}」` : (d.reason || '')],
@@ -122,7 +134,8 @@ const SAY = {
   'purchase.record': (t, d) => [`現場補登採買「${d.name}」×${d.qty}`, `給 ${d.member_no}，${d.to === 'order' ? `加進訂單 ${t}` : '放進購物車'}${d.code ? `・條碼 ${d.code}` : ''}`],
 
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, d && d.auto ? `每月自動結算（${d.date}）` : '手動按「結算」'],
-  'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
+  'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`,
+    (d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符') + (d.bank_credit ? `；銀行入帳 ${d.ref_no}${d.auto_matched ? '（自動配對）' : '（店主確認）'}` : '')],
 
   'ecpay.paid': (t, d, l) => (d.double_paid
     ? [`${l.subject_label || '客人'} 用信用卡付了對帳單 ${t}，但這張之前已經付清了`, `收到 ${ntd(d.amount)}，等於付了兩次，請店主退款`]

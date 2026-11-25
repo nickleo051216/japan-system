@@ -156,6 +156,7 @@ async function renderGroups(root, ctx) {
         h('strong', { class: 'mono' }, g.ship_group_id), h('span', { class: 'tag ' + (g.status === '已出貨' ? 'green' : 'amber') }, g.status),
         h('span', { class: 'spacer', style: 'flex:1' }), h('span', { class: 'small' }, g.nickname)),
       h('div', { class: 'tiny muted', style: 'margin:4px 0 8px' }, `${g.pickup || '—'}　${g.pickup_addr || ''}`),
+      g.customer_prefs && g.customer_prefs.note ? h('div', { class: 'tiny', style: 'margin:-4px 0 8px;color:var(--brick, #88362a)' }, `📝 客人備註：${g.customer_prefs.note}`) : null,
       ...g.orders.map((o) => h('div', { class: 'row', style: 'gap:6px;padding:4px 0' },
         h('span', { class: 'mono small' }, o.order_id), statusTag(o.status),
         h('span', { class: 'spacer', style: 'flex:1' }), 'total_twd' in o ? h('span', { class: 'tiny muted' }, nt(o.total_twd)) : null)),
