@@ -165,6 +165,12 @@ bget('/api/v1/home/summary', async ({ me }) => {
   const s = Object.fromEntries(shopRows.map((r) => [r.key, r.value]));
   const waitlisted = new Set(watch.map((w) => w.item_ref));
   const t = Date.now();
+  // 站內通知中心的未讀數（v1.6，016）。正式庫還沒跑 016 時沒有 read_at，回 null，前台不顯示紅點。
+  let inboxUnread = null;
+  try {
+    inboxUnread = Number((await db.one(
+      'SELECT count(*) AS n FROM notification_outbox WHERE line_user_id = ? AND read_at IS NULL', me.line_user_id)).n);
+  } catch { /* 016 還沒跑 */ }
   return ok({
     shop: {
       name: s.shop_name || '', bank_name: s.bank_name || '', bank_code: s.bank_code || '',
@@ -204,7 +210,7 @@ bget('/api/v1/home/summary', async ({ me }) => {
       open: b.remaining > 0 && (!b.deadline_at || new Date(b.deadline_at).getTime() > t),
       waitlisted: waitlisted.has(b.send_id),
     }))),
-    todo: { unpaid_statements: todo.unpaid_statements, pending_cart: todo.pending_cart },
+    todo: { unpaid_statements: todo.unpaid_statements, pending_cart: todo.pending_cart, inbox_unread: inboxUnread },
   });
 });
 

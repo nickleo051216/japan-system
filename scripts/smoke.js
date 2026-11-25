@@ -1825,6 +1825,46 @@ const login = async (id) =>
     check('稽核：送出請款、核准、退回、已付款都有紀錄', ha.filter((l) => l.action === 'helper.claim_decide').length >= 3 && ha.some((l) => l.action === 'helper.claim_create'));
     }
 
+    {
+    section('站內通知中心（v1.6 ⑥）：客人看自己的通知紀錄（跟 LINE 同一份）');
+    const all = (await B('GET', '/api/v1/inbox/list?limit=50')).json.data;
+    const kinds = new Set(all.items.map((n) => n.kind));
+    check('看得到自己的各種通知（出貨申請、報價、收到款項、對帳單…）', all.items.length >= 5
+      && ['ship_request', 'quoted', 'statement'].every((k) => kinds.has(k)), [...kinds]);
+    {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      const mine = (await c.query("SELECT notif_id, payload FROM notification_outbox WHERE line_user_id = 'U_buyer1'")).rows;
+      const others = (await c.query("SELECT notif_id FROM notification_outbox WHERE line_user_id <> 'U_buyer1'")).rows.map((r) => r.notif_id);
+      await c.end();
+      const byId = new Map(mine.map((r) => [r.notif_id, r.payload]));
+      check('只看得到自己的（別人的一則都沒有）', others.length > 0 && !all.items.some((n) => others.includes(n.notif_id)));
+      check('文案跟 LINE 上一字不差（同一份 payload.text）', all.items.filter((n) => byId.get(n.notif_id)?.text).every((n) => n.text === byId.get(n.notif_id).text));
+    }
+    const st = all.items.find((n) => n.kind === 'statement');
+    check('對帳單通知（原本 n8n 才組文案）也有完整內容和付款期限', st && /對帳單通知/.test(st.text) && st.text.includes(st.statement_id) && st.path === 'stmt', st);
+    const sr = all.items.find((n) => n.kind === 'ship_request');
+    check('body 拿掉 LIFF 網址那幾行；path 告訴前台點了去哪', sr && !/https?:\/\//.test(sr.body) && !/👉/.test(sr.body) && sr.path === 'orders' && sr.title === '出貨申請', sr);
+    check('新的在前', all.items.every((n, i, a) => i === 0 || a[i - 1].created_at >= n.created_at));
+    const home = (await B('GET', '/api/v1/home/summary')).json.data;
+    check('首頁 todo.inbox_unread = 未讀數（鈴鐺紅點）', home.todo.inbox_unread === all.unread && all.unread === all.items.length, [home.todo, all.unread]);
+    const p1 = (await B('GET', '/api/v1/inbox/list?limit=2')).json.data;
+    const p2 = (await B('GET', `/api/v1/inbox/list?limit=2&before=${encodeURIComponent(p1.next_before)}`)).json.data;
+    check('分頁：limit＋before，下一頁不重複', p1.items.length === 2 && !!p1.next_before && p2.items.length >= 1
+      && !p2.items.some((n) => p1.items.some((m) => m.notif_id === n.notif_id)), [p1.next_before, p2.items.map((n) => n.notif_id)]);
+    const r1 = (await B('POST', '/api/v1/inbox/read', { body: { notif_ids: [all.items[0].notif_id] } })).json.data;
+    check('點開一則 → 標成看過，未讀少 1', r1.marked === 1 && r1.unread === all.unread - 1, r1);
+    const again = (await B('POST', '/api/v1/inbox/read', { body: { notif_ids: [all.items[0].notif_id] } })).json.data;
+    check('同一則再標一次不會重複算', again.marked === 0 && again.unread === r1.unread, again);
+    const steal = (await api('POST', '/api/v1/inbox/read', { token: buyer2, body: { notif_ids: [all.items[1].notif_id] } })).json.data;
+    check('別人的通知標不到（就算猜到 notif_id）', steal.marked === 0 && (await B('GET', '/api/v1/inbox/unread-count')).json.data.unread === r1.unread, steal);
+    check('不帶東西 → BAD_REQUEST', (await B('POST', '/api/v1/inbox/read', { body: {} })).json.error?.code === 'BAD_REQUEST');
+    const ra = (await B('POST', '/api/v1/inbox/read', { body: { all: true } })).json.data;
+    const after = (await B('GET', '/api/v1/inbox/list?limit=5')).json.data;
+    check('「全部標成已讀」→ 未讀 0，但通知都還在', ra.unread === 0 && after.items.length === 5 && after.items.every((n) => n.read && n.read_at), ra);
+    check('沒登入 → 401', (await api('GET', '/api/v1/inbox/list')).status === 401);
+    }
+
     // 「還沒開團」只會發生在全新的資料庫（示範資料一定有團），所以另開一個空的資料庫測。
     section('還沒開團：開喊單順便開團（全新資料庫）');
     const FRESH_PORT = PORT + 8;

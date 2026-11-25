@@ -34,7 +34,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ---
 
-## 2. 端點一覽（31 個）
+## 2. 端點一覽（34 個）
 
 | # | 方法 | 路徑 | 用途 | 備註 |
 |---|---|---|---|---|
@@ -76,6 +76,9 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 31 | GET | `/ship-requests/list` | 我的出貨申請（v1.6） | ship_requests, ship_groups |
 | 32 | POST | `/ship-requests/cancel` | 取消審核中的申請（v1.6） | ship_requests |
 | 33 | POST | `/staff/join` | 輸入店主給的邀請碼成為員工（v1.6，選做） | staff_invites, members |
+| 34 | GET | `/inbox/list` | 站內通知中心（v1.6，跟 LINE 通知同一份） | notification_outbox |
+| 35 | GET | `/inbox/unread-count` | 未讀則數（v1.6） | notification_outbox |
+| 36 | POST | `/inbox/read` | 標成看過（v1.6） | notification_outbox |
 
 所有端點**只回傳該 `line_user_id` 自己的資料**，不能透過參數查別人的。
 
@@ -143,7 +146,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
                    "listed_at": "2026-11-25T03:00:00.000Z", "images": ["https://…簽名網址"], "sizes": ["90","100"],
                    "open": true, "waitlisted": false } ],
-  "todo": { "unpaid_statements": 1, "pending_cart": 0 } }
+  "todo": { "unpaid_statements": 1, "pending_cart": 0, "inbox_unread": 2 } }
 ```
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
@@ -290,6 +293,18 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 錯誤：`400／404 INVITE_INVALID`、`409 INVITE_EXPIRED／INVITE_REVOKED／INVITE_USED_UP／ALREADY_STAFF`、`429 TOO_MANY_ATTEMPTS`（一小時輸錯 10 次）。
 這支回應不進冪等快取。成功後請客人改用後台登入（同一個 LINE 帳號）。
 
+### 34. `GET /inbox/list?limit=30&before=`（v1.6 站內通知中心）
+回 `{ items:[InboxItem], unread, next_before }`，新的在前；`limit` 1～50；下一頁把 `next_before` 帶進 `before`（`null` = 沒有了）。
+InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, created_at, read, read_at }`
+- `text` 與 LINE 推播相同；`body` 去掉網址與「👉」引導行，畫面用；`path` ∈ `orders|stmt|wish|live`
+- 資料來源就是 LINE 通知佇列：LINE 沒送達也看得到
+
+### 35. `GET /inbox/unread-count`
+回 `{ unread }`。`/home/summary` 的 `todo.inbox_unread` 是同一個數字（016 還沒跑時為 `null`）。
+
+### 36. `POST /inbox/read`
+請求 `{ notif_ids:[…最多 200] }` 或 `{ all:true }` → 回 `{ marked, unread }`。只會改到自己的通知；都沒帶 → `400 BAD_REQUEST`。
+
 ### 22. `POST /orders/received`
 請求 `{ order_id }`；僅「已出貨」可改為「已送達」，否則 `409 ILLEGAL_TRANSITION`（由 DB trigger 擋）
 
@@ -344,6 +359,7 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
 | 3 | 三種 LINE 通知：`quoted`（訂單／許願報價）、`transfer_verified`（手動核帳）、`out_of_stock`（訂單缺貨／許願現場缺貨）；連結 `?path=orders`、`?path=wish` | — |
 | 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
+| 6 | 站內通知中心：`/inbox/list`、`/inbox/unread-count`、`/inbox/read`；`home.todo.inbox_unread` | 3、34～36 |
 | 5 | 小幫手邀請碼：`/staff/join`（後台登入頁也能填）；小幫手工作台、請款審核都在後台 | 33 |
 | 4 | 出貨申請（併單／拆單）：客人申請、店主審核、核准後產生出貨單；訂單多 `ship_group_id`、`parent_order_id`；LINE 通知 `ship_request` | 19、20、30～32 |
 
