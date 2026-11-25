@@ -15,6 +15,10 @@
  *              核准後：已到貨的品項搬到子訂單（訂單號 -A、-B…），子訂單直接是「已到貨」可以出貨。
  *              先寄的那箱要另收一次運費：只有母單還沒付款、還沒進對帳單才收（預設照運費設定算，
  *              店主可以用 extra_fee_twd 改，0 = 不收）；付過了就不另收，免得付款狀態對不起來。
+ * 寄送方式（v1.7，021）：申請時可以帶 pickup:{type:"cvs"|"home",…}（規則見 lib/pickup.js），沒帶就沿用訂單原本的。
+ *   併單：核准後出貨單和底下每張單都改寄這裡；寄送方式（超商↔宅配）變了，第一張單的運費照新方式重算
+ *        （只有還沒付款、還沒進對帳單才改，否則運費不動、回傳 fee_not_changed 給店主決定）。
+ *   拆單：先寄的子訂單寄這裡，先寄運費照新方式算；母單剩下的品項照原本的地址寄。
  * 核准、拒絕都會用 LINE 通知客人（notification_outbox 種類 ship_request）。
  * 只有店主能審核：會動到運費和訂單金額。
  */
@@ -28,6 +32,7 @@ const { feeFor, pickupTypeOf } = require('../lib/shipfee');
 const { round2 } = require('../lib/money');
 const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
+const pk = require('../lib/pickup');
 const { bget, bpost, err, num } = require('./buyer');
 const { shipOrder } = require('./orders');
 
@@ -52,7 +57,7 @@ async function groupShape(g) {
   return {
     ship_group_id: g.ship_group_id, request_id: g.request_id || null,
     status: g.status === '已取消' ? '已取消' : shipped ? '已出貨' : '待出貨',
-    order_ids: g.order_ids, pickup: g.pickup || '', pickup_addr: g.pickup_addr || '',
+    order_ids: g.order_ids, pickup_type: pickupTypeOf(g), pickup: g.pickup || '', pickup_addr: g.pickup_addr || '',
     created_at: g.created_at,
     orders: orders.map((o) => ({ order_id: o.order_id, status: o.status, total_twd: num(o.total_twd), ship_fee_twd: num(o.ship_fee_twd) })),
   };
@@ -64,6 +69,7 @@ async function requestShape(r) {
     request_id: r.request_id, kind: r.kind, kind_zh: KIND_ZH[r.kind],
     status: r.status, status_zh: STATUS_ZH[r.status],
     order_ids: r.order_ids, item_ids: r.item_ids || [],
+    pickup: pk.parse(r.pickup), pickup_text: pk.describe(pk.parse(r.pickup)),
     note: r.note || '', decision_note: r.decision_note || '',
     created_at: r.created_at, decided_at: r.decided_at || null,
     ship_group: await groupShape(g),
@@ -117,10 +123,25 @@ async function checkSplit(user, orderId, itemIds) {
   return { order: o, items, picks: [...new Set(picks)] };
 }
 
+const chargeable = (o) => o.payment_status === '待付款' && !o.statement_id;
+const goodsOf = (o) => round2(Number(o.total_twd) - Number(o.ship_fee_twd || 0));
+
+/**
+ * 併單：寄送方式變了，這一箱（第一張單）的運費要怎麼變。
+ * 回 { from_twd, to_twd, changed, reason }；沒選寄送方式或方式沒變 → changed:false。
+ */
+async function mergeFeePlan(head, p) {
+  const from = Number(head.ship_fee_twd) || 0;
+  if (!p || p.type === pickupTypeOf(head)) return { from_twd: from, to_twd: from, changed: false, reason: null };
+  if (!chargeable(head)) return { from_twd: from, to_twd: from, changed: false, reason: head.statement_id ? '已出對帳單' : '已付款' };
+  const to = await feeFor(p.type, goodsOf(head));
+  return { from_twd: from, to_twd: to, changed: to !== from, reason: null };
+}
+
 async function tellCustomer(r, msg) {
   try {
     const queued = await notify.queue({ kind: 'ship_request', lineUserId: r.line_user_id,
-      payload: { request_id: r.request_id, kind: r.kind, status: r.status, text: `${msg}\n\n查看訂單 👉\n${config.buyerLiffUrl}?path=orders` } });
+      payload: { request_id: r.request_id, kind: r.kind, status: r.status, path: 'orders', text: `${msg}\n\n查看訂單 👉\n${config.buyerLiffUrl}?path=orders` } });
     if (queued) notify.poke();
   } catch (e) {
     console.warn('[notify] 出貨申請通知沒排進佇列（不影響審核）：', e.code || '', e.message);
@@ -150,14 +171,29 @@ bpost('/api/v1/ship-requests/create', async ({ me, body }) => {
     orderIds = [s.order.order_id];
     itemIds = s.picks;
   }
+  const pickup = pk.resolve(me, body.pickup);
   const dup = await pendingFor(orderIds);
   if (dup.length) throw err('ALREADY_REQUESTED', `已經有一筆審核中的申請（${dup[0].request_id}），可以先取消再重新申請`, 409);
 
   const id = uid('SR');
-  await db.run(
-    `INSERT INTO ship_requests (request_id, line_user_id, kind, order_ids, item_ids, note, status, created_at)
-     VALUES (?,?,?,?,?,?,'pending',?)`, id, me.line_user_id, kind, orderIds, itemIds, note, now());
-  await audit.record({ actor: me.line_user_id, action: 'ship_request.create', target: id, detail: { kind, order_ids: orderIds, item_ids: itemIds }, result: 'ok' });
+  const insert = (withPickup, noteText) => db.run(
+    `INSERT INTO ship_requests (request_id, line_user_id, kind, order_ids, item_ids, note, status, created_at${withPickup ? ', pickup' : ''})
+     VALUES (?,?,?,?,?,?,'pending',?${withPickup ? ', ?::jsonb' : ''})`,
+    id, me.line_user_id, kind, orderIds, itemIds, noteText, now(), ...(withPickup ? [JSON.stringify(pickup)] : []));
+  if (!pickup) {
+    await insert(false, note);
+  } else {
+    try {
+      await insert(true, note);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      // 正式庫還沒跑 021：寄送方式先寫進備註，店主審核時看得到，申請本身不要失敗。
+      console.warn('[ship-requests] 021 還沒跑，寄送方式先寫進備註');
+      await insert(false, [`寄送方式：${pk.describe(pickup)}`, note].filter(Boolean).join('｜').slice(0, 300));
+    }
+  }
+  await audit.record({ actor: me.line_user_id, action: 'ship_request.create', target: id,
+    detail: { kind, order_ids: orderIds, item_ids: itemIds, pickup: pickup ? pickup.type : null }, result: 'ok' });
   return ok(await requestShape(await db.one('SELECT * FROM ship_requests WHERE request_id = ?', id)));
 });
 
@@ -202,6 +238,7 @@ get('/api/v1/ship-requests/admin-list', async ({ actor, query }) => {
     const byOrder = new Map(orders.map((o) => [o.order_id, o]));
     out.push({
       ...(await requestShape(r)), nickname: r.nickname, member_no: r.member_no || null,
+      fee_plan: await feePlan(r, byOrder.get(r.order_ids[0]), items),
       orders: r.order_ids.map((id) => byOrder.get(id)).filter(Boolean).map((o) => ({
         ...o, total_twd: num(o.total_twd), ship_fee_twd: num(o.ship_fee_twd),
         items: items.filter((i) => i.order_id === o.order_id).map((i) => ({
@@ -213,6 +250,22 @@ get('/api/v1/ship-requests/admin-list', async ({ actor, query }) => {
   return ok(auth.redact(actor, out));
 });
 
+/**
+ * 後台審核畫面用：核准後這一箱的運費（照客人選的寄送方式算）。
+ *   併單 { kind, pickup_type, from_twd, to_twd, changed, reason }：第一張單的運費從多少變多少
+ *   拆單 { kind, pickup_type, to_twd, reason }：先寄那箱的運費（母單已付款／已出對帳單 → 0）
+ */
+async function feePlan(r, head, items) {
+  if (!head) return null;
+  const p = pk.parse(r.pickup);
+  const type = p ? p.type : pickupTypeOf(head);
+  if (r.kind === 'merge') return { kind: 'merge', pickup_type: type, ...(await mergeFeePlan(head, p)) };
+  if (!chargeable(head)) return { kind: 'split', pickup_type: type, to_twd: 0, reason: head.statement_id ? '已出對帳單' : '已付款' };
+  const goods = round2(items.filter((i) => (r.item_ids || []).includes(i.item_id))
+    .reduce((s, i) => s + i.qty * Number(i.unit_price_twd || 0), 0));
+  return { kind: 'split', pickup_type: type, to_twd: await feeFor(type, goods), reason: null };
+}
+
 async function decide(r, actor, status, note) {
   const res = await db.run(
     `UPDATE ship_requests SET status = ?, decided_by = ?, decided_at = ?, decision_note = ?
@@ -223,15 +276,30 @@ async function decide(r, actor, status, note) {
 async function approveMerge(r, actor) {
   const orders = await checkMerge(r.line_user_id, r.order_ids);
   const [head, ...rest] = orders;
+  const p = pk.parse(r.pickup);
+  const dest = p ? pk.columns(p) : { pickup: head.pickup, pickup_addr: head.pickup_addr };
+  const plan = await mergeFeePlan(head, p);
   const groupId = uid('SG');
   const waived = [];
   const notWaived = [];
   await db.run(
     `INSERT INTO ship_groups (ship_group_id, line_user_id, request_id, order_ids, pickup, pickup_addr, created_by, created_at)
-     VALUES (?,?,?,?,?,?,?,?)`, groupId, r.line_user_id, r.request_id, r.order_ids, head.pickup, head.pickup_addr, actor.line_user_id, now());
+     VALUES (?,?,?,?,?,?,?,?)`, groupId, r.line_user_id, r.request_id, r.order_ids, dest.pickup, dest.pickup_addr, actor.line_user_id, now());
   for (const o of orders) {
-    await db.run('UPDATE orders SET ship_group_id = ? WHERE order_id = ?', groupId, o.order_id);
+    if (p) {
+      await db.run('UPDATE orders SET ship_group_id = ?, pickup = ?, pickup_addr = ? WHERE order_id = ?', groupId, dest.pickup, dest.pickup_addr, o.order_id);
+    } else {
+      await db.run('UPDATE orders SET ship_group_id = ? WHERE order_id = ?', groupId, o.order_id);
+    }
   }
+  // 寄送方式變了（超商↔宅配）：這一箱的運費（第一張單）照新方式算。
+  let feeChanged = null;
+  if (plan.changed) {
+    await db.run('UPDATE orders SET ship_fee_twd = ?, total_twd = total_twd - ? + ? WHERE order_id = ?',
+      plan.to_twd, plan.from_twd, plan.to_twd, head.order_id);
+    feeChanged = { order_id: head.order_id, from_twd: plan.from_twd, to_twd: plan.to_twd };
+  }
+  const feeNotChanged = plan.reason ? { order_id: head.order_id, fee_twd: plan.from_twd, reason: plan.reason } : null;
   for (const o of rest) {
     const fee = Number(o.ship_fee_twd) || 0;
     if (!fee) continue;
@@ -242,18 +310,20 @@ async function approveMerge(r, actor) {
       notWaived.push({ order_id: o.order_id, fee_twd: fee, reason: o.statement_id ? '已出對帳單' : '已付款' });
     }
   }
-  return { ship_group_id: groupId, fee_waived: waived, fee_not_waived: notWaived };
+  return { ship_group_id: groupId, fee_waived: waived, fee_not_waived: notWaived, fee_changed: feeChanged, fee_not_changed: feeNotChanged };
 }
 
 async function approveSplit(r, actor, extraFee) {
   const { order: parent, items, picks } = await checkSplit(r.line_user_id, r.order_ids[0], r.item_ids);
   const moved = items.filter((i) => picks.includes(i.item_id));
   const childGoods = round2(moved.reduce((s, i) => s + i.qty * Number(i.unit_price_twd), 0));
-  const canCharge = parent.payment_status === '待付款' && !parent.statement_id;
+  const p = pk.parse(r.pickup);
+  const dest = p ? pk.columns(p) : { pickup: parent.pickup, pickup_addr: parent.pickup_addr };
+  const canCharge = chargeable(parent);
   let fee = 0;
   if (canCharge) {
     fee = extraFee === undefined || extraFee === null || extraFee === ''
-      ? await feeFor(pickupTypeOf(parent), childGoods) : Number(extraFee);
+      ? await feeFor(p ? p.type : pickupTypeOf(parent), childGoods) : Number(extraFee);
     if (!Number.isFinite(fee) || fee < 0 || fee > 10000) throw err('BAD_FEE', '先寄運費要是 0～10000 的數字');
   }
   const n = (await db.one('SELECT count(*) AS n FROM orders WHERE parent_order_id = ?', parent.order_id)).n;
@@ -267,7 +337,7 @@ async function approveSplit(r, actor, extraFee) {
                          parent_order_id, statement_id, pickup, pickup_addr, invoice, note, created_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     childId, parent.line_user_id, parent.batch, STATUS.QUOTED, parent.payment_status, childGoods + fee, fee, parent.paid_at || null,
-    parent.order_id, parent.statement_id || null, parent.pickup, parent.pickup_addr, parent.invoice,
+    parent.order_id, parent.statement_id || null, dest.pickup, dest.pickup_addr, parent.invoice,
     `由 ${parent.order_id} 拆出先寄（申請 ${r.request_id}）`, now());
   await db.run('UPDATE order_items SET order_id = ? WHERE item_id = ANY(?::text[]) AND order_id = ?', childId, picks, parent.order_id);
   await db.run('UPDATE orders SET total_twd = total_twd - ? WHERE order_id = ?', childGoods, parent.order_id);
@@ -278,7 +348,7 @@ async function approveSplit(r, actor, extraFee) {
   }
   await db.run(
     `INSERT INTO ship_groups (ship_group_id, line_user_id, request_id, order_ids, pickup, pickup_addr, created_by, created_at)
-     VALUES (?,?,?,?,?,?,?,?)`, groupId, r.line_user_id, r.request_id, [childId], parent.pickup, parent.pickup_addr, actor.line_user_id, now());
+     VALUES (?,?,?,?,?,?,?,?)`, groupId, r.line_user_id, r.request_id, [childId], dest.pickup, dest.pickup_addr, actor.line_user_id, now());
   await db.run('UPDATE orders SET ship_group_id = ? WHERE order_id = ?', groupId, childId);
   // 搬過去的品項都到貨了 —— 子單直接是「已到貨」，可以出貨。
   await transition(childId, STATUS.ARRIVED, { actor: actor.line_user_id, reason: '拆單先寄：品項已到貨' });
@@ -305,7 +375,8 @@ post('/api/v1/ship-requests/approve', async ({ actor, body }) => {
     throw e;
   }
   await audit.record({ actor: actor.line_user_id, action: 'ship_request.approve', target: r.request_id,
-    detail: { kind: r.kind, order_ids: r.order_ids, ...result }, result: result.fee_not_waived && result.fee_not_waived.length ? 'warn' : 'ok' });
+    detail: { kind: r.kind, order_ids: r.order_ids, ...result },
+    result: (result.fee_not_waived && result.fee_not_waived.length) || result.fee_not_changed ? 'warn' : 'ok' });
 
   const fresh = await db.one('SELECT * FROM ship_requests WHERE request_id = ?', r.request_id);
   let msg;
@@ -318,6 +389,11 @@ post('/api/v1/ship-requests/approve', async ({ actor, body }) => {
       + (result.extra_fee_twd ? `，這一箱運費 ${ntd(result.extra_fee_twd)}` : '')
       + `；其他品項到貨後再寄。`;
   }
+  if (r.kind === 'merge' && result.fee_changed) {
+    msg += `\n寄送方式改了，這一箱運費 ${ntd(result.fee_changed.from_twd)} → ${ntd(result.fee_changed.to_twd)}。`;
+  }
+  const dest = pk.describe(pk.parse(r.pickup));
+  if (dest) msg += `\n\n寄到：${dest}`;
   if (note) msg += `\n\n店家留言：${note}`;
   await tellCustomer(fresh, msg);
   return ok({ ...(await requestShape(fresh)), result });

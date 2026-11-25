@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.6
+# 買家 API 合約（Buyer API Contract）v1.7
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -72,7 +72,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 27 | GET | `/wishes/board?sort=hot\|new` | 許願牆（店家審核過的公開許願，v1.5） | wishlist, wish_votes, broadcast |
 | 28 | POST | `/wishes/plus` | 我也想要 +1／取消（v1.5） | wish_votes |
 | 29 | POST | `/wishes/share` | 自己的許願改公開／不公開（v1.5） | wishlist |
-| 30 | POST | `/ship-requests/create` | 申請併單／拆單（v1.6） | ship_requests |
+| 30 | POST | `/ship-requests/create` | 申請併單／拆單（v1.6；v1.7 加寄送方式 `pickup`） | ship_requests |
 | 31 | GET | `/ship-requests/list` | 我的出貨申請（v1.6） | ship_requests, ship_groups |
 | 32 | POST | `/ship-requests/cancel` | 取消審核中的申請（v1.6） | ship_requests |
 | 33 | POST | `/staff/join` | 輸入店主給的邀請碼成為員工（v1.6，選做） | staff_invites, members |
@@ -274,10 +274,27 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - 併單 `{ kind:"merge", order_ids:[…2～10 張], ship_to_order_id?, note? }`：都要是自己的、「已報價」或「已到貨」、還沒在出貨單裡。
   `ship_to_order_id` 是寄送地址用哪一張（預設第一張），回傳的 `order_ids` 會把它排第一。
 - 拆單 `{ kind:"split", order_id, item_ids?, note? }`：訂單「已報價」、挑的品項都「已到貨」、至少留一項之後寄；不帶 `item_ids` = 已到貨的全部先寄。
-- 回 ShipRequest：`{ request_id, kind, kind_zh, status, status_zh, order_ids, item_ids, note, decision_note, created_at, decided_at, ship_group }`
+- **寄送方式（v1.7，兩種申請都可以帶，選填）** `pickup`：
+  ```json
+  { "type": "cvs", "brand": "7-11", "store_id": "991182", "store_name": "板橋文化門市", "addr": "新北市板橋區…" }
+  { "type": "home", "addr": "新北市板橋區文化路一段 100 號 5 樓" }
+  { "type": "cvs" }   // 只帶 type → 用會員資料的預設門市／宅配地址（跟結帳同一套）
+  ```
+  - 超商：`store_name` 或 `store_id` 至少一個；都沒帶 = 用會員預設門市（`brand`、`addr` 也一起用預設）。
+  - 宅配：`addr` 沒帶 = 用會員的 `home_addr`。
+  - 不帶 `pickup` = 沿用訂單原本的寄送方式（跟 v1.6 一樣）。客人想順便改會員預設，請另外呼叫 `/me/update`。
+  - 錯誤：`400 BAD_PICKUP`（不是物件或 type 不是 cvs／home）、`400 PICKUP_INCOMPLETE`（超商沒門市、宅配沒地址，會員資料也沒有）。
+  - 核准後：併單＝出貨單和底下每張單都改寄這裡；**超商↔宅配換了**，第一張單（這一箱）的運費照新方式重算（只有待付款、沒進對帳單才改）。
+    拆單＝先寄的子訂單寄這裡，先寄運費照新方式算；母單剩下的品項照原地址。LINE 通知會寫「寄到：…」。
+  - 前台不用再把「改宅配到府（地址…）」寫在 `note` 開頭；`note` 照存、照顯示。
+- 回 ShipRequest：`{ request_id, kind, kind_zh, status, status_zh, order_ids, item_ids, pickup, pickup_text, note, decision_note, created_at, decided_at, ship_group }`
+  - `pickup`（v1.7）：解析後的寄送資訊 `{ type, brand, store_id, store_name, addr, from_default }`（宅配只有 `type, addr, from_default`）；沒選是 `null`。
+    `from_default:true` = 用的是會員預設。存的是申請當下的值，會員之後改預設也不會變。
+  - `pickup_text`（v1.7）：一行字，例如「超商取貨 7-11 板橋文化門市」「宅配到府 新北市…」；沒選是 `null`。
   - `status`：`pending`（審核中）→ `approved`／`rejected`，或客人 `cancelled`
-  - `ship_group`（核准後）：`{ ship_group_id, status:"待出貨|已出貨", order_ids, pickup, pickup_addr, created_at, orders:[{ order_id, status, total_twd, ship_fee_twd }] }`
-- 錯誤：`400 BAD_KIND／TOO_FEW_ORDERS／TOO_MANY_ORDERS／BAD_SHIP_TO`、`404 ORDER_NOT_FOUND／ITEM_NOT_FOUND`、
+  - `ship_group`（核准後）：`{ ship_group_id, status:"待出貨|已出貨", order_ids, pickup_type, pickup, pickup_addr, created_at, orders:[{ order_id, status, total_twd, ship_fee_twd }] }`
+    - `pickup_type`（v1.7）：`cvs`／`home`。`pickup` 是門市名稱（超商）或「宅配到府」，`pickup_addr` 是地址。
+- 錯誤：`400 BAD_KIND／TOO_FEW_ORDERS／TOO_MANY_ORDERS／BAD_SHIP_TO／BAD_PICKUP／PICKUP_INCOMPLETE`、`404 ORDER_NOT_FOUND／ITEM_NOT_FOUND`、
   `409 NOT_QUOTED／NOT_MERGEABLE／ALREADY_GROUPED／NOT_SPLITTABLE／ITEM_NOT_ARRIVED／NOTHING_LEFT／ALREADY_REQUESTED`
 - 核准後的金額變化：併單＝第一張保留運費，其他「待付款且沒出對帳單」的運費歸 0（總額跟著減）；拆單＝子訂單 `order_id` 加 `-A`，
   狀態「已到貨」，總額＝先寄品項＋先寄運費（母單已付款或已出對帳單則不收運費）。審核結果用 LINE 通知（`ship_request`）。
@@ -296,7 +313,20 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 34. `GET /inbox/list?limit=30&before=`（v1.6 站內通知中心）
 回 `{ items:[InboxItem], unread, next_before }`，新的在前；`limit` 1～50；下一頁把 `next_before` 帶進 `before`（`null` = 沒有了）。
 InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, created_at, read, read_at }`
-- `text` 與 LINE 推播相同；`body` 去掉網址與「👉」引導行，畫面用；`path` ∈ `orders|stmt|wish|live`
+- `text` 與 LINE 推播相同；`body` 去掉網址與「👉」引導行，畫面用；`path` ∈ `orders|stmt|wish|live|cart`
+- `path`（v1.7 全部種類對齊，LINE 文案的連結也是同一個）：
+
+  | 種類 | path |
+  |---|---|
+  | `quoted` 訂單報價 | `orders` |
+  | `quoted` 許願報價 | `wish` |
+  | `out_of_stock` 訂單缺貨 | `orders` |
+  | `out_of_stock` 許願現場缺貨 | `wish` |
+  | `transfer_verified` 收到款項 | 對帳單 → `stmt`；單張訂單 → `orders` |
+  | `payment_received` 刷卡成功、`statement` 對帳單 | `stmt` |
+  | `shipped` 出貨、`ship_request` 出貨申請 | `orders` |
+  | `wish_broadcast` 許願開喊單 | `live` |
+  | `bought` 小幫手買到了 | 加進訂單 → `orders`；放進購物車 → `cart` |
 - 資料來源就是 LINE 通知佇列：LINE 沒送達也看得到
 
 ### 35. `GET /inbox/unread-count`
@@ -351,6 +381,13 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 4.9 v1.7 變更（2026-11-25，前端「需後端配合」2 項）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 出貨申請的寄送方式：`/ship-requests/create` 收 `pickup:{type:"cvs"\|"home",…}`（沒帶門市／地址就用會員預設）；ShipRequest 多 `pickup`、`pickup_text`；`ship_group` 多 `pickup_type`；運費照寄送方式算（021） | 30、31 |
+| 2 | 通知點了跳對頁：每一種通知的 LINE 連結和 `/inbox/list` 的 `path` 對齊（許願報價、許願缺貨 → `wish`；單張訂單收款 → `orders`；對帳單、刷卡成功 → `stmt`；出貨 → `orders`），對照表見 34 | 34 |
 
 ## 5.0 v1.6 變更（2026-11-25 起，Nick 排的 6 項）
 

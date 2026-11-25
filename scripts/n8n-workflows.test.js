@@ -275,6 +275,10 @@ function startHarness() {
       stmtPush && /STMT-\d{8}-\d{4}/.test(stmtPush.body.messages[0].text)
       && /NT\$[\d,]+/.test(stmtPush.body.messages[0].text) && /前完成付款/.test(stmtPush.body.messages[0].text),
       stmtPush && stmtPush.body);
+    check('v1.7 對帳單通知用後端寫好的文案，連結直接跳對帳單頁（?path=stmt）',
+      stmtPush && /\?path=stmt/.test(stmtPush.body.messages[0].text), stmtPush && stmtPush.body);
+    check('v1.7 出貨通知附「查看訂單」連結（?path=orders）',
+      shipPush && /\?path=orders/.test(shipPush.body.messages[0].text), shipPush && shipPush.body);
     check('LINE 收到的是 Bearer 憑證', pushes.every((p) => p.headers.authorization === 'Bearer test-line-token'));
     check('每則推播都帶 UUID 格式的 X-Line-Retry-Key',
       pushes.every((p) => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.headers['x-line-retry-key'])),
@@ -310,6 +314,11 @@ function startHarness() {
     check('LINE 回 409＋已受理編號 = 之前送成功過，算成功', dup.ok === true && dup.error === null, dup);
     const down = await runCode(tidy, { json: { error: { message: 'ETIMEDOUT' } }, lineage: { 組訊息: { notif_id: 'ntfq_same' } } });
     check('連不上 LINE → 回報失敗並寫明原因', down.ok === false && /ETIMEDOUT/.test(down.error), down);
+    const oldStmt = await runCode(build, { json: { notif_id: 'n0', kind: 'statement', line_user_id: 'U_x',
+      payload: { statement_id: 'STMT-20261101-0001', total_amount: 1200, order_ids: ['HB1'], pay_by: '2026-11-08T00:00:00Z' } },
+      lineage: { 設定: { liff_url: 'https://liff.example/x' } } });
+    check('舊的對帳單通知（payload 沒有 text）→ 照範本自己組，不會推空訊息', oldStmt.messages.length === 1
+      && /STMT-20261101-0001/.test(oldStmt.messages[0].text) && /NT\$1,200/.test(oldStmt.messages[0].text), oldStmt);
     const odd = await runCode(build, { json: { notif_id: 'n1', kind: 'arrived', line_user_id: 'U_x', payload: {} }, lineage });
     check('沒有文案的通知種類不會推空訊息', odd.messages.length === 0, odd);
 

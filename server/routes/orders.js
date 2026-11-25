@@ -200,7 +200,8 @@ async function notificationText(order) {
   const member = await db.one('SELECT nickname FROM members WHERE line_user_id = ?', order.line_user_id);
   const items = await itemsOf(order.order_id);
   const summary = items.map((i) => `${i.name_zh} ×${i.qty}`).join('、') || '（無品項）';
-  return `📦 出貨通知\n\n${member ? member.nickname : ''} 您好，您的訂單 ${order.order_id} 已出貨囉！\n\n品項：${summary}\n預計 3 個工作天內送達\n\n有任何問題歡迎直接回覆這則訊息 🙌`;
+  return `📦 出貨通知\n\n${member ? member.nickname : ''} 您好，您的訂單 ${order.order_id} 已出貨囉！\n\n品項：${summary}\n預計 3 個工作天內送達\n\n有任何問題歡迎直接回覆這則訊息 🙌`
+    + `\n\n查看訂單 👉\n${customerNotify.link('orders')}`;
 }
 
 /**
@@ -215,6 +216,7 @@ async function shipmentPayload(order, text) {
     'SELECT carrier, tracking_no, eta FROM shipments WHERE order_id = ? ORDER BY shipped_at DESC', order.order_id);
   return {
     text,
+    path: 'orders',
     order_id: order.order_id,
     nickname: member ? member.nickname : null,
     pieces: items.reduce((s, i) => s + i.qty, 0),

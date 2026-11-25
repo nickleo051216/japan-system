@@ -11,7 +11,7 @@
  * 對帳單通知的文案原本是 n8n 組的（payload 沒有 text），這裡照同一個範本組一份。
  */
 const db = require('../lib/db');
-const config = require('../lib/config');
+const { statementText } = require('../lib/customer-notify');
 const { ok } = require('../lib/http');
 const { bget, bpost, err } = require('./buyer');
 
@@ -23,21 +23,6 @@ const KIND = {
 };
 const MAX = 50;
 
-const ntd = (v) => 'NT$' + Math.round(Number(v) || 0).toLocaleString('en-US');
-const md = (iso) => {
-  const d = new Date(new Date(iso).getTime() + 8 * 3600e3);   // 台灣日期
-  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-};
-
-/** 跟 n8n「組訊息」節點同一個對帳單範本（n8n/notify-collector.json）。 */
-function statementText(p) {
-  const count = (p.order_ids || []).length;
-  return `🧾 對帳單通知\n\n您的本期對帳單 ${p.statement_id} 已產生\n`
-    + `共 ${count} 筆訂單，合計 ${ntd(p.total_amount)}\n`
-    + (p.pay_by ? `請於 ${md(p.pay_by)} 前完成付款\n` : '')
-    + `\n查看明細與付款 👉 ${config.buyerLiffUrl}?path=stmt\n`
-    + '\n有任何問題歡迎直接回覆這則訊息 🙌';
-}
 
 function shape(n) {
   const p = typeof n.payload === 'string' ? JSON.parse(n.payload) : (n.payload || {});
@@ -49,7 +34,8 @@ function shape(n) {
     .replace(/\n[^\n]*👉\s*$/u, '').replace(/\n{3,}/g, '\n\n').trim();
   return {
     notif_id: n.notif_id, kind: n.kind, title, text, body,
-    path: m ? m[1] : defaultPath,
+    // 點了要去哪：payload.path（v1.7 起每則都有）→ 文案裡的 ?path= → 舊的許願通知（有 wish_id 沒 path）→ 種類預設。
+    path: p.path || (m ? m[1] : null) || (p.wish_id && ['quoted', 'out_of_stock'].includes(n.kind) ? 'wish' : defaultPath),
     order_id: n.order_id || p.order_id || null, statement_id: n.statement_id || p.statement_id || null,
     created_at: n.created_at, read: !!n.read_at, read_at: n.read_at || null,
   };

@@ -1081,6 +1081,12 @@ const login = async (id) =>
       { headers: { 'X-Notify-Token': 'smoke-notify-secret' }, body: { limit: 50 } })).json.data.notifications;
     check('對帳單通知已排入佇列，等 n8n 發 LINE',
       pend.some((n) => n.kind === 'statement' && n.statement_id === mine1.statement_id), pend.map((n) => n.kind));
+    {
+      const sn = pend.find((n) => n.kind === 'statement' && n.statement_id === mine1.statement_id);
+      const sp = sn && (typeof sn.payload === 'string' ? JSON.parse(sn.payload) : sn.payload);
+      check('v1.7 對帳單通知：後端組好文案（payload.text，附 ?path=stmt），n8n 不用再自己組',
+        !!sp && /對帳單通知/.test(sp.text) && sp.text.includes(mine1.statement_id) && /\?path=stmt/.test(sp.text) && sp.path === 'stmt', sp);
+    }
     check('金額對不上不自動認列 → 409',
       (await api('POST', '/api/v1/statements/reconcile',
         { token: owner, body: { statement_id: mine1.statement_id, amount_twd: 1 } })).json.error?.code === 'AMOUNT_MISMATCH');
@@ -1204,6 +1210,9 @@ const login = async (id) =>
     await api('POST', '/api/v1/orders/transition', { token: owner, body: { order_id: o1.order_id, to: '缺貨' } });
     const oos = (await pending()).filter((n) => n.kind === 'out_of_stock' && n.order_id === o1.order_id);
     check('訂單標成「缺貨」→ 排一則缺貨通知（店家會聯絡補買／換貨／退款）', oos.length === 1 && /缺貨通知/.test(txt(oos[0])) && /退款/.test(txt(oos[0])), oos.map(txt));
+    const pth = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).path;
+    check('v1.7 訂單缺貨通知：附「查看訂單」連結（?path=orders），payload.path = orders',
+      /\?path=orders/.test(txt(oos[0])) && pth(oos[0]) === 'orders', [txt(oos[0]), pth(oos[0])]);
     // 單張訂單收款
     const c2 = (await B('POST', '/api/v1/cart/add-text', { body: { name: '通知測試 果凍', qty: 1 } })).json.data;
     await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [c2.cart_id] } });
@@ -1215,17 +1224,22 @@ const login = async (id) =>
     await api('POST', '/api/v1/payments/reconcile', { token: owner, body: { order_id: o2.order_id, amount_twd: Number(o2fresh.total_twd) } });
     const tv2 = (await pending()).filter((n) => n.kind === 'transfer_verified' && n.order_id === o2.order_id);
     check('單張訂單收款認列 → 也排「已確認收到您的付款」', tv2.length === 1 && txt(tv2[0]).includes(o2.order_id), tv2.map(txt));
+    check('v1.7 單張訂單收到款項 → 點了去「我的訂單」（?path=orders），不是對帳單',
+      /\?path=orders/.test(txt(tv2[0])) && pth(tv2[0]) === 'orders', [txt(tv2[0]), pth(tv2[0])]);
     // 許願
     const wq = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '通知測試 許願奶瓶' } })).json.data;
     await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: wq.wish_id, quote_twd: 650 } });
     const wqn = (await pending()).filter((n) => n.kind === 'quoted' && !n.order_id);
     check('許願報價 → 排「你許的願有報價了」（附我的許願連結）', wqn.some((n) => /許願奶瓶/.test(txt(n)) && /NT\$650/.test(txt(n)) && /\?path=wish/.test(txt(n))), wqn.map(txt));
+    check('v1.7 許願報價 payload.path = wish；訂單報價 payload.path = orders', wqn.every((n) => pth(n) === 'wish') && pth(q1[0]) === 'orders', [wqn.map(pth), pth(q1[0])]);
     await api('POST', '/api/v1/wishes/quote', { token: helper, body: { wish_id: wq.wish_id, quote_twd: 700 } });
     check('許願改價不重複通知', (await pending()).filter((n) => n.kind === 'quoted' && !n.order_id).length === 0);
     const wo = (await B('POST', '/api/v1/wishes/create', { body: { src: 'text', item_name: '通知測試 缺貨的許願' } })).json.data;
     await api('POST', '/api/v1/wishes/mark', { token: helper, body: { wish_id: wo.wish_id, status: '現場缺貨' } });
     const won = (await pending()).filter((n) => n.kind === 'out_of_stock' && !n.order_id);
     check('許願標「現場缺貨」→ 排缺貨通知', won.some((n) => /缺貨的許願/.test(txt(n))), won.map(txt));
+    check('v1.7 許願缺貨 → 點了去「我的許願」（?path=wish），不是我的訂單',
+      won.every((n) => /\?path=wish/.test(txt(n)) && pth(n) === 'wish'), won.map((n) => [txt(n), pth(n)]));
     await api('POST', '/api/v1/wishes/mark', { token: helper, body: { wish_id: wq.wish_id, status: '保留下團' } });
     check('標成其他狀態（保留下團）不通知', (await pending()).filter((n) => n.kind === 'out_of_stock' && !n.order_id).length === 0);
     }
@@ -1369,6 +1383,99 @@ const login = async (id) =>
     const arows = Array.isArray(auditR) ? auditR : auditR.rows || auditR.items || [];
     check('稽核：申請、核准、拒絕、整箱出貨都有紀錄', ['ship_request.create', 'ship_request.approve', 'ship_request.reject', 'ship_request.cancel', 'ship_group.ship']
       .every((a) => arows.some((l) => l.action === a)), arows.slice(0, 5).map((l) => l.action));
+    }
+
+    {
+    section('出貨申請的寄送方式（v1.7，021）：超商／宅配、沿用會員預設、運費照方式算');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const txt = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).text;
+    const detail = async (id) => (await api('GET', `/api/v1/orders/detail?order_id=${id}`, { token: owner })).json.data;
+    const sql = async (q, args = []) => {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      try { return (await c.query(q, args)).rows; } finally { await c.end(); }
+    };
+    const newOrder = async (names, price = 300) => {
+      const ids = [];
+      for (const n of names) ids.push((await B('POST', '/api/v1/cart/add-text', { body: { name: n, qty: 1 } })).json.data.cart_id);
+      await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: ids } });
+      const o = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: ids, pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+      const d = await detail(o.order_id);
+      await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o.order_id, items: d.items.map((i) => ({ item_id: i.item_id, unit_price_twd: price })) } });
+      return detail(o.order_id);
+    };
+    await sql("UPDATE members SET home_addr = NULL WHERE line_user_id = 'U_buyer1'");
+    const pa = await newOrder(['寄送 A 小毯子']);
+    const pb = await newOrder(['寄送 B 口水巾']);
+    check('準備：兩張超商取貨的已報價單', pa.status === '已報價' && pb.status === '已報價' && pa.pickup !== '宅配到府', [pa.pickup, pa.ship_fee_twd]);
+
+    const badType = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pa.order_id, pb.order_id], pickup: { type: 'pigeon' } } });
+    check('寄送方式不是超商或宅配 → 400 BAD_PICKUP', badType.status === 400 && badType.json.error.code === 'BAD_PICKUP', badType.json);
+    const badShape = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pa.order_id, pb.order_id], pickup: 'home' } });
+    check('pickup 不是物件 → 400 BAD_PICKUP', badShape.status === 400 && badShape.json.error.code === 'BAD_PICKUP', badShape.json);
+    const noAddr = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pa.order_id, pb.order_id], pickup: { type: 'home' } } });
+    check('宅配沒填地址、會員資料也沒有 → 400 PICKUP_INCOMPLETE', noAddr.status === 400 && noAddr.json.error.code === 'PICKUP_INCOMPLETE', noAddr.json);
+
+    const ADDR = '新北市板橋區文化路一段 100 號 5 樓';
+    const hr = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pa.order_id, pb.order_id], pickup: { type: 'home', addr: ADDR } } });
+    const hd = hr.json.data;
+    check('申請併單改宅配：回傳 pickup（type、addr、from_default:false）和一行字的 pickup_text', hr.status === 200
+      && hd.pickup && hd.pickup.type === 'home' && hd.pickup.addr === ADDR && hd.pickup.from_default === false
+      && /宅配到府/.test(hd.pickup_text) && hd.pickup_text.includes(ADDR), hd);
+    const mineP = (await B('GET', '/api/v1/ship-requests/list')).json.data.find((x) => x.request_id === hd.request_id);
+    check('我的出貨申請也看得到選的寄送方式', mineP && mineP.pickup.type === 'home' && mineP.pickup.addr === ADDR, mineP);
+
+    const al = (await api('GET', '/api/v1/ship-requests/admin-list?status=pending', { token: owner })).json.data.find((x) => x.request_id === hd.request_id);
+    check('後台審核：看得到客人選的寄送方式，運費照宅配重算（fee_plan）', al && al.pickup.type === 'home'
+      && al.fee_plan.kind === 'merge' && al.fee_plan.pickup_type === 'home' && al.fee_plan.changed === true
+      && al.fee_plan.from_twd === Number(pa.ship_fee_twd) && al.fee_plan.to_twd > 0 && al.fee_plan.to_twd !== al.fee_plan.from_twd, al && al.fee_plan);
+    const ap = await api('POST', '/api/v1/ship-requests/approve', { token: owner, body: { request_id: hd.request_id } });
+    const g = ap.json.data && ap.json.data.ship_group;
+    const [na, nb] = [await detail(pa.order_id), await detail(pb.order_id)];
+    check('核准 → 出貨單寄宅配（pickup_type:home、地址是客人填的）', ap.status === 200 && g && g.pickup_type === 'home'
+      && g.pickup === '宅配到府' && g.pickup_addr === ADDR, ap.json);
+    check('底下兩張單也改寄宅配（理貨看到的地址一致）', [na, nb].every((o) => o.pickup === '宅配到府' && o.pickup_addr === ADDR), [na.pickup, nb.pickup]);
+    check('第一張單的運費照宅配重算、總額跟著變；第二張運費照舊拿掉', Number(na.ship_fee_twd) === al.fee_plan.to_twd
+      && Number(na.total_twd) === Number(pa.total_twd) - Number(pa.ship_fee_twd) + al.fee_plan.to_twd
+      && Number(nb.ship_fee_twd) === 0 && ap.json.data.result.fee_changed.order_id === pa.order_id, { na: [na.ship_fee_twd, na.total_twd], r: ap.json.data.result });
+    const hn = (await pending()).filter((n) => n.kind === 'ship_request');
+    check('LINE 通知寫出「寄到：宅配到府 …」和運費變化', hn.length === 1 && /寄到：宅配到府/.test(txt(hn[0])) && txt(hn[0]).includes(ADDR)
+      && /運費 NT\$\d+ → NT\$\d+/.test(txt(hn[0])), hn.map(txt));
+
+    // 拆單：只帶 type:"cvs" → 沿用會員預設門市（smoke 前面設成 全家 板橋溪城店）
+    const pd = await newOrder(['寄送 拆單 到貨的', '寄送 拆單 還沒到的'], 400);
+    const arrived = pd.items.find((i) => /到貨的/.test(i.name));
+    await sql("UPDATE order_items SET item_status = '已到貨' WHERE item_id = $1", [arrived.item_id]);
+    const cr = (await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'split', order_id: pd.order_id, pickup: { type: 'cvs' } } })).json.data;
+    check('只帶 type:"cvs" → 沿用會員預設門市（from_default:true）', cr.pickup && cr.pickup.type === 'cvs' && cr.pickup.from_default === true
+      && cr.pickup.store_name === '板橋溪城店' && /超商取貨 全家 板橋溪城店/.test(cr.pickup_text), cr);
+    const al2 = (await api('GET', '/api/v1/ship-requests/admin-list?status=pending', { token: owner })).json.data.find((x) => x.request_id === cr.request_id);
+    check('後台審核（拆單）：先寄運費照超商算', al2 && al2.fee_plan.kind === 'split' && al2.fee_plan.pickup_type === 'cvs' && al2.fee_plan.to_twd > 0, al2 && al2.fee_plan);
+    const sa = (await api('POST', '/api/v1/ship-requests/approve', { token: owner, body: { request_id: cr.request_id } })).json.data;
+    const child = await detail(sa.result.child_order_id);
+    check('核准拆單 → 子訂單寄客人選的門市、先寄運費 = 審核畫面顯示的那個數', child.pickup === '全家 板橋溪城店'
+      && sa.ship_group.pickup === '全家 板橋溪城店' && sa.ship_group.pickup_type === 'cvs' && sa.result.extra_fee_twd === al2.fee_plan.to_twd, [child.pickup, sa.result]);
+    await pending();   // 清掉這段的通知，後面的測試不受影響
+
+    const pe = await newOrder(['寄送 指定門市 A']);
+    const pf = await newOrder(['寄送 指定門市 B']);
+    const sc = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pe.order_id, pf.order_id],
+      pickup: { type: 'cvs', brand: '7-11', store_id: '991182', store_name: '板橋文化門市', addr: '新北市板橋區文化路一段 1 號' } } });
+    check('帶了門市就用帶的（不用會員預設）', sc.status === 200 && sc.json.data.pickup.store_name === '板橋文化門市'
+      && sc.json.data.pickup.brand === '7-11' && sc.json.data.pickup.store_id === '991182' && sc.json.data.pickup.from_default === false
+      && sc.json.data.pickup_text === '超商取貨 7-11 板橋文化門市', sc.json);
+    const al3 = (await api('GET', '/api/v1/ship-requests/admin-list?status=pending', { token: owner })).json.data.find((x) => x.request_id === sc.json.data.request_id);
+    check('超商換超商（方式沒變）→ 運費不動（fee_plan.changed:false）', al3 && al3.fee_plan.changed === false && al3.fee_plan.to_twd === Number(pe.ship_fee_twd), al3 && al3.fee_plan);
+    await B('POST', '/api/v1/ship-requests/cancel', { body: { request_id: sc.json.data.request_id } });
+
+    // 正式庫還沒跑 021：寄送方式寫進備註，申請本身照常成立
+    await sql('ALTER TABLE ship_requests DROP COLUMN pickup');
+    const old = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [pe.order_id, pf.order_id], pickup: { type: 'home', addr: ADDR }, note: '謝謝' } });
+    await sql('ALTER TABLE ship_requests ADD COLUMN IF NOT EXISTS pickup jsonb');
+    check('還沒跑 021 → 申請照常成立，寄送方式先寫進備註（店主看得到）', old.status === 200 && /^寄送方式：宅配到府/.test(old.json.data.note)
+      && old.json.data.note.endsWith('謝謝'), old.json);
+    await B('POST', '/api/v1/ship-requests/cancel', { body: { request_id: old.json.data.request_id } });
     }
 
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
