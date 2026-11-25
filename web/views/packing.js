@@ -18,13 +18,15 @@ export async function render(root) {
       for (const i of o.items) {
         items.append(h('div', { style: 'text-align:center' },
           h('img', { class: 'thumb lg', src: i.source_image_url || i.image_url, alt: i.name_zh, style: 'width:100%;height:96px' }),
-          h('div', { class: 'tiny', style: 'margin-top:4px' }, i.name_zh),
+          h('div', { class: 'tiny', style: 'margin-top:4px' }, i.name_zh, i.size ? `（${i.size}）` : ''),
           h('div', { class: 'tiny muted' }, `×${i.qty}`)));
       }
       grid.append(h('div', { class: 'card', style: 'padding:14px' },
         h('div', { class: 'row' },
           h('strong', { class: 'mono' }, o.order_id), statusTag(o.status),
           o.paid ? h('span', { class: 'tag green' }, '已付') : h('span', { class: 'tag amber' }, '未付'),
+          // 併單／拆單核准後的出貨單：同一張出貨單的要裝同一箱（到「出貨申請・出貨單」整箱寄）。
+          o.ship_group_id ? h('a', { class: 'tag blue', href: '#/ship-requests?tab=' + encodeURIComponent('出貨單') }, `同箱 ${o.ship_group_id}`) : null,
           h('span', { class: 'spacer', style: 'flex:1' }),
           h('span', { class: 'muted small' }, o.nickname)),
         'total_twd' in o ? h('div', { class: 'tiny muted', style: 'margin-top:4px' }, nt(o.total_twd)) : null,

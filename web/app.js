@@ -106,7 +106,9 @@ const ROUTES = [
   { path: 'wishes', title: '許願報價', icon: '♡', cap: 'order.read', mod: () => import('./views/wishes.js') },
   { path: 'board', title: '現場採購看板', icon: '◍', cap: 'procurement.read', mod: () => import('./views/board.js'), group: '採購' },
   { path: 'expense', title: '拍收據記帳', icon: '¥', cap: 'procurement.write', mod: () => import('./views/expense.js') },
-  { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('./views/packing.js'), group: '出貨' },
+  { path: 'helper', title: '小幫手工作台', icon: '✎', cap: 'procurement.write', mod: () => import('./views/helper.js') },
+  { path: 'ship-requests', title: '出貨申請・出貨單', icon: '⇪', cap: 'order.read', mod: () => import('./views/ship-requests.js'), group: '出貨' },
+  { path: 'packing', title: '看圖理貨', icon: '❏', cap: 'shipment.write', mod: () => import('./views/packing.js') },
   { path: 'labels', title: 'QR 標籤列印', icon: '▩', cap: 'shipment.write', mod: () => import('./views/labels.js') },
   { path: 'scan', title: '掃碼核對工作站', icon: '⌁', cap: 'shipment.write', mod: () => import('./views/scan.js') },
   { path: 'logistics', title: '進貨物流綁定', icon: '⇄', cap: 'shipment.write', mod: () => import('./views/logistics.js') },
@@ -201,6 +203,7 @@ export function logout() {
 // 共用密碼是過渡期的側門，給系統管理者用；ADMIN_PASSWORD_LOGIN=off 之後就不再顯示。
 
 const LIFF_SDK = 'https://static.line-scdn.net/liff/edge/2/sdk.js';
+const INVITE_KEY = 'hb.admin.invite';
 
 function loadLiff() {
   if (window.liff) return Promise.resolve(window.liff);
@@ -235,8 +238,11 @@ async function lineLogin(liffId, interactive) {
   }
   const idToken = liff.getIDToken();
   if (!idToken) throw new Error('拿不到 LINE 身分。LIFF app 需要勾選 openid 權限，請聯絡系統管理者');
+  // 登入頁填了邀請碼的話一起帶上（LINE 登入會跳轉，所以先放 sessionStorage）。
+  let invite = null;
+  try { invite = sessionStorage.getItem(INVITE_KEY); sessionStorage.removeItem(INVITE_KEY); } catch { /* 無痕模式 */ }
   try {
-    signedIn(await POST('/api/v1/auth/line', { id_token: idToken }));
+    signedIn(await POST('/api/v1/auth/line', invite ? { id_token: idToken, invite_code: invite } : { id_token: idToken }));
     return true;
   } catch (e) {
     // 驗不過（多半是 ID Token 過期）或不是員工：都先登出 LINE，下一次才能換帳號或重新取得。
@@ -260,10 +266,15 @@ async function renderLogin(err = null) {
   }
 
   const errLine = err ? h('p', { class: 'small', style: 'color:var(--bad,#a8241c); margin:0 0 8px; word-break:break-all' }, err) : null;
+  // 新的小幫手：店主給的邀請碼填在這裡，再按「用 LINE 登入」就會自動加入。
+  const inviteInput = h('input', { class: 'input', type: 'text', placeholder: '邀請碼（新加入的小幫手才要填）', autocomplete: 'off',
+    style: 'text-transform:uppercase', 'aria-label': '邀請碼' });
   const lineButton = cfg.line.ready
     ? h('button', {
       class: 'btn primary', style: 'background:#06c755;border-color:#06c755',
       onClick: async () => {
+        const code = inviteInput.value.trim();
+        try { if (code) sessionStorage.setItem(INVITE_KEY, code); else sessionStorage.removeItem(INVITE_KEY); } catch { /* 無痕模式 */ }
         try { await lineLogin(cfg.line.liff_id, true); } catch (e) { renderLogin(e.message); }
       },
     }, '用 LINE 登入')
@@ -300,8 +311,8 @@ async function renderLogin(err = null) {
   if (lineButton) {
     body = [
       h('p', { class: 'muted small', style: 'margin-top:0' },
-        '用你的 LINE 帳號登入。只有店主在「成員與權限」加入的員工進得來。'),
-      errLine, lineButton,
+        '用你的 LINE 帳號登入。只有店家的員工進得來；新加入的小幫手請先填店主給的邀請碼。'),
+      errLine, inviteInput, lineButton,
       cfg.password ? h('button', { class: 'btn ghost sm', style: 'margin-top:12px', onClick: showPassword }, '系統管理者：用共用密碼登入') : null,
       passwordArea,
     ];

@@ -49,6 +49,12 @@ function boot() {
   require('./routes/buyer-orders');
   // 後台「放東西進店裡」的入口：開團、喊單、許願報價、訂單報價、對帳單。
   require('./routes/admin-shop');
+  // 出貨申請（併單／拆單）與出貨單：客人申請、店主審核。
+  require('./routes/ship-requests');
+  // 小幫手工作台：邀請碼、我的採買清單、批次收據請款。
+  require('./routes/helper');
+  // 站內通知中心：客人看自己的通知紀錄（跟 LINE 同一份）。
+  require('./routes/inbox');
   // 後台設定：價目表、成員與權限。
   require('./routes/admin-config');
   // 綠界：付款結果回調、後台金流設定。

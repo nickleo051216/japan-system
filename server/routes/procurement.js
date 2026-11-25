@@ -241,6 +241,14 @@ post('/api/v1/procurement/ocr', async ({ actor, body }) => {
 // F-07 小幫手拍照請款 — writes cost with an fx snapshot.
 post('/api/v1/procurement/expense', async ({ actor, body }) => {
   auth.requireCap(actor, 'procurement.write');   // 非 helper/owner 不得寫入成本
+  return ok(auth.redact(actor, await recordExpense(actor, body)));
+});
+
+/**
+ * 記一筆採購成本（含匯率快照）。單張收據（/procurement/expense）和小幫手批次請款
+ * （/helper/claims/create 裡帶 items 的收據）都走這裡。
+ */
+async function recordExpense(actor, body) {
   const proc = await db.one('SELECT pr.*, p.price_twd, p.name_zh FROM procurements pr JOIN products p ON p.sku = pr.sku WHERE pr.proc_id = ?', body.proc_id);
   if (!proc) throw err('PROC_NOT_FOUND', '查無此採購項目', 404);
 
@@ -260,9 +268,9 @@ post('/api/v1/procurement/expense', async ({ actor, body }) => {
 
   const marginPct = money.margin(proc.price_twd, agg.unit_cost_twd);
   await audit.record({ actor: actor.line_user_id, action: 'procurement.expense', target: proc.proc_id,
-    detail: { unit_cost_jpy: unitCost, fx, qty, amount_edited: !!body.amount_edited }, result: 'ok' });
+    detail: { unit_cost_jpy: unitCost, fx, qty, amount_edited: !!body.amount_edited, claim_id: body.claim_id || undefined }, result: 'ok' });
 
-  const result = {
+  return {
     proc_id: proc.proc_id,
     name_zh: proc.name_zh,
     qty,
@@ -274,8 +282,7 @@ post('/api/v1/procurement/expense', async ({ actor, body }) => {
     receipts: agg.receipts,
     low_margin: marginPct != null && marginPct < money.LOW_MARGIN_THRESHOLD,
   };
-  return ok(auth.redact(actor, result));
-});
+}
 
 get('/api/v1/procurement/expenses', async ({ actor, query }) => {
   auth.requireCap(actor, 'order.read.cost');
@@ -285,4 +292,4 @@ get('/api/v1/procurement/expenses', async ({ actor, query }) => {
     ...(query.proc_id ? [query.proc_id] : [])));
 });
 
-module.exports = { syncBoard, boardRows, notifyOwner, refreshOrderProgress, syncItemStatus, ITEM_STATUS_BY_PROC_STATE };
+module.exports = { syncBoard, boardRows, notifyOwner, refreshOrderProgress, syncItemStatus, recordExpense, ITEM_STATUS_BY_PROC_STATE };

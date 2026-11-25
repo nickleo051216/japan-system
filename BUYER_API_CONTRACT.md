@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.5.2
+# 買家 API 合約（Buyer API Contract）v1.6
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -34,7 +34,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ---
 
-## 2. 端點一覽（27 個）
+## 2. 端點一覽（34 個）
 
 | # | 方法 | 路徑 | 用途 | 備註 |
 |---|---|---|---|---|
@@ -72,6 +72,13 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 27 | GET | `/wishes/board?sort=hot\|new` | 許願牆（店家審核過的公開許願，v1.5） | wishlist, wish_votes, broadcast |
 | 28 | POST | `/wishes/plus` | 我也想要 +1／取消（v1.5） | wish_votes |
 | 29 | POST | `/wishes/share` | 自己的許願改公開／不公開（v1.5） | wishlist |
+| 30 | POST | `/ship-requests/create` | 申請併單／拆單（v1.6） | ship_requests |
+| 31 | GET | `/ship-requests/list` | 我的出貨申請（v1.6） | ship_requests, ship_groups |
+| 32 | POST | `/ship-requests/cancel` | 取消審核中的申請（v1.6） | ship_requests |
+| 33 | POST | `/staff/join` | 輸入店主給的邀請碼成為員工（v1.6，選做） | staff_invites, members |
+| 34 | GET | `/inbox/list` | 站內通知中心（v1.6，跟 LINE 通知同一份） | notification_outbox |
+| 35 | GET | `/inbox/unread-count` | 未讀則數（v1.6） | notification_outbox |
+| 36 | POST | `/inbox/read` | 標成看過（v1.6） | notification_outbox |
 
 所有端點**只回傳該 `line_user_id` 自己的資料**，不能透過參數查別人的。
 
@@ -94,6 +101,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 { "order_id": "ORD-…", "batch": "T-260913", "status": "待確認|已報價|已到貨|已出貨|已送達|缺貨|已取消",
   "payment_status": "待付款|待官方確認|已核對", "paid": false,
   "total_twd": 1940, "ship_fee_twd": 70, "split_shipped": false, "statement_id": null,
+  "ship_group_id": null, "parent_order_id": null,
   "pickup": "7-11 板橋文化門市", "pickup_addr": "…", "invoice": "手機載具 /AB12+3C", "note": "", "created_at": "…",
   "items": [ { "item_id": "…", "name": "…", "qty": 1, "jpy_taxed": 2519, "unit_price_twd": 890,
                "item_status": "待採買|採買中|已到貨|缺貨", "source": "text" } ],
@@ -132,19 +140,26 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 ### 3. `GET /home/summary`
 ```json
 { "shop": { "name", "bank_name", "bank_code", "bank_account", "bank_holder", "bank_ready", "payment_deadline_days", "bulky_add_min", "bulky_add_max", "statement_days",
-            "ship_fee": { "cvs": 70, "home": 120 }, "ship_free": { "cvs": 2500, "home": null }, "show_trip_card": null },
+            "ship_fee": { "cvs": 70, "home": 120 }, "ship_free": { "cvs": 2500, "home": null }, "show_trip_card": null, "next_statement_date": "2026-11-30" },
   "batch": { "batch", "name", "region", "close_at", "buy_at", "back_at", "ship_at", "stage" },
   "price_table": [ { "jpy_taxed_max": 429, "twd": 180 } ],
   "broadcast": [ { "send_id", "name", "jpy_taxed", "price_twd", "quantity", "remaining", "deadline_at", "note", "image_url",
+                   "listed_at": "2026-11-25T03:00:00.000Z", "images": ["https://…簽名網址"], "sizes": ["90","100"],
                    "open": true, "waitlisted": false } ],
-  "todo": { "unpaid_statements": 1, "pending_cart": 0 } }
+  "todo": { "unpaid_statements": 1, "pending_cart": 0, "inbox_unread": 2 } }
 ```
 - `open` = 尚有餘量 且 未過截止時間
 - `waitlisted` = 此會員是否已排該項候補
 - `image_url` = 喊單商品照片，**15 分鐘有效的簽名網址**（2026-11-09 起；沒有照片時是 `null`）。過期了重抓 `/home/summary` 就會拿到新的
+- v1.6 每日連線＋1：
+  - `listed_at` = 上架時間。前台依**台灣日期**分組。
+  - `images` = 這件商品的照片，最多 4 張，每張都是 15 分鐘的簽名網址。第 1 張就是 `image_url`；沒有照片時是 `[]`。
+  - `sizes` = 尺寸選項，例如 `["90","100","110"]`；`null` 表示這件不用選尺寸。各尺寸**共用**同一個 `remaining`。
+  - 回傳範圍：開著的喊單全部回；截止或搶完的只回**上架 7 天內**的（前台顯示「已截止／可候補」）。最多 200 筆，新的在前。
 - `bank_holder` = 收款戶名，店主在後台設定；空字串時前台不顯示戶名（新增欄位）
 - `bank_ready` = 銀行名稱、代碼、帳號三者都有值才是 `true`；`false` 時前台引導改用信用卡／ATM（見 §8 #5）
 - `ship_fee` = 台灣端運費（台幣），店主在後台設定；結帳實收用同一個來源。前台結帳頁請顯示這個值，不要寫死（新增欄位，舊前台忽略即可）
+- `next_statement_date`（v1.6）= 下一次自動結算的台灣日期 `YYYY-MM-DD`（含今天）；店主關掉自動結算時是 `null`。`statement_days` 沒設定時回 `15,月底`
 - `show_trip_card`（v1.5.2）= 首頁團卡要不要顯示，店主在後台「店家與收款設定」選：`true` 一律顯示、`false` 一律隱藏、`null` 自動（前台照有沒有開團自己決定，跟以前一樣）
 - `ship_free` = 滿額免運門檻（台幣，v1.3 新增）。**看單張訂單的商品小計（不含運費）**，小計 ≥ 門檻就免運；`null` = 這種取貨方式沒有免運。前台可用 `門檻 − 小計` 顯示「再買 NT$xxx 免運」；實收運費以結帳回傳的 `ship_fee_twd` 為準
 
@@ -185,7 +200,11 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 請求 `{ send_id, qty }` → 回 `{ granted, remaining, rank, cart_item }`
 - **必須呼叫資料庫函式 `shout()`**（列鎖＋原子扣量），不得在程式端讀→算→寫
 - 餘量 0 → `409 SOLD_OUT`；過截止 → `409 DEADLINE_PASSED`；棄單達上限（`drops_limit`，預設 1）→ `403 SUSPENDED`，訊息會寫實際次數與恢復方式
-- 同一會員同一喊單已在購物車 → 數量累加到同一筆
+- 同一會員同一喊單已在購物車 → 數量累加到同一筆（v1.6：同一個尺寸才合併，不同尺寸各一筆）
+- v1.6 尺寸：請求多收 `size`。
+  - 喊單有 `sizes` 時一定要帶：沒帶 → `400 SIZE_REQUIRED`；不在選項裡 → `400 BAD_SIZE`。訊息都會列出可以選的尺寸。
+  - 喊單沒有 `sizes` 時，帶了也會被忽略。
+  - `cart_item.size`、訂單 `items[].size` 會記住客人選的尺寸，理貨照這個裝。
 
 ### 12. `POST /broadcast/waitlist`
 請求 `{ send_id, on: bool }` → 回 `{ send_id, waitlisted }`
@@ -249,6 +268,42 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 21. `POST /orders/split-request`
 請求 `{ order_id, on }`；僅「已報價／已到貨」且**部分品項已到貨**時可申請 → 否則 `409 NOT_SPLITTABLE`
+（v1.6 起建議改用第 30 項拆單申請：店主核准後真的拆出子訂單、產生出貨單。這支保留相容。）
+
+### 30. `POST /ship-requests/create`（v1.6 併單／拆單）
+- 併單 `{ kind:"merge", order_ids:[…2～10 張], ship_to_order_id?, note? }`：都要是自己的、「已報價」或「已到貨」、還沒在出貨單裡。
+  `ship_to_order_id` 是寄送地址用哪一張（預設第一張），回傳的 `order_ids` 會把它排第一。
+- 拆單 `{ kind:"split", order_id, item_ids?, note? }`：訂單「已報價」、挑的品項都「已到貨」、至少留一項之後寄；不帶 `item_ids` = 已到貨的全部先寄。
+- 回 ShipRequest：`{ request_id, kind, kind_zh, status, status_zh, order_ids, item_ids, note, decision_note, created_at, decided_at, ship_group }`
+  - `status`：`pending`（審核中）→ `approved`／`rejected`，或客人 `cancelled`
+  - `ship_group`（核准後）：`{ ship_group_id, status:"待出貨|已出貨", order_ids, pickup, pickup_addr, created_at, orders:[{ order_id, status, total_twd, ship_fee_twd }] }`
+- 錯誤：`400 BAD_KIND／TOO_FEW_ORDERS／TOO_MANY_ORDERS／BAD_SHIP_TO`、`404 ORDER_NOT_FOUND／ITEM_NOT_FOUND`、
+  `409 NOT_QUOTED／NOT_MERGEABLE／ALREADY_GROUPED／NOT_SPLITTABLE／ITEM_NOT_ARRIVED／NOTHING_LEFT／ALREADY_REQUESTED`
+- 核准後的金額變化：併單＝第一張保留運費，其他「待付款且沒出對帳單」的運費歸 0（總額跟著減）；拆單＝子訂單 `order_id` 加 `-A`，
+  狀態「已到貨」，總額＝先寄品項＋先寄運費（母單已付款或已出對帳單則不收運費）。審核結果用 LINE 通知（`ship_request`）。
+
+### 31. `GET /ship-requests/list`
+回自己的 ShipRequest[]，新的在前，最多 50 筆。
+
+### 32. `POST /ship-requests/cancel`
+請求 `{ request_id }`；只有 `pending` 能取消，否則 `409 ALREADY_DECIDED`。
+
+### 33. `POST /staff/join`（v1.6 邀請碼，選做）
+請求 `{ code }`（8 碼英數，大小寫、空格、`-` 都接受）→ 回 `{ role:"helper|packer", role_zh, nickname, member_no, next }`。
+錯誤：`400／404 INVITE_INVALID`、`409 INVITE_EXPIRED／INVITE_REVOKED／INVITE_USED_UP／ALREADY_STAFF`、`429 TOO_MANY_ATTEMPTS`（一小時輸錯 10 次）。
+這支回應不進冪等快取。成功後請客人改用後台登入（同一個 LINE 帳號）。
+
+### 34. `GET /inbox/list?limit=30&before=`（v1.6 站內通知中心）
+回 `{ items:[InboxItem], unread, next_before }`，新的在前；`limit` 1～50；下一頁把 `next_before` 帶進 `before`（`null` = 沒有了）。
+InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, created_at, read, read_at }`
+- `text` 與 LINE 推播相同；`body` 去掉網址與「👉」引導行，畫面用；`path` ∈ `orders|stmt|wish|live`
+- 資料來源就是 LINE 通知佇列：LINE 沒送達也看得到
+
+### 35. `GET /inbox/unread-count`
+回 `{ unread }`。`/home/summary` 的 `todo.inbox_unread` 是同一個數字（016 還沒跑時為 `null`）。
+
+### 36. `POST /inbox/read`
+請求 `{ notif_ids:[…最多 200] }` 或 `{ all:true }` → 回 `{ marked, unread }`。只會改到自己的通知；都沒帶 → `400 BAD_REQUEST`。
 
 ### 22. `POST /orders/received`
 請求 `{ order_id }`；僅「已出貨」可改為「已送達」，否則 `409 ILLEGAL_TRANSITION`（由 DB trigger 擋）
@@ -296,6 +351,17 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 5.0 v1.6 變更（2026-11-25 起，Nick 排的 6 項）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
+| 3 | 三種 LINE 通知：`quoted`（訂單／許願報價）、`transfer_verified`（手動核帳）、`out_of_stock`（訂單缺貨／許願現場缺貨）；連結 `?path=orders`、`?path=wish` | — |
+| 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
+| 6 | 站內通知中心：`/inbox/list`、`/inbox/unread-count`、`/inbox/read`；`home.todo.inbox_unread` | 3、34～36 |
+| 5 | 小幫手邀請碼：`/staff/join`（後台登入頁也能填）；小幫手工作台、請款審核都在後台 | 33 |
+| 4 | 出貨申請（併單／拆單）：客人申請、店主審核、核准後產生出貨單；訂單多 `ship_group_id`、`parent_order_id`；LINE 通知 `ship_request` | 19、20、30～32 |
 
 ## 5.1 v1.5.2 變更（2026-11-19，後台改版配套）
 

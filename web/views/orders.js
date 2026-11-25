@@ -56,7 +56,7 @@ export async function render(root, ctx) {
         h('td', {}, statusTag(o.status)),
         session.can('order.read.price') ? h('td', {}, nt(o.total_twd)) : null,
         h('td', {}, o.paid ? h('span', { class: 'tag green' }, '已付') : h('span', { class: 'tag amber' }, '未付')),
-        h('td', { class: 'small' }, o.items.map((i) => `${i.name_zh}×${i.qty}`).join('、') || '—'),
+        h('td', { class: 'small' }, o.items.map((i) => `${i.name_zh}${i.size ? `（${i.size}）` : ''}×${i.qty}`).join('、') || '—'),
         h('td', { class: 'tiny muted' }, dt(o.created_at)),
         h('td', {}, h('button', { class: 'btn sm', onClick: () => detail(o.order_id) }, '明細'))));
     }
@@ -73,7 +73,7 @@ export async function render(root, ctx) {
 
     body.append(h('table', {}, h('tbody', {}, ...o.items.map((i) => h('tr', {},
       h('td', { style: 'width:60px' }, h('img', { class: 'thumb', src: i.source_image_url || i.image_url, alt: i.name_zh })),
-      h('td', {}, i.name_zh, h('div', { class: 'tiny muted' }, `${i.sku || '型錄外品項'}　${i.name_local || ''}`)),
+      h('td', {}, i.name_zh, i.size ? h('span', { class: 'tag', style: 'margin-left:6px' }, `尺寸 ${i.size}`) : null, h('div', { class: 'tiny muted' }, `${i.sku || '型錄外品項'}　${i.name_local || ''}`)),
       h('td', {}, `×${i.qty}`),
       session.can('order.read.price')
         ? h('td', {}, Number(i.unit_price_twd) > 0 ? nt(i.unit_price_twd * i.qty) : h('span', { class: 'tag red' }, '未定價'))

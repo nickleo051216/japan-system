@@ -16,6 +16,7 @@
  *    程式端不做「讀→算→寫」，否則兩個人同時喊最後一個就會超賣。
  */
 const db = require('../lib/db');
+const statementDays = require('../lib/statement-days');
 const price = require('../lib/price');
 const shipfee = require('../lib/shipfee');
 const storage = require('../lib/storage');
@@ -46,6 +47,7 @@ const cartShape = (r) => ({
   jpy_taxed: num(r.jpy_taxed), price_twd: num(r.price_twd), qty: r.qty,
   ai_confidence: r.ai_confidence, status: r.status,
   note: r.note || '', file_name: r.file_name || null, image_url: r.image_url || null,
+  size: r.size || null,   // v1.6：喊單選的尺寸
   created_at: r.created_at,
   // 合約 v1.2 #2：前台每 4 秒輪詢等辨識結果，這個旗標讓它不必自己拼湊判斷式。
   // 非拍照來源一律 true —— 沒有什麼好等的。
@@ -73,8 +75,7 @@ const statementShape = (s) => ({
 /** 訂單附品項、狀態紀錄、出貨紀錄。只給這位客人自己的單。 */
 async function orderShape(row) {
   const [items, log, shipments] = await Promise.all([
-    db.all(`SELECT item_id, name, qty, jpy_taxed, unit_price_twd, item_status, source
-              FROM order_items WHERE order_id = ? ORDER BY item_id`, row.order_id),
+    db.all('SELECT * FROM order_items WHERE order_id = ? ORDER BY item_id', row.order_id),
     db.all(`SELECT to_status, ts FROM order_status_log
               WHERE order_id = ? ORDER BY ts, log_id`, row.order_id),
     db.all(`SELECT shipment_id, carrier, tracking_no, shipped_at, eta
@@ -85,11 +86,14 @@ async function orderShape(row) {
     payment_status: row.payment_status, paid: !!row.paid,
     total_twd: num(row.total_twd), ship_fee_twd: num(row.ship_fee_twd),
     split_shipped: !!row.split_shipped, statement_id: row.statement_id || null,
+    ship_group_id: row.ship_group_id || null,   // v1.6：併單／拆單核准後的出貨單
+    parent_order_id: row.parent_order_id || null,
     pickup: row.pickup || '', pickup_addr: row.pickup_addr || '', invoice: row.invoice || '',
     note: row.note || '', created_at: row.created_at,
     items: items.map((i) => ({
       item_id: i.item_id, name: i.name, qty: i.qty, jpy_taxed: num(i.jpy_taxed),
       unit_price_twd: num(i.unit_price_twd), item_status: i.item_status, source: i.source,
+      size: i.size || null,
     })),
     status_log: log.map((l) => ({ to_status: l.to_status, ts: l.ts })),
     shipments: shipments.map((s) => ({
@@ -136,12 +140,22 @@ bpost('/api/v1/me/update', async ({ me, body }) => {
 
 // ---- 3 首頁 ----------------------------------------------------------------
 
+const BROADCAST_HISTORY_DAYS = 7;
+const signBroadcasts = async (rows) => {
+  await storage.resolve(rows, 'image_url');
+  return storage.resolveList(rows, 'images');
+};
+
 bget('/api/v1/home/summary', async ({ me }) => {
   const [shopRows, batch, priceTable, broadcast, watch, todo] = await Promise.all([
     db.all('SELECT key, value FROM settings'),
     currentBatch().then((b) => (b ? db.one('SELECT * FROM batches WHERE batch = ?', b) : null)),
     price.table(),
-    db.all('SELECT * FROM broadcast ORDER BY created_at DESC'),
+    // 開著的喊單全部回；截止或搶完的只回上架 7 天內的（「每日連線」看得到這週錯過的，可以排候補）。
+    db.all(`SELECT * FROM broadcast
+             WHERE (remaining > 0 AND (deadline_at IS NULL OR deadline_at > now()))
+                OR created_at > now() - interval '${BROADCAST_HISTORY_DAYS} days'
+             ORDER BY created_at DESC LIMIT 200`),
     db.all("SELECT item_ref FROM restock_watch WHERE line_user_id = ? AND kind = 'waitlist'", me.line_user_id),
     db.one(`SELECT
         (SELECT count(*) FROM statements WHERE line_user_id = ? AND payment_status <> '已核對') AS unpaid_statements,
@@ -151,6 +165,12 @@ bget('/api/v1/home/summary', async ({ me }) => {
   const s = Object.fromEntries(shopRows.map((r) => [r.key, r.value]));
   const waitlisted = new Set(watch.map((w) => w.item_ref));
   const t = Date.now();
+  // 站內通知中心的未讀數（v1.6，016）。正式庫還沒跑 016 時沒有 read_at，回 null，前台不顯示紅點。
+  let inboxUnread = null;
+  try {
+    inboxUnread = Number((await db.one(
+      'SELECT count(*) AS n FROM notification_outbox WHERE line_user_id = ? AND read_at IS NULL', me.line_user_id)).n);
+  } catch { /* 016 還沒跑 */ }
   return ok({
     shop: {
       name: s.shop_name || '', bank_name: s.bank_name || '', bank_code: s.bank_code || '',
@@ -161,7 +181,9 @@ bget('/api/v1/home/summary', async ({ me }) => {
       bank_ready: !!(s.bank_name && s.bank_code && s.bank_account),
       payment_deadline_days: int(s.payment_deadline_days),
       bulky_add_min: int(s.bulky_add_min), bulky_add_max: int(s.bulky_add_max),
-      statement_days: s.statement_days || '',
+      statement_days: s.statement_days || statementDays.DEFAULT,
+      // 下一個結算日（台灣日期 YYYY-MM-DD），前台顯示「下次結算」用。v1.6
+      next_statement_date: s.statement_auto === 'off' ? null : statementDays.nextDue(s.statement_days),
       // 前台結帳頁顯示的運費；跟結帳實際收的同一個來源（lib/shipfee）。
       ship_fee: shipfee.fromSettings(s),
       // 滿額免運門檻（看單張訂單的商品小計）；null = 這種取貨方式沒有免運。
@@ -177,14 +199,18 @@ bget('/api/v1/home/summary', async ({ me }) => {
     price_table: priceTable,
     // 喊單照片存的是 `storage:` 參照（私有 bucket），給前台前換成 15 分鐘的簽名網址。
     // 過期時前台會重抓 /home/summary 換新的（前台 imgExpired()）。
-    broadcast: await storage.resolve(broadcast.map((b) => ({
+    broadcast: await signBroadcasts(broadcast.map((b) => ({
       send_id: b.send_id, name: b.name, jpy_taxed: num(b.jpy_taxed), price_twd: num(b.price_twd),
       quantity: b.quantity, remaining: b.remaining, deadline_at: b.deadline_at,
       note: b.note || '', image_url: b.image_url || null,
+      // v1.6 每日連線＋1：上架時間（前台依台灣日期分組）、多張照片、尺寸選項
+      listed_at: b.created_at,
+      images: Array.isArray(b.images) && b.images.length ? [...b.images] : (b.image_url ? [b.image_url] : []),
+      sizes: Array.isArray(b.sizes) && b.sizes.length ? b.sizes : null,
       open: b.remaining > 0 && (!b.deadline_at || new Date(b.deadline_at).getTime() > t),
       waitlisted: waitlisted.has(b.send_id),
-    })), 'image_url'),
-    todo: { unpaid_statements: todo.unpaid_statements, pending_cart: todo.pending_cart },
+    }))),
+    todo: { unpaid_statements: todo.unpaid_statements, pending_cart: todo.pending_cart, inbox_unread: inboxUnread },
   });
 });
 

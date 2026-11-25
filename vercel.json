@@ -19,5 +19,11 @@
       "source": "/uploads/(.*)",
       "destination": "/api/index"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/v1/cron/statements",
+      "schedule": "50 15 * * *"
+    }
   ]
 }

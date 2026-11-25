@@ -311,3 +311,22 @@ tr:last-child td { border-bottom: 0; }
   .toast { bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
 }
 @media print { .tabbar { display: none !important; } }
+
+/* 出貨申請（併單／拆單） */
+.sr-order { border-top: 1px dashed var(--line); padding: 8px 0; min-width: 0; }
+.sr-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 8px; margin-top: 6px; }
+.sr-item { text-align: center; padding: 6px; border-radius: 12px; border: 1px solid transparent; min-width: 0; overflow-wrap: anywhere; }
+.sr-item.picked { border-color: var(--green); background: var(--green-bg); }
+.sr-item .thumb { width: 100%; height: 72px; }
+.sr-item .thumb.ph { display: grid; place-items: center; font-size: 26px; }
+.sr-item .ok { color: var(--green); }
+
+/* 小幫手工作台・邀請碼 */
+.invite-code { font-size: 30px; letter-spacing: 3px; text-align: center; padding: 14px; margin-bottom: 10px; border-radius: 14px; background: var(--green-bg); color: var(--green); }
+.hw-row { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px dashed var(--line); min-width: 0; }
+.hw-row .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.rcp-card { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; }
+.rcp-card img, .rcp-thumbs img { width: 84px; height: 84px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+.rcp-thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.rcp-thumbs img { width: 64px; height: 64px; cursor: zoom-in; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }

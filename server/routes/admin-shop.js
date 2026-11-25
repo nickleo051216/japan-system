@@ -16,13 +16,15 @@ const price = require('../lib/price');
 const notify = require('../lib/notify');
 const { currentBatch } = require('../lib/batch');
 const { STATUS, transition } = require('../lib/state');
-const { get, post, ok } = require('../lib/http');
+const { get, post, raw, ok, send, fail } = require('../lib/http');
+const statementDays = require('../lib/statement-days');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const shipfee = require('../lib/shipfee');
 const drops = require('../lib/drops');
 const storage = require('../lib/storage');
 const config = require('../lib/config');
 const wishRule = require('../lib/wish');
+const customerNotify = require('../lib/customer-notify');
 
 const err = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -68,12 +70,31 @@ const broadcastShape = (b) => ({
   send_id: b.send_id, batch: b.batch, name: b.name, jpy_taxed: num(b.jpy_taxed), price_twd: num(b.price_twd),
   quantity: b.quantity, remaining: b.remaining, sold: b.quantity - b.remaining,
   deadline_at: b.deadline_at, note: b.note || '', image_url: b.image_url || null, created_at: b.created_at,
+  listed_at: b.created_at,
+  images: Array.isArray(b.images) && b.images.length ? [...b.images] : (b.image_url ? [b.image_url] : []),
+  sizes: Array.isArray(b.sizes) && b.sizes.length ? b.sizes : null,
   open: b.remaining > 0 && (!b.deadline_at || new Date(b.deadline_at).getTime() > Date.now()),
   waitlist: b.waitlist === undefined ? undefined : b.waitlist,
 });
 
 /** 照片是私有 bucket 的 `storage:` 參照，給畫面前換成短效簽名網址。 */
-const signedShape = async (rows) => storage.resolve(rows.map(broadcastShape), 'image_url');
+const signedShape = async (rows) => {
+  const out = rows.map(broadcastShape);
+  await storage.resolve(out, 'image_url');
+  return storage.resolveList(out, 'images');
+};
+
+/** 尺寸選項：['90','100'] 或 '90,100' → 陣列；沒填 → null（這件不用選尺寸）。 */
+function parseSizes(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const list = (Array.isArray(v) ? v : String(v).split(/[,，、\s]+/)).map((x) => String(x).trim()).filter(Boolean);
+  const uniq = [...new Set(list)];
+  if (!uniq.length) return null;
+  if (uniq.length > 20) throw err('BAD_SIZES', '尺寸最多 20 種');
+  if (uniq.some((x) => x.length > 12)) throw err('BAD_SIZES', '每個尺寸最多 12 個字');
+  return uniq;
+}
+const MAX_IMAGES = 4;
 
 get('/api/v1/broadcast/admin-list', async ({ actor, query }) => {
   auth.requireCap(actor, 'broadcast');
@@ -152,6 +173,7 @@ async function createBroadcast(actor, body, imageUrl) {
   }
   const deadline = isoOrNull(body.deadline_at, '截止');
   if (deadline && new Date(deadline).getTime() <= Date.now()) throw err('BAD_TIME', '截止時間要在現在之後');
+  const sizes = parseSizes(body.sizes);
   // 驗證都過了才開團：不然填錯價錢也會多出一個空團。
   const batch = await ensureBatch(actor, body.batch_name);
   const { md } = twDate();
@@ -161,13 +183,17 @@ async function createBroadcast(actor, body, imageUrl) {
       "SELECT send_id FROM broadcast WHERE send_id LIKE ? ORDER BY send_id DESC LIMIT 1", `BC-${md}-%`);
     const seq = (last ? parseInt(last.send_id.split('-')[2], 10) || 0 : 0) + 1 + attempt;
     const sendId = `BC-${md}-${String(seq).padStart(3, '0')}`;
+    // 012 的欄位（images、sizes）有用到才寫：正式庫還沒跑 012 時，一般開喊單照常。
+    const cols = ['send_id', 'batch', 'name', 'jpy_taxed', 'price_twd', 'quantity', 'remaining', 'deadline_at', 'note', 'image_url', 'created_at'];
+    const vals = [sendId, batch, name, jpy, twd, quantity, quantity, deadline, body.note || null, imageUrl, now()];
+    if (imageUrl) { cols.push('images'); vals.push([imageUrl]); }
+    if (sizes) { cols.push('sizes'); vals.push(sizes); }
     const res = await db.run(
-      `INSERT INTO broadcast (send_id, batch, name, jpy_taxed, price_twd, quantity, remaining, deadline_at, note, image_url, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (send_id) DO NOTHING`,
-      sendId, batch, name, jpy, twd, quantity, quantity, deadline, body.note || null, imageUrl, now());
+      `INSERT INTO broadcast (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(',')}) ON CONFLICT (send_id) DO NOTHING`,
+      ...vals);
     if (res.changes > 0) {
       await audit.record({ actor: actor.line_user_id, action: 'broadcast.create', target: sendId,
-        detail: { quantity, price_twd: twd, ...(body.from_wish ? { from_wish: body.from_wish } : {}) }, result: 'ok' });
+        detail: { quantity, price_twd: twd, ...(sizes ? { sizes } : {}), ...(body.from_wish ? { from_wish: body.from_wish } : {}) }, result: 'ok' });
       return db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId);
     }
   }
@@ -201,6 +227,10 @@ post('/api/v1/broadcast/image', async ({ actor, body }) => {
   const buf = Buffer.from(m[2], 'base64');
   if (!buf.length || buf.length > BC_IMAGE_MAX) throw err('BAD_IMAGE', '照片太大（上限 3 MB），請換一張');
   const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[m[1].toLowerCase()];
+  // mode：replace（預設，換掉全部，只留這一張）或 append（加一張，最多 4 張，給「每日連線」的 2×2）。
+  const append = body.mode === 'append';
+  const current = Array.isArray(row.images) && row.images.length ? row.images : (row.image_url ? [row.image_url] : []);
+  if (append && current.length >= MAX_IMAGES) throw err('TOO_MANY_IMAGES', `一件商品最多 ${MAX_IMAGES} 張照片`, 409);
   let ref;
   try {
     ref = await storage.put(`broadcast/${sendId}-${Date.now()}.${ext}`, buf, m[1]);
@@ -208,9 +238,42 @@ post('/api/v1/broadcast/image', async ({ actor, body }) => {
     console.error('[broadcast] 照片上傳失敗：', e.message);
     throw Object.assign(new Error('照片上傳失敗，請再試一次'), { code: 'UPLOAD_FAILED', status: 503 });
   }
-  await db.run('UPDATE broadcast SET image_url = ? WHERE send_id = ?', ref, sendId);
+  const images = append ? [...current, ref] : [ref];
+  if (row.images === undefined) {
+    // 正式庫還沒跑 012：只有封面一張
+    await db.run('UPDATE broadcast SET image_url = ? WHERE send_id = ?', ref, sendId);
+  } else {
+    await db.run('UPDATE broadcast SET image_url = ?, images = ? WHERE send_id = ?', images[0], images, sendId);
+  }
   await audit.record({ actor: actor.line_user_id, action: 'broadcast.image', target: sendId,
-    detail: { replaced: !!row.image_url }, result: 'ok' });
+    detail: { replaced: !append && !!row.image_url, added: append, count: images.length }, result: 'ok' });
+  return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
+});
+
+/** 拿掉一張照片（index 從 0 算）。拿掉第 1 張時，第 2 張變封面。 */
+post('/api/v1/broadcast/image/remove', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  const sendId = String(body.send_id ?? '');
+  const row = await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId);
+  if (!row) throw err('NOT_FOUND', '找不到這張喊單', 404);
+  const images = Array.isArray(row.images) ? [...row.images] : [];
+  const i = Number(body.index);
+  if (!Number.isInteger(i) || i < 0 || i >= images.length) throw err('BAD_INDEX', '沒有這張照片');
+  images.splice(i, 1);
+  await db.run('UPDATE broadcast SET images = ?, image_url = ? WHERE send_id = ?', images, images[0] || null, sendId);
+  await audit.record({ actor: actor.line_user_id, action: 'broadcast.image', target: sendId,
+    detail: { removed: i, count: images.length }, result: 'ok' });
+  return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
+});
+
+/** 改尺寸選項（開喊單後才想到要分尺寸）。已經在購物車的不受影響。 */
+post('/api/v1/broadcast/sizes', async ({ actor, body }) => {
+  auth.requireCap(actor, 'broadcast');
+  const sendId = String(body.send_id ?? '');
+  const sizes = parseSizes(body.sizes);
+  const res = await db.run('UPDATE broadcast SET sizes = ? WHERE send_id = ?', sizes, sendId);
+  if (res.changes === 0) throw err('NOT_FOUND', '找不到這張喊單', 404);
+  await audit.record({ actor: actor.line_user_id, action: 'broadcast.sizes', target: sendId, detail: { sizes }, result: 'ok' });
   return ok((await signedShape([await db.one('SELECT * FROM broadcast WHERE send_id = ?', sendId)]))[0]);
 });
 
@@ -366,7 +429,9 @@ post('/api/v1/wishes/quote', async ({ actor, body }) => {
     twd, body.item_name || null, body.item_name_ja || null, body.brand || null, w.wish_id);
   await audit.record({ actor: actor.line_user_id, action: 'wish.quote', target: w.wish_id,
     detail: { quote_twd: twd }, result: 'ok' });
-  return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id));
+  const quotedWish = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id);
+  await customerNotify.wishQuoted(quotedWish);
+  return ok(quotedWish);
 });
 
 post('/api/v1/wishes/mark', async ({ actor, body }) => {
@@ -378,7 +443,9 @@ post('/api/v1/wishes/mark', async ({ actor, body }) => {
   if (res.changes === 0) throw err('NOT_EDITABLE', '找不到這個許願，或客人已經下單了', 409);
   await audit.record({ actor: actor.line_user_id, action: 'wish.mark', target: body.wish_id,
     detail: { status: body.status }, result: 'ok' });
-  return ok(await db.one('SELECT * FROM wishlist WHERE wish_id = ?', body.wish_id));
+  const marked = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', body.wish_id);
+  if (body.status === '現場缺貨') await customerNotify.wishOutOfStock(marked);
+  return ok(marked);
 });
 
 // ---- 訂單報價 -------------------------------------------------------------
@@ -435,6 +502,11 @@ post('/api/v1/orders/quote', async ({ actor, body }) => {
     // 推到「已報價」時 state.transition 會再檢查一次沒有 0 元品項。
     if (advance) await transition(order.order_id, STATUS.QUOTED, { actor: actor.line_user_id, reason: '報價' });
   });
+  // v1.6：第一次報好價（待確認 → 已報價）就 LINE 通知客人。之後改價不再通知（同一張訂單只通知一次）。
+  if (advance) {
+    const quoted = await db.one('SELECT * FROM orders WHERE order_id = ?', order.order_id);
+    await customerNotify.orderQuoted(quoted, { itemCount: current.length, statementDaysRaw: await db.setting('statement_days', '') });
+  }
   await audit.record({ actor: actor.line_user_id, action: 'order.quote', target: order.order_id,
     detail: { items: planned.map((p) => ({ item_id: p.it.item_id, unit_price_twd: p.twd })), ship_fee_twd: shipFee, ship_fee_auto: manualFee === null },
     result: 'ok' });
@@ -472,8 +544,12 @@ get('/api/v1/statements/admin-list', async ({ actor, query }) => {
  * 剛好撞上店主手動按）也不會重複開單：交易一開始先拿同一把 advisory lock，
  * 第二個人會等第一個做完，再看到的就是已經結算過的訂單。
  */
-post('/api/v1/statements/generate', async ({ actor, body, req }) => {
-  const by = requireBilling(actor, req);
+/**
+ * 結算：把還沒進對帳單、已報價以上的訂單，依客人各開一張對帳單，並排 LINE 通知。
+ * 店主手動按「結算」和每月自動結算（/cron/statements）共用這一段。
+ * 整段一筆交易＋advisory lock：手動和排程同時跑也不會把同一張訂單結兩次。
+ */
+async function generateStatements(by, lineUserId = null) {
   const deadlineDays = parseInt(await db.setting('payment_deadline_days', '2'), 10) || 2;
   const created = await db.tx(async () => {
     await db.one("SELECT pg_advisory_xact_lock(hashtext('statements.generate')) AS locked");
@@ -483,7 +559,7 @@ post('/api/v1/statements/generate', async ({ actor, body, req }) => {
           AND status IN ('已報價','已到貨','已出貨','已送達')
           AND (?::text IS NULL OR line_user_id = ?)
         ORDER BY line_user_id, order_id FOR UPDATE`,
-      body.line_user_id || null, body.line_user_id || null);
+      lineUserId, lineUserId);
     const byUser = new Map();
     for (const o of orders) {
       if (!byUser.has(o.line_user_id)) byUser.set(o.line_user_id, []);
@@ -511,9 +587,58 @@ post('/api/v1/statements/generate', async ({ actor, body, req }) => {
     return out;
   });
   if (created.length) notify.poke();
+  return created;
+}
+
+post('/api/v1/statements/generate', async ({ actor, body, req }) => {
+  const by = requireBilling(actor, req);
+  const created = await generateStatements(by, body.line_user_id || null);
   await audit.record({ actor: by, action: 'statements.generate', detail: { created: created.length }, result: 'ok' });
   return ok({ created });
 }, { idempotent: false });
+
+/**
+ * 每月自動結算（2026-11-25）。Vercel Cron 每天台灣時間 23 點多打一次（vercel.json），
+ * 這裡判斷今天是不是結算日（店家設定「對帳單結算日」，預設 15,月底），是才結算。
+ *   - 同一天只結算一次（settings.statements_auto_last 記住日期），重送不會重複開單。
+ *   - 店主可以在「店家與收款設定」把「自動結算」關掉（留一手：最後決定權在店主）。
+ *   - 身分：Vercel Cron 帶 Authorization: Bearer <CRON_SECRET>；n8n 或手動補跑可以帶 X-Notify-Token。
+ */
+function requireCron(req) {
+  const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const secret = config.cronSecret;
+  if (secret && given) {
+    const a = Buffer.from(secret); const b = Buffer.from(given);
+    if (a.length === b.length && require('node:crypto').timingSafeEqual(a, b)) return 'cron';
+  }
+  notify.requireMachine(req);
+  return 'n8n';
+}
+
+async function runAutoStatements(req) {
+  const by = requireCron(req);
+  const today = statementDays.taipeiToday();
+  const [days, autoMode, last] = await Promise.all([
+    db.setting('statement_days', ''), db.setting('statement_auto', ''), db.setting('statements_auto_last', '')]);
+  const base = { date: today.ymd, statement_days: days || statementDays.DEFAULT };
+  if (autoMode === 'off') return { ...base, ran: false, reason: '店主關掉了自動結算' };
+  if (!statementDays.isDue(days)) return { ...base, ran: false, reason: '今天不是結算日', next: statementDays.nextDue(days) };
+  if (last === today.ymd) return { ...base, ran: false, reason: '今天已經結算過了' };
+  const created = await generateStatements(by);
+  await db.putSetting('statements_auto_last', today.ymd);
+  await audit.record({ actor: 'cron', action: 'statements.generate',
+    detail: { created: created.length, auto: true, date: today.ymd }, result: 'ok' });
+  return { ...base, ran: true, created: created.length };
+}
+
+raw('GET', '/api/v1/cron/statements', async ({ req, res }) => {
+  try {
+    send(res, 200, ok(await runAutoStatements(req)));
+  } catch (e) {
+    if (!e.status) console.error('[cron] 自動結算失敗：', e.message);
+    send(res, e.status || 500, fail(e.code || 'INTERNAL', e.status ? e.message : '自動結算失敗，稍後會再試'));
+  }
+});
 
 /**
  * 核帳：確認對帳單的錢真的進來了。對帳單與底下每一張訂單一起標成已核對。
@@ -544,6 +669,7 @@ post('/api/v1/statements/reconcile', async ({ actor, body }) => {
     detail: { amount, diff }, result: diff ? 'warn' : 'ok' });
   // 業主確認單：對帳單付款完成就恢復喊單資格（還有別張沒付清的不算）。
   const shoutRestored = await drops.restoreIfPaidUp(s.line_user_id, actor.line_user_id);
+  await customerNotify.transferVerified({ lineUserId: s.line_user_id, statementId: s.statement_id, amount });
   return ok({ statement_id: s.statement_id, payment_status: '已核對', difference_twd: diff, shout_restored: shoutRestored });
 });
 // ---- 代客下單 ---------------------------------------------------------------

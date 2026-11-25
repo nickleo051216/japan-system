@@ -74,12 +74,14 @@ bpost('/api/v1/orders/checkout', async ({ me, body }) => {
       id, me.line_user_id, batch, subtotal + fee, fee,
       pickup, pickupAddr, invoice, body.note || null, now());
     for (const i of items) {
+      // 尺寸（012）有選才寫，正式庫還沒跑 012 時結帳照常。
+      const sized = i.size !== undefined && i.size !== null;
       await db.run(
         `INSERT INTO order_items (item_id, order_id, name, qty, jpy_taxed, unit_price_twd,
-                                  item_status, source, source_image_url)
-         VALUES (?,?,?,?,?,?,'待採買',?,?)`,
+                                  item_status, source, source_image_url${sized ? ', size' : ''})
+         VALUES (?,?,?,?,?,?,'待採買',?,?${sized ? ',?' : ''})`,
         uid('IT'), id, i.name, i.qty, num(i.jpy_taxed), num(i.price_twd) || 0,
-        i.source, i.image_url || null);
+        i.source, i.image_url || null, ...(sized ? [i.size] : []));
     }
     await db.run(
       "UPDATE cart_items SET status = 'ordered' WHERE cart_id = ANY(?::text[])",
