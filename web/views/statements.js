@@ -7,6 +7,9 @@ import { GET, POST, h, nt, dt, toast, fail } from '../app.js';
 export async function render(root, ctx) {
   const status = ctx.query.status || '';
   const rows = await GET('/api/v1/statements/admin-list' + (status ? '?status=' + encodeURIComponent(status) : ''));
+  let auto = null;
+  try { auto = await GET('/api/v1/statements/auto-status'); } catch { /* 舊版後端 */ }
+  if (auto) root.append(autoCard(auto));
 
   root.append(h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h2', {}, '結算'), h('div', { class: 'spacer' }),
@@ -58,4 +61,24 @@ export async function render(root, ctx) {
           }
         } }, '核帳')))));
   }
+}
+
+/**
+ * 自動結算的燈號（每月結算日由 Vercel 排程自動結算）。
+ * 綠燈＝上次檢查正常；紅燈＝被擋下來、出錯或太久沒檢查；灰燈＝還沒檢查過或關掉了。
+ * 測試方法：Vercel → Settings → Cron Jobs → Run，回來重新整理這一頁看「上次檢查」的時間有沒有變。
+ */
+function autoCard(a) {
+  const md = (ymd) => (ymd ? `${Number(ymd.slice(5, 7))}/${Number(ymd.slice(8, 10))}` : '—');
+  const dot = { green: '🟢', red: '🔴', grey: '⚪' }[a.light];
+  const c = a.last_check;
+  return h('div', { class: 'card', style: 'padding:14px' + (a.light === 'red' ? ';border-color:var(--red)' : '') },
+    h('div', { class: 'row', style: 'gap:8px' },
+      h('strong', {}, `${dot} 自動結算`), h('span', { class: 'tag ' + (a.on ? 'green' : '') }, a.on ? '開著' : '關掉了'),
+      h('span', { class: 'spacer', style: 'flex:1' }),
+      a.next_date ? h('span', { class: 'small' }, '下次結算 ', h('b', {}, md(a.next_date))) : null),
+    h('div', { class: 'small', style: 'margin-top:6px' + (a.light === 'red' ? ';color:var(--red)' : '') }, a.say),
+    h('div', { class: 'tiny muted', style: 'margin-top:4px' },
+      c ? `上次檢查 ${dt(c.at)}` : '還沒有檢查紀錄',
+      a.last_ran_date ? `・上次真的結算 ${md(a.last_ran_date)}` : '', `・結算日 ${a.statement_days}`));
 }

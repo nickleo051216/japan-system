@@ -1012,6 +1012,40 @@ const login = async (id) =>
       check('稽核記一筆「每月自動結算」，經手人是系統自動（排程）', autoLog?.actor_label === '系統自動（排程）', autoLog);
     }
     await SET({ statement_days: '15,月底', statement_auto: '' });
+
+    // 結算紀錄（2026-11-25）：每次排程來敲門都留一筆，後台看得到燈號。
+    const AS = async () => (await api('GET', '/api/v1/statements/auto-status', { token: owner })).json.data;
+    const VC = { 'User-Agent': 'vercel-cron/1.0' };
+    await cron({ ...VC, Authorization: 'Bearer smoke-cron-secret' });
+    const g = await AS();
+    check('Vercel 排程帶對鑰匙 → 綠燈，記下上次檢查時間、結果、下次結算日', g.on && g.light === 'green' && g.last_check?.via === 'vercel'
+      && ['skipped', 'ran'].includes(g.last_check.result) && Date.now() - new Date(g.last_check.at).getTime() < 60e3 && !!g.next_date, g);
+    await cron({ Authorization: 'Bearer wrong' });
+    check('路人沒鑰匙亂打 → 401，但不會把後台的燈弄成紅的', (await AS()).light === 'green');
+    const bad = await cron({ ...VC, Authorization: 'Bearer wrong' });
+    const r = await AS();
+    check('Vercel 排程的鑰匙對不上 → 紅燈，寫出原因（CRON_SECRET）', bad.status === 401 && r.light === 'red' && /CRON_SECRET/.test(r.say) && r.last_check.result === 'blocked', r);
+    const homeRed = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+    check('紅燈時後台首頁「今天要處理」最上面出現「自動結算沒有正常執行」', homeRed.todo[0]?.kind === 'auto_statement' && homeRed.auto_statement.light === 'red', homeRed.todo[0]);
+    const homeHelper = (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data;
+    check('小幫手看不到結算燈號（auto_statement 是 null）', homeHelper.auto_statement === null && !homeHelper.todo.some((t) => t.kind === 'auto_statement'));
+    check('小幫手不能讀結算狀態 → 403', (await api('GET', '/api/v1/statements/auto-status', { token: helper })).status === 403);
+    await cron({ ...VC, Authorization: 'Bearer smoke-cron-secret' });
+    check('鑰匙修好、下一次排程進來 → 回到綠燈，首頁的提醒自己消失', (await AS()).light === 'green'
+      && !(await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data.todo.some((t) => t.kind === 'auto_statement'));
+    {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      const cur = JSON.parse((await c.query("SELECT value FROM settings WHERE key = 'statements_auto_check'")).rows[0].value);
+      cur.at = new Date(Date.now() - 48 * 3600e3).toISOString();
+      await c.query("UPDATE settings SET value = $1 WHERE key = 'statements_auto_check'", [JSON.stringify(cur)]);
+      await c.end();
+    }
+    check('超過一天半沒收到排程（例如 Cron 被關掉）→ 紅燈', /一天半/.test((await AS()).say) && (await AS()).light === 'red');
+    await SET({ statement_auto: 'off' });
+    check('店主關掉自動結算 → 灰燈，提醒要手動結算，不算紅燈', (await AS()).light === 'grey' && (await AS()).next_date === null);
+    await SET({ statement_auto: '' });
+    await cron({ ...VC, Authorization: 'Bearer smoke-cron-secret' });
     }
 
     section('付清對帳單 → 自動恢復喊單資格');

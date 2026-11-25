@@ -85,6 +85,14 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     const sr = Number((await db.one("SELECT count(*) AS n FROM ship_requests WHERE status = 'pending'")).n);
     if (sr) todo.push({ urgency: 2, kind: 'ship_request', title: `${sr} 筆出貨申請等你審核`, body: '客人申請併單或拆單', link: '#/ship-requests' });
   } catch { /* 014 還沒跑 */ }
+  // 自動結算的燈號：被擋下來或太久沒檢查就放進「今天要處理」（店主才看得到）。
+  let autoStatement = null;
+  if (auth.can(actor, 'payment.reconcile')) {
+    try {
+      autoStatement = await require('./admin-shop').autoStatementStatus();
+      if (autoStatement.light === 'red') todo.push({ urgency: 0, kind: 'auto_statement', title: '自動結算沒有正常執行', body: autoStatement.say, link: '#/statements' });
+    } catch (e) { console.warn('[dashboard] 讀不到自動結算狀態：', e.message); }
+  }
   // 小幫手請款（015）：店主才看得到。
   if (auth.can(actor, 'payment.reconcile')) {
     try {
@@ -131,6 +139,8 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     uncosted_revenue_twd: money.round2(uncostedRevenue),
     ranking,
     todo,
+    // 自動結算燈號（店主才有；其他角色是 null）
+    auto_statement: autoStatement,
   };
   return ok(auth.redact(actor, data));
 });
