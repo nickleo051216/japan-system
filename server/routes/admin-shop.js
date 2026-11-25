@@ -631,13 +631,69 @@ async function runAutoStatements(req) {
   return { ...base, ran: true, created: created.length };
 }
 
+/**
+ * 結算紀錄：每次鬧鐘來敲門都記一筆「上次檢查」，後台首頁和對帳單頁看得到。
+ * 沒有這個的話，自動結算成功或被擋下來都不留痕跡 —— 要等客人問「怎麼沒收到對帳單」才會發現。
+ *
+ * 被擋下來（鑰匙不對）也要記，但只記 Vercel 排程自己的請求（User-Agent 是 vercel-cron）：
+ * 這支網址是公開的，路人亂打不該把後台的燈弄成紅的。
+ */
+const AUTO_CHECK_KEY = 'statements_auto_check';
+
+async function recordAutoCheck(entry) {
+  const line = { at: new Date().toISOString(), ...entry };
+  console.log('[cron] 自動結算檢查：', JSON.stringify(line));
+  try { await db.putSetting(AUTO_CHECK_KEY, JSON.stringify(line)); } catch (e) { console.error('[cron] 結算紀錄寫不進去：', e.message); }
+}
+
 raw('GET', '/api/v1/cron/statements', async ({ req, res }) => {
+  const fromVercel = /vercel-cron/i.test(String(req.headers['user-agent'] || ''));
   try {
-    send(res, 200, ok(await runAutoStatements(req)));
+    const out = await runAutoStatements(req);
+    await recordAutoCheck({ result: out.ran ? 'ran' : 'skipped', reason: out.reason || null, created: out.created ?? null,
+      date: out.date, next: out.next || null, via: fromVercel ? 'vercel' : 'other' });
+    send(res, 200, ok(out));
   } catch (e) {
     if (!e.status) console.error('[cron] 自動結算失敗：', e.message);
+    if (e.status === 401 || e.status === 503) {
+      if (fromVercel) await recordAutoCheck({ result: 'blocked', reason: 'Vercel 排程的鑰匙對不上（CRON_SECRET 沒設定、沒重新部署，或值不一樣）', via: 'vercel' });
+      else console.warn('[cron] 擋下一個沒有鑰匙的請求（不是 Vercel 排程，不記結算紀錄）');
+    } else {
+      await recordAutoCheck({ result: 'error', reason: e.status ? e.message : '自動結算失敗，明天會再試', via: fromVercel ? 'vercel' : 'other' });
+    }
     send(res, e.status || 500, fail(e.code || 'INTERNAL', e.status ? e.message : '自動結算失敗，稍後會再試'));
   }
+});
+
+/**
+ * 自動結算的燈號：開著沒、上次檢查的結果、下一個結算日。
+ *   green  上次檢查正常（結算了，或今天不是結算日）
+ *   red    上次被擋下來或出錯，或開著自動結算卻超過 36 小時沒有檢查（鬧鐘每天一次）
+ *   grey   還沒檢查過 / 自動結算關掉了
+ */
+async function autoStatementStatus() {
+  const [raw_, autoMode, days, last] = await Promise.all([
+    db.setting(AUTO_CHECK_KEY, ''), db.setting('statement_auto', ''), db.setting('statement_days', ''), db.setting('statements_auto_last', '')]);
+  let check = null;
+  try { check = raw_ ? JSON.parse(raw_) : null; } catch { check = null; }
+  const on = autoMode !== 'off';
+  const stale = !!check && Date.now() - new Date(check.at).getTime() > 36 * 3600e3;
+  let light = 'grey';
+  let say = on ? '還沒有收到排程的檢查。到 Vercel → Settings → Cron Jobs 按 Run 試一次。' : '自動結算已關掉，要到「對帳單」手動按「立即結算」。';
+  if (on && check) {
+    if (check.result === 'blocked' || check.result === 'error') { light = 'red'; say = check.reason; }
+    else if (stale) { light = 'red'; say = '超過一天半沒有收到排程的檢查，請到 Vercel 看 Cron Jobs 是不是還開著。'; }
+    else { light = 'green'; say = check.result === 'ran' ? `自動結算了 ${check.created} 張對帳單` : (check.reason || '正常'); }
+  }
+  return {
+    on, light, say, last_check: check, last_ran_date: last || null,
+    next_date: on ? statementDays.nextDue(days) : null, statement_days: days || statementDays.DEFAULT,
+  };
+}
+
+get('/api/v1/statements/auto-status', async ({ actor }) => {
+  auth.requireCap(actor, 'payment.reconcile');
+  return ok(await autoStatementStatus());
 });
 
 /**
@@ -769,3 +825,5 @@ post('/api/v1/orders/create', async ({ actor, body }) => {
   });
 });
 
+
+module.exports = { autoStatementStatus };
