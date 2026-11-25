@@ -90,6 +90,17 @@ const SAY = {
   'wish.ai_name': (t, d) => [`AI 看照片替許願取名：「${d.name}」`, '原本是「照片許願」；店家放上牆時還可以改'],
   'wish.to_broadcast': (t, d) => [`把許願「${t}」轉成喊單 ${d.send_id}`, `LINE 通知想要的 ${d.notified} 個人`],
 
+  'ship_request.create': (t, d) => [`客人申請${d.kind === 'merge' ? '併單' : '拆單'}`, `訂單 ${(d.order_ids || []).join('、')}`],
+  'ship_request.cancel': () => ['客人取消了出貨申請', ''],
+  'ship_request.approve': (t, d) => (d.code
+    ? [`核准${d.kind === 'merge' ? '併單' : '拆單'}沒有成功`, '訂單狀態已經變了（例如已出貨或已付款），申請維持審核中']
+    : d.kind === 'merge'
+      ? [`核准併單，產生出貨單 ${d.ship_group_id}`, `${(d.order_ids || []).join('、')} 裝一箱；拿掉運費 ${(d.fee_waived || []).length} 張`
+        + ((d.fee_not_waived || []).length ? `，${d.fee_not_waived.length} 張已付款或已出對帳單沒動` : '')]
+      : [`核准拆單，拆出 ${d.child_order_id} 先寄`, `先寄這箱運費 ${ntd(d.extra_fee_twd)}`]),
+  'ship_request.reject': (t, d) => ['沒有核准出貨申請', `原因：${d.note || '—'}`],
+  'ship_group.ship': (t, d) => [`整箱出貨 ${t}`, `訂單 ${(d.order_ids || []).join('、')}${d.tracking_no ? `，物流單號 ${d.tracking_no}` : ''}`],
+
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, d && d.auto ? `每月自動結算（${d.date}）` : '手動按「結算」'],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
 

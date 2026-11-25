@@ -153,14 +153,25 @@ post('/api/v1/orders/ship', async ({ actor, body }) => {
   auth.requireCap(actor, 'shipment.write');
   const order = await db.one('SELECT * FROM orders WHERE order_id = ?', body.order_id);
   if (!order) throw err('ORDER_NOT_FOUND', '查無此訂單', 404);
+  const r = await shipOrder(actor, order, {
+    overrideReason: body.override_reason ? String(body.override_reason).trim() : null,
+    verifiedByScan: !!body.verified_by_scan,
+  });
+  return ok(r);
+});
+
+/**
+ * 出貨一張單：寫出貨紀錄、狀態改已出貨、排出貨通知，三件事同一個交易。
+ * 單張出貨（/orders/ship）和整張出貨單一起寄（/ship-groups/ship）都走這裡，規則只有一份。
+ */
+async function shipOrder(actor, order, { overrideReason = null, verifiedByScan = false, carrier = null, trackingNo = null } = {}) {
   if (order.status === STATUS.SHIPPED) throw err('ALREADY_SHIPPED', '這張單已經出過貨了', 409);
   if (order.status !== STATUS.ARRIVED) throw err('ILLEGAL_STATE', `狀態為「${order.status}」的訂單不可出貨`, 409);
 
-  const overrideReason = body.override_reason ? String(body.override_reason).trim() : null;
   if (!order.paid) {
     if (!overrideReason || !auth.can(actor, 'override.blocked')) {
       await audit.record({ actor: actor.line_user_id, action: 'order.ship', target: order.order_id, detail: { reason: 'unpaid' }, result: 'blocked' });
-      throw err('UNPAID', '這位客人還沒付款，需店主填寫原因後覆寫', 409);
+      throw err('UNPAID', `${order.order_id} 這位客人還沒付款，需店主填寫原因後覆寫`, 409);
     }
   }
 
@@ -169,8 +180,8 @@ post('/api/v1/orders/ship', async ({ actor, body }) => {
   // commit together, so 已出貨 can never exist with nothing scheduled to send.
   let moved;
   await db.tx(async () => {
-    await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason) VALUES (?,?,?,?,?,?)',
-      uid('shp'), order.order_id, now(), !!body.verified_by_scan, actor.line_user_id, overrideReason);
+    await db.run('INSERT INTO shipments (shipment_id, order_id, shipped_at, verified_by_scan, operator, override_reason, carrier, tracking_no) VALUES (?,?,?,?,?,?,?,?)',
+      uid('shp'), order.order_id, now(), verifiedByScan, actor.line_user_id, overrideReason, carrier, trackingNo);
     moved = await transition(order.order_id, STATUS.SHIPPED, { actor: actor.line_user_id, reason: overrideReason });
     if (moved._notified) {
       await notify.queue({ kind: 'shipped', lineUserId: order.line_user_id, orderId: order.order_id,
@@ -179,10 +190,10 @@ post('/api/v1/orders/ship', async ({ actor, body }) => {
   });
   notify.poke();
   await audit.record({ actor: actor.line_user_id, action: 'order.ship', target: order.order_id,
-    detail: { verified_by_scan: !!body.verified_by_scan, override_reason: overrideReason }, result: overrideReason ? 'warn' : 'ok' });
+    detail: { verified_by_scan: verifiedByScan, override_reason: overrideReason }, result: overrideReason ? 'warn' : 'ok' });
 
-  return ok({ order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: !!body.verified_by_scan, notification: moved._notified ? text : null });
-});
+  return { order_id: order.order_id, status: STATUS.SHIPPED, verified_by_scan: verifiedByScan, notification: moved._notified ? text : null };
+}
 
 /** F-10 通知範本. The prototype renders it instead of calling LINE push. */
 async function notificationText(order) {
@@ -314,4 +325,4 @@ get('/api/v1/logistics/list', async ({ actor, query }) => {
   return ok(rows);
 });
 
-module.exports = { itemsOf, procurementCoverage, notificationText, shipmentPayload };
+module.exports = { itemsOf, procurementCoverage, notificationText, shipmentPayload, shipOrder };

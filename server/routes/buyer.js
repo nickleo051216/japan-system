@@ -86,6 +86,8 @@ async function orderShape(row) {
     payment_status: row.payment_status, paid: !!row.paid,
     total_twd: num(row.total_twd), ship_fee_twd: num(row.ship_fee_twd),
     split_shipped: !!row.split_shipped, statement_id: row.statement_id || null,
+    ship_group_id: row.ship_group_id || null,   // v1.6：併單／拆單核准後的出貨單
+    parent_order_id: row.parent_order_id || null,
     pickup: row.pickup || '', pickup_addr: row.pickup_addr || '', invoice: row.invoice || '',
     note: row.note || '', created_at: row.created_at,
     items: items.map((i) => ({

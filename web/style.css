@@ -311,3 +311,12 @@ tr:last-child td { border-bottom: 0; }
   .toast { bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
 }
 @media print { .tabbar { display: none !important; } }
+
+/* 出貨申請（併單／拆單） */
+.sr-order { border-top: 1px dashed var(--line); padding: 8px 0; min-width: 0; }
+.sr-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 8px; margin-top: 6px; }
+.sr-item { text-align: center; padding: 6px; border-radius: 12px; border: 1px solid transparent; min-width: 0; overflow-wrap: anywhere; }
+.sr-item.picked { border-color: var(--green); background: var(--green-bg); }
+.sr-item .thumb { width: 100%; height: 72px; }
+.sr-item .thumb.ph { display: grid; place-items: center; font-size: 26px; }
+.sr-item .ok { color: var(--green); }

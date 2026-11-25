@@ -34,7 +34,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ---
 
-## 2. 端點一覽（27 個）
+## 2. 端點一覽（30 個）
 
 | # | 方法 | 路徑 | 用途 | 備註 |
 |---|---|---|---|---|
@@ -72,6 +72,9 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 27 | GET | `/wishes/board?sort=hot\|new` | 許願牆（店家審核過的公開許願，v1.5） | wishlist, wish_votes, broadcast |
 | 28 | POST | `/wishes/plus` | 我也想要 +1／取消（v1.5） | wish_votes |
 | 29 | POST | `/wishes/share` | 自己的許願改公開／不公開（v1.5） | wishlist |
+| 30 | POST | `/ship-requests/create` | 申請併單／拆單（v1.6） | ship_requests |
+| 31 | GET | `/ship-requests/list` | 我的出貨申請（v1.6） | ship_requests, ship_groups |
+| 32 | POST | `/ship-requests/cancel` | 取消審核中的申請（v1.6） | ship_requests |
 
 所有端點**只回傳該 `line_user_id` 自己的資料**，不能透過參數查別人的。
 
@@ -94,6 +97,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 { "order_id": "ORD-…", "batch": "T-260913", "status": "待確認|已報價|已到貨|已出貨|已送達|缺貨|已取消",
   "payment_status": "待付款|待官方確認|已核對", "paid": false,
   "total_twd": 1940, "ship_fee_twd": 70, "split_shipped": false, "statement_id": null,
+  "ship_group_id": null, "parent_order_id": null,
   "pickup": "7-11 板橋文化門市", "pickup_addr": "…", "invoice": "手機載具 /AB12+3C", "note": "", "created_at": "…",
   "items": [ { "item_id": "…", "name": "…", "qty": 1, "jpy_taxed": 2519, "unit_price_twd": 890,
                "item_status": "待採買|採買中|已到貨|缺貨", "source": "text" } ],
@@ -260,6 +264,25 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ### 21. `POST /orders/split-request`
 請求 `{ order_id, on }`；僅「已報價／已到貨」且**部分品項已到貨**時可申請 → 否則 `409 NOT_SPLITTABLE`
+（v1.6 起建議改用第 30 項拆單申請：店主核准後真的拆出子訂單、產生出貨單。這支保留相容。）
+
+### 30. `POST /ship-requests/create`（v1.6 併單／拆單）
+- 併單 `{ kind:"merge", order_ids:[…2～10 張], ship_to_order_id?, note? }`：都要是自己的、「已報價」或「已到貨」、還沒在出貨單裡。
+  `ship_to_order_id` 是寄送地址用哪一張（預設第一張），回傳的 `order_ids` 會把它排第一。
+- 拆單 `{ kind:"split", order_id, item_ids?, note? }`：訂單「已報價」、挑的品項都「已到貨」、至少留一項之後寄；不帶 `item_ids` = 已到貨的全部先寄。
+- 回 ShipRequest：`{ request_id, kind, kind_zh, status, status_zh, order_ids, item_ids, note, decision_note, created_at, decided_at, ship_group }`
+  - `status`：`pending`（審核中）→ `approved`／`rejected`，或客人 `cancelled`
+  - `ship_group`（核准後）：`{ ship_group_id, status:"待出貨|已出貨", order_ids, pickup, pickup_addr, created_at, orders:[{ order_id, status, total_twd, ship_fee_twd }] }`
+- 錯誤：`400 BAD_KIND／TOO_FEW_ORDERS／TOO_MANY_ORDERS／BAD_SHIP_TO`、`404 ORDER_NOT_FOUND／ITEM_NOT_FOUND`、
+  `409 NOT_QUOTED／NOT_MERGEABLE／ALREADY_GROUPED／NOT_SPLITTABLE／ITEM_NOT_ARRIVED／NOTHING_LEFT／ALREADY_REQUESTED`
+- 核准後的金額變化：併單＝第一張保留運費，其他「待付款且沒出對帳單」的運費歸 0（總額跟著減）；拆單＝子訂單 `order_id` 加 `-A`，
+  狀態「已到貨」，總額＝先寄品項＋先寄運費（母單已付款或已出對帳單則不收運費）。審核結果用 LINE 通知（`ship_request`）。
+
+### 31. `GET /ship-requests/list`
+回自己的 ShipRequest[]，新的在前，最多 50 筆。
+
+### 32. `POST /ship-requests/cancel`
+請求 `{ request_id }`；只有 `pending` 能取消，否則 `409 ALREADY_DECIDED`。
 
 ### 22. `POST /orders/received`
 請求 `{ order_id }`；僅「已出貨」可改為「已送達」，否則 `409 ILLEGAL_TRANSITION`（由 DB trigger 擋）
@@ -315,6 +338,7 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 | 1 | 對帳單每月自動結算（預設 15 日、月底）；`shop.next_statement_date` | 3 |
 | 3 | 三種 LINE 通知：`quoted`（訂單／許願報價）、`transfer_verified`（手動核帳）、`out_of_stock`（訂單缺貨／許願現場缺貨）；連結 `?path=orders`、`?path=wish` | — |
 | 2 | 每日連線＋1：`broadcast[].listed_at`、`images[]`、`sizes[]`；截止的回 7 天；`/broadcast/shout` 收 `size`；`cart_item.size`、訂單 `items[].size` | 3、4～11、19、20 |
+| 4 | 出貨申請（併單／拆單）：客人申請、店主審核、核准後產生出貨單；訂單多 `ship_group_id`、`parent_order_id`；LINE 通知 `ship_request` | 19、20、30～32 |
 
 ## 5.1 v1.5.2 變更（2026-11-19，後台改版配套）
 

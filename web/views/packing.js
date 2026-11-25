@@ -25,6 +25,8 @@ export async function render(root) {
         h('div', { class: 'row' },
           h('strong', { class: 'mono' }, o.order_id), statusTag(o.status),
           o.paid ? h('span', { class: 'tag green' }, '已付') : h('span', { class: 'tag amber' }, '未付'),
+          // 併單／拆單核准後的出貨單：同一張出貨單的要裝同一箱（到「出貨申請・出貨單」整箱寄）。
+          o.ship_group_id ? h('a', { class: 'tag blue', href: '#/ship-requests?tab=' + encodeURIComponent('出貨單') }, `同箱 ${o.ship_group_id}`) : null,
           h('span', { class: 'spacer', style: 'flex:1' }),
           h('span', { class: 'muted small' }, o.nickname)),
         'total_twd' in o ? h('div', { class: 'tiny muted', style: 'margin-top:4px' }, nt(o.total_twd)) : null,

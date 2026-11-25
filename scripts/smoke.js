@@ -1079,6 +1079,147 @@ const login = async (id) =>
     check('標成其他狀態（保留下團）不通知', (await pending()).filter((n) => n.kind === 'out_of_stock' && !n.order_id).length === 0);
     }
 
+    {
+    section('出貨申請（v1.6 ④）：客人申請併單／拆單 → 店主審核 → 自動產生出貨單');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const txt = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload).text;
+    const pl = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
+    const detail = async (id) => (await api('GET', `/api/v1/orders/detail?order_id=${id}`, { token: owner })).json.data;
+    const newOrder = async (names, price = 300, quote = true) => {
+      const ids = [];
+      for (const n of names) ids.push((await B('POST', '/api/v1/cart/add-text', { body: { name: n, qty: 1 } })).json.data.cart_id);
+      await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: ids } });
+      const o = (await B('POST', '/api/v1/orders/checkout', { body: { cart_ids: ids, pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;
+      if (quote) {
+        const d = await detail(o.order_id);
+        await api('POST', '/api/v1/orders/quote', { token: owner, body: { order_id: o.order_id, items: d.items.map((i) => ({ item_id: i.item_id, unit_price_twd: price })) } });
+      }
+      return detail(o.order_id);
+    };
+    const oa = await newOrder(['併單 A 奶嘴']);
+    const ob = await newOrder(['併單 B 圍兜']);
+    const oc = await newOrder(['併單 C 襪子']);
+    const oe = await newOrder(['併單 E 帽子']);
+    const op = await newOrder(['還沒報價的單'], 300, false);
+    check('準備：四張已報價的單（各有運費）＋一張待確認', [oa, ob, oc, oe].every((o) => o.status === '已報價' && Number(o.ship_fee_twd) > 0) && op.status === '待確認',
+      [oa, ob, oc, oe, op].map((o) => [o.status, o.ship_fee_twd]));
+
+    const one = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id] } });
+    check('併單只選 1 張 → TOO_FEW_ORDERS', one.status === 400 && one.json.error.code === 'TOO_FEW_ORDERS', one.json);
+    const unq = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id, op.order_id] } });
+    check('還沒報價的單不能併 → NOT_QUOTED（價錢定了才知道運費退多少）', unq.status === 409 && unq.json.error.code === 'NOT_QUOTED', unq.json);
+    const other = await api('POST', '/api/v1/ship-requests/create', { token: buyer2, body: { kind: 'merge', order_ids: [oa.order_id, ob.order_id] } });
+    check('別人的訂單不能拿來申請 → 404', other.status === 404 && other.json.error.code === 'ORDER_NOT_FOUND', other.json);
+    const badTo = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id, ob.order_id], ship_to_order_id: oc.order_id } });
+    check('寄送地址要用勾選的其中一張 → BAD_SHIP_TO', badTo.status === 400 && badTo.json.error.code === 'BAD_SHIP_TO', badTo.json);
+
+    const mr = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id, ob.order_id], ship_to_order_id: ob.order_id, note: '請裝同一箱' } });
+    check('客人申請併單 → 審核中，寄送地址那張排第一', mr.status === 200 && mr.json.data.status === 'pending' && mr.json.data.status_zh === '審核中'
+      && mr.json.data.order_ids[0] === ob.order_id && mr.json.data.note === '請裝同一箱' && mr.json.data.ship_group === null, mr.json);
+    const dupR = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id, oc.order_id] } });
+    check('同一張單已經在審核中的申請裡 → ALREADY_REQUESTED', dupR.status === 409 && dupR.json.error.code === 'ALREADY_REQUESTED', dupR.json);
+    const mr2 = (await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oc.order_id, oe.order_id] } })).json.data;
+
+    const home1 = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+    check('後台首頁「今天要處理」出現「出貨申請等你審核」', home1.todo.some((t) => t.kind === 'ship_request' && /2 筆出貨申請/.test(t.title) && t.link === '#/ship-requests'), home1.todo);
+    const al = (await api('GET', '/api/v1/ship-requests/admin-list?status=pending', { token: owner })).json.data;
+    const alm = al.find((x) => x.request_id === mr.json.data.request_id);
+    check('後台審核列表：看得到暱稱、每張單的金額、運費、品項', !!alm && alm.nickname && alm.orders.length === 2
+      && alm.orders.every((o) => o.items.length >= 1 && o.ship_fee_twd > 0), alm);
+    const hAppr = await api('POST', '/api/v1/ship-requests/approve', { token: helper, body: { request_id: mr.json.data.request_id } });
+    check('小幫手不能審核（會動到運費）→ 403', hAppr.status === 403, hAppr.json);
+    const bAppr = await B('POST', '/api/v1/ship-requests/approve', { body: { request_id: mr.json.data.request_id } });
+    check('客人不能自己核准 → 403', bAppr.status === 403, bAppr.json);
+
+    const appr = await api('POST', '/api/v1/ship-requests/approve', { token: owner, body: { request_id: mr.json.data.request_id, decision_note: '週五一起寄' } });
+    const ad = appr.json.data;
+    const [na, nb] = [await detail(oa.order_id), await detail(ob.order_id)];
+    check('店主核准併單 → 自動產生出貨單（待出貨，兩張單、寄到第一張的地址）', appr.status === 200 && ad.status === 'approved' && ad.ship_group
+      && ad.ship_group.status === '待出貨' && ad.ship_group.order_ids.length === 2 && ad.ship_group.pickup === nb.pickup, appr.json);
+    check('兩張訂單都掛上同一張出貨單', na.ship_group_id === ad.ship_group.ship_group_id && nb.ship_group_id === ad.ship_group.ship_group_id);
+    check('第一張保留運費、另一張的運費自動拿掉（總額跟著減）',
+      Number(nb.ship_fee_twd) === Number(ob.ship_fee_twd) && Number(na.ship_fee_twd) === 0
+      && Number(na.total_twd) === Number(oa.total_twd) - Number(oa.ship_fee_twd)
+      && ad.result.fee_waived.length === 1 && ad.result.fee_waived[0].order_id === oa.order_id, { na, ad: ad.result });
+    const srn = (await pending()).filter((n) => n.kind === 'ship_request');
+    check('LINE 通知客人「併單申請通過」，寫出省下的運費和店家留言',
+      srn.length === 1 && /併單申請通過/.test(txt(srn[0])) && /省下運費 NT\$/.test(txt(srn[0])) && /週五一起寄/.test(txt(srn[0]))
+      && /\?path=orders/.test(txt(srn[0])) && pl(srn[0]).request_id === ad.request_id, srn.map(txt));
+    const again = await api('POST', '/api/v1/ship-requests/approve', { token: owner, body: { request_id: ad.request_id } });
+    check('同一筆不能核准兩次 → ALREADY_DECIDED', again.status === 409 && again.json.error.code === 'ALREADY_DECIDED', again.json);
+    const regroup = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'merge', order_ids: [oa.order_id, op.order_id] } });
+    check('已經在出貨單裡的單不能再併（先看到 NOT_QUOTED 或 ALREADY_GROUPED 都算擋住）', regroup.status === 409, regroup.json);
+    const bo = (await B('GET', `/api/v1/orders/detail?order_id=${oa.order_id}`)).json.data;
+    check('前台訂單明細多了 ship_group_id', bo.ship_group_id === ad.ship_group.ship_group_id, bo);
+
+    const rjNo = await api('POST', '/api/v1/ship-requests/reject', { token: owner, body: { request_id: mr2.request_id } });
+    check('拒絕一定要寫原因（客人會收到）→ REASON_REQUIRED', rjNo.status === 400 && rjNo.json.error.code === 'REASON_REQUIRED', rjNo.json);
+    const rj = await api('POST', '/api/v1/ship-requests/reject', { token: owner, body: { request_id: mr2.request_id, decision_note: '帽子還在路上，到了再一起寄' } });
+    const rjn = (await pending()).filter((n) => n.kind === 'ship_request');
+    check('店主拒絕 → 未核准，客人收到原因', rj.status === 200 && rj.json.data.status === 'rejected' && rjn.length === 1
+      && /沒辦法通過/.test(txt(rjn[0])) && /帽子還在路上/.test(txt(rjn[0])), [rj.json, rjn.map(txt)]);
+    const oc2 = await detail(oc.order_id);
+    check('拒絕不動訂單（運費、出貨單都沒變）', Number(oc2.ship_fee_twd) === Number(oc.ship_fee_twd) && !oc2.ship_group_id);
+
+    // 拆單：一張兩個品項的單，一個到貨了
+    const od = await newOrder(['拆單 到貨的奶瓶', '拆單 還沒到的推車'], 500);
+    const arrivedItem = od.items.find((i) => /奶瓶/.test(i.name));
+    const waitItem = od.items.find((i) => /推車/.test(i.name));
+    const noArr = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'split', order_id: od.order_id } });
+    check('還沒有品項到貨 → NOT_SPLITTABLE', noArr.status === 409 && noArr.json.error.code === 'NOT_SPLITTABLE', noArr.json);
+    {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      await c.query("UPDATE order_items SET item_status = '已到貨' WHERE item_id = $1", [arrivedItem.item_id]);
+      await c.end();
+    }
+    const wrongPick = await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'split', order_id: od.order_id, item_ids: [waitItem.item_id] } });
+    check('挑還沒到貨的品項先寄 → ITEM_NOT_ARRIVED', wrongPick.status === 409 && wrongPick.json.error.code === 'ITEM_NOT_ARRIVED', wrongPick.json);
+    const sr0 = (await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'split', order_id: od.order_id } })).json.data;
+    check('不指定品項 → 預設已到貨的全部先寄', sr0.kind === 'split' && sr0.item_ids.length === 1 && sr0.item_ids[0] === arrivedItem.item_id, sr0);
+    const cx = await B('POST', '/api/v1/ship-requests/cancel', { body: { request_id: sr0.request_id } });
+    check('客人可以取消審核中的申請', cx.status === 200 && cx.json.data.status === 'cancelled', cx.json);
+    const cx2 = await B('POST', '/api/v1/ship-requests/cancel', { body: { request_id: sr0.request_id } });
+    check('取消過的不能再取消 → ALREADY_DECIDED', cx2.status === 409 && cx2.json.error.code === 'ALREADY_DECIDED', cx2.json);
+    const sr = (await B('POST', '/api/v1/ship-requests/create', { body: { kind: 'split', order_id: od.order_id, item_ids: [arrivedItem.item_id] } })).json.data;
+    const sa = await api('POST', '/api/v1/ship-requests/approve', { token: owner, body: { request_id: sr.request_id } });
+    const sres = sa.json.data && sa.json.data.result;
+    const child = sres && await detail(sres.child_order_id);
+    const parent = await detail(od.order_id);
+    check('店主核准拆單 → 拆出子訂單（-A），子訂單直接「已到貨」，掛自己的出貨單', sa.status === 200 && child
+      && child.order_id === `${od.order_id}-A` && child.status === '已到貨' && child.ship_group_id === sres.ship_group_id
+      && child.items.length === 1 && child.items[0].item_id === arrivedItem.item_id, [sa.json, child]);
+    check('先寄的那箱另收一次運費；母單少了那個品項的金額、運費不變',
+      sres.extra_fee_twd > 0 && Number(child.ship_fee_twd) === sres.extra_fee_twd && Number(child.total_twd) === 500 + sres.extra_fee_twd
+      && Number(parent.total_twd) === Number(od.total_twd) - 500 && Number(parent.ship_fee_twd) === Number(od.ship_fee_twd)
+      && parent.items.length === 1, { sres, child: [child.total_twd, child.ship_fee_twd], parent: [parent.total_twd, od.total_twd] });
+    const spn = (await pending()).filter((n) => n.kind === 'ship_request');
+    check('LINE 通知客人「拆單申請通過」，寫出新訂單號', spn.length === 1 && /拆單申請通過/.test(txt(spn[0])) && txt(spn[0]).includes(child.order_id), spn.map(txt));
+
+    const groups = (await api('GET', '/api/v1/ship-groups/list', { token: packer })).json.data;
+    check('出貨單列表（理貨的人也看得到）：兩張出貨單都是待出貨', groups.filter((g) => [ad.ship_group.ship_group_id, sres.ship_group_id].includes(g.ship_group_id)).length === 2
+      && groups.every((g) => g.status === '待出貨'), groups);
+    const notReady = await api('POST', '/api/v1/ship-groups/ship', { token: owner, body: { ship_group_id: ad.ship_group.ship_group_id } });
+    check('併單的出貨單：有單還沒到貨 → NOT_READY，一張都不寄', notReady.status === 409 && notReady.json.error.code === 'NOT_READY'
+      && (await detail(oa.order_id)).status === '已報價', notReady.json);
+    const unpaidShip = await api('POST', '/api/v1/ship-groups/ship', { token: packer, body: { ship_group_id: sres.ship_group_id } });
+    check('還沒付款 → UNPAID（要店主寫原因才能寄）', unpaidShip.status === 409 && unpaidShip.json.error.code === 'UNPAID', unpaidShip.json);
+    const shipped = await api('POST', '/api/v1/ship-groups/ship', { token: owner, body: { ship_group_id: sres.ship_group_id, override_reason: '熟客先寄', tracking_no: 'SMK123456' } });
+    const childAfter = await detail(child.order_id);
+    check('整張出貨單寄出 → 出貨單「已出貨」、訂單「已出貨」、物流單號記在出貨紀錄', shipped.status === 200 && shipped.json.data.status === '已出貨'
+      && childAfter.status === '已出貨' && childAfter.shipments.some((s) => s.tracking_no === 'SMK123456'), [shipped.json, childAfter.shipments]);
+    check('出貨通知照常排進佇列', (await pending()).some((n) => n.kind === 'shipped' && n.order_id === child.order_id));
+    const mine = (await B('GET', '/api/v1/ship-requests/list')).json.data;
+    check('客人「我的出貨申請」：看得到 4 筆（核准、未核准、取消、核准），出貨單狀態跟著變', mine.length >= 4
+      && mine.find((x) => x.request_id === sr.request_id).ship_group.status === '已出貨'
+      && mine.find((x) => x.request_id === mr2.request_id).decision_note.includes('帽子'), mine.map((x) => [x.kind, x.status]));
+    const auditR = (await api('GET', '/api/v1/audit/list?limit=200', { token: owner })).json.data;
+    const arows = Array.isArray(auditR) ? auditR : auditR.rows || auditR.items || [];
+    check('稽核：申請、核准、拒絕、整箱出貨都有紀錄', ['ship_request.create', 'ship_request.approve', 'ship_request.reject', 'ship_request.cancel', 'ship_group.ship']
+      .every((a) => arows.some((l) => l.action === a)), arows.slice(0, 5).map((l) => l.action));
+    }
+
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
     const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
     const shot = (await B('POST', '/api/v1/cart/add-image',

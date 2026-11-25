@@ -80,6 +80,11 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
   const toQuote = Number(wishCounts.to_quote);
   if (toReview) todo.push({ urgency: 2, kind: 'wall', title: `${toReview} 則許願等你審核上牆`, body: '客人勾了「公開到許願牆」', link: '#/wishes?tab=待上牆' });
   if (toQuote) todo.push({ urgency: 3, kind: 'wish', title: `${toQuote} 則許願等報價`, body: '報了價客人才能加購物車', link: '#/wishes' });
+  // 出貨申請（014）：正式庫還沒跑 014 時沒有這張表，首頁照常。
+  try {
+    const sr = Number((await db.one("SELECT count(*) AS n FROM ship_requests WHERE status = 'pending'")).n);
+    if (sr) todo.push({ urgency: 2, kind: 'ship_request', title: `${sr} 筆出貨申請等你審核`, body: '客人申請併單或拆單', link: '#/ship-requests' });
+  } catch { /* 014 還沒跑 */ }
   todo.sort((a, b) => a.urgency - b.urgency);
 
   // 訂單狀態數字格：點了直接跳到訂單管理的同一個篩選，所以數字跟清單要一致（都是這一團）。
