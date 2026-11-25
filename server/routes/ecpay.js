@@ -113,8 +113,9 @@ async function handleReturn(p) {
   if (outcome === 'credited') {
     await drops.restoreIfPaidUp(s.line_user_id, 'ecpay');
     await notify.queue({ kind: 'payment_received', lineUserId: s.line_user_id, statementId: s.statement_id,
-      payload: { statement_id: s.statement_id, amount: trade.amount_twd,
-        text: `✅ 付款成功\n\n對帳單 ${s.statement_id} 已收到 ${ntd(trade.amount_twd)}（信用卡）\n謝謝您 🙏` } });
+      payload: { statement_id: s.statement_id, amount: trade.amount_twd, path: 'stmt',
+        text: `✅ 付款成功\n\n對帳單 ${s.statement_id} 已收到 ${ntd(trade.amount_twd)}（信用卡）\n謝謝您 🙏\n\n`
+          + `查看對帳單 👉\n${config.buyerLiffUrl}?path=stmt` } });
     notify.poke();
   }
   return '1|OK';

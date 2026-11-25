@@ -134,7 +134,7 @@ post('/api/v1/purchase/record', async ({ actor, body }) => {
     + `有問題直接回覆這則訊息 🙌\n${config.buyerLiffUrl}?path=${link}`;
   let notified = false;
   try {
-    notified = await notify.queue({ kind: 'bought', lineUserId: m.line_user_id, payload: { ref, ...target, name, qty, text: msg } });
+    notified = await notify.queue({ kind: 'bought', lineUserId: m.line_user_id, payload: { ref, ...target, name, qty, path: link, text: msg } });
     if (notified) notify.poke();
   } catch (e) {
     console.warn('[purchase] 通知沒排進佇列（不影響登記）：', e.code || '', e.message);

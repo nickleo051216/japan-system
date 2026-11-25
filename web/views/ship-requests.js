@@ -8,10 +8,31 @@ import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '..
  *   出貨單 —— 核准後產生的「這一箱」：底下的單全部到貨了就能按「整箱出貨」。
  *   已處理 —— 核准、不核准、客人自己取消的紀錄。
  * 審核只有店主能按（會動到運費），小幫手和理貨的人看得到但沒有按鈕。
+ * v1.7：卡片上方顯示「客人選的寄送方式」和照這個方式算出來的運費（超商↔宅配會變）。
  */
 const TABS = ['待審核', '出貨單', '已處理'];
 const KIND_TONE = { merge: 'blue', split: 'peach' };
 const STATE_TONE = { pending: 'amber', approved: 'green', rejected: 'red', cancelled: '' };
+const TYPE_ZH = { cvs: '超商', home: '宅配' };
+
+/** 客人選的寄送方式＋運費變化，一行字。 */
+function pickupLine(r) {
+  const f = r.fee_plan;
+  const where = r.pickup_text
+    ? h('span', {}, h('b', {}, '客人選的寄送方式：'), r.pickup_text, r.pickup && r.pickup.from_default ? h('span', { class: 'tiny muted' }, '（會員預設）') : null)
+    : h('span', { class: 'muted' }, '寄送方式：沿用訂單原本的');
+  let fee = null;
+  if (f && 'to_twd' in f) {
+    if (f.kind === 'merge' && f.changed) {
+      fee = h('span', { class: 'tag amber' }, `這箱運費 ${nt(f.from_twd)} → ${nt(f.to_twd)}（照${TYPE_ZH[f.pickup_type]}算）`);
+    } else if (f.kind === 'merge' && f.reason && r.pickup) {
+      fee = h('span', { class: 'tag red' }, `寄送方式改了，但第一張單${f.reason}，運費不會自動改（${nt(f.from_twd)}）`);
+    } else if (f.kind === 'split') {
+      fee = h('span', { class: 'tag' }, f.reason ? `先寄不另收運費（母單${f.reason}）` : `先寄運費 ${nt(f.to_twd)}（照${TYPE_ZH[f.pickup_type]}算）`);
+    }
+  }
+  return h('div', { class: 'small row', style: 'gap:8px;margin:0 0 8px' }, where, fee);
+}
 
 export async function render(root, ctx) {
   const tab = TABS.includes(ctx.query.tab) ? ctx.query.tab : '待審核';
@@ -62,6 +83,7 @@ function requestCard(r, ctx, canDecide) {
       h('span', { class: 'spacer', style: 'flex:1' }),
       h('span', { class: 'tag ' + STATE_TONE[r.status] }, r.status_zh)),
     h('div', { class: 'tiny muted', style: 'margin:4px 0 8px' }, `申請時間 ${dt(r.created_at)}`, r.note ? `　客人備註：${r.note}` : ''),
+    pickupLine(r),
     ...orders,
     decided,
     canDecide ? h('div', { class: 'row', style: 'gap:8px;margin-top:12px;justify-content:flex-end' },
@@ -71,11 +93,14 @@ function requestCard(r, ctx, canDecide) {
 
 function approveDialog(r, ctx) {
   const note = h('input', { type: 'text', placeholder: '選填，例如：週五一起寄', maxlength: '200' });
-  const fee = h('input', { type: 'number', min: '0', placeholder: '留空 = 照運費設定算', inputmode: 'numeric' });
+  const plan = r.fee_plan || {};
+  const fee = h('input', { type: 'number', min: '0', inputmode: 'numeric',
+    placeholder: plan.kind === 'split' && !plan.reason ? `留空 = ${nt(plan.to_twd)}（照${TYPE_ZH[plan.pickup_type]}運費算）` : '留空 = 照運費設定算' });
   const o = r.orders[0];
   const canCharge = r.kind === 'split' && o && o.payment_status === '待付款' && !o.statement_id;
   const explain = r.kind === 'merge'
-    ? `${r.order_ids.length} 張單會產生一張出貨單，寄到 ${o ? o.order_id : ''} 的地址；其他張的運費自動拿掉（已付款或已出對帳單的不動，核准後會列出來給你決定要不要退）。`
+    ? `${r.order_ids.length} 張單會產生一張出貨單，寄到${r.pickup_text ? `「${r.pickup_text}」` : ` ${o ? o.order_id : ''} 的地址`}；其他張的運費自動拿掉（已付款或已出對帳單的不動，核准後會列出來給你決定要不要退）。`
+      + (plan.changed ? `寄送方式改了，這箱運費 ${nt(plan.from_twd)} → ${nt(plan.to_twd)}。` : '')
     : '已到貨的品項會拆成一張新訂單（狀態直接是「已到貨」），掛一張出貨單，可以馬上出貨。';
   modal(`核准${r.kind_zh}`, h('div', {},
     h('div', { class: 'banner info' }, explain),
@@ -92,10 +117,11 @@ function approveDialog(r, ctx) {
       if (r.kind === 'merge') {
         const saved = (x.fee_waived || []).reduce((s, w) => s + w.fee_twd, 0);
         toast(`已核准，出貨單 ${x.ship_group_id}${saved ? `，幫客人省下運費 ${nt(saved)}` : ''}`);
-        if (x.fee_not_waived && x.fee_not_waived.length) {
-          modal('有運費沒有自動拿掉', h('div', {},
-            h('div', { class: 'banner warn' }, '下面這幾張單已經付款或出了對帳單，運費沒有動。要退給客人的話請另外處理。'),
-            ...x.fee_not_waived.map((n) => h('div', { class: 'small' }, `${n.order_id}　運費 ${nt(n.fee_twd)}（${n.reason}）`))));
+        const notMoved = [...(x.fee_not_waived || []), ...(x.fee_not_changed ? [x.fee_not_changed] : [])];
+        if (notMoved.length) {
+          modal('有運費沒有自動調整', h('div', {},
+            h('div', { class: 'banner warn' }, '下面這幾張單已經付款或出了對帳單，運費沒有動。要退或補收的話請另外處理。'),
+            ...notMoved.map((n) => h('div', { class: 'small' }, `${n.order_id}　運費 ${nt(n.fee_twd)}（${n.reason}）`))));
         }
       } else {
         toast(`已核准，拆出 ${x.child_order_id}${x.extra_fee_twd ? `，先寄運費 ${nt(x.extra_fee_twd)}` : ''}`);

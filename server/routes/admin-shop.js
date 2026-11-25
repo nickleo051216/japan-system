@@ -404,7 +404,7 @@ post('/api/v1/wishes/to-broadcast', async ({ actor, body }) => {
         + (deadline ? `｜${deadline} 截止` : '')
         + `\n\n先搶先贏，點這裡直接到喊單頁 👉\n${config.buyerLiffUrl}?path=live`;
       if (await notify.queue({ kind: 'wish_broadcast', lineUserId: p.line_user_id,
-        payload: { send_id: row.send_id, wish_id: w.wish_id, text } })) notified += 1;
+        payload: { send_id: row.send_id, wish_id: w.wish_id, path: 'live', text } })) notified += 1;
     }
     await audit.record({ actor: actor.line_user_id, action: 'wish.to_broadcast', target: w.wish_id,
       detail: { send_id: row.send_id, notified }, result: 'ok' });
@@ -643,8 +643,9 @@ async function generateStatements(by, lineUserId = null) {
       await db.run('UPDATE orders SET statement_id = ? WHERE order_id = ANY(?::text[])',
         statementId, list.map((o) => o.order_id));
       const deadline = new Date(Date.now() + deadlineDays * 86400_000).toISOString();
+      const sp = { statement_id: statementId, total_amount: total, order_ids: list.map((o) => o.order_id), pay_by: deadline, path: 'stmt' };
       await notify.queue({ kind: 'statement', lineUserId: user, statementId,
-        payload: { statement_id: statementId, total_amount: total, order_ids: list.map((o) => o.order_id), pay_by: deadline } });
+        payload: { ...sp, text: customerNotify.statementText(sp) } });
       out.push({ statement_id: statementId, line_user_id: user, total_amount: total, order_count: list.length });
     }
     return out;
