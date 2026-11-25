@@ -57,9 +57,30 @@ export async function render(root, ctx) {
       jpyIn, twdIn,
       h('button', { class: 'btn sm primary', onClick: async () => {
         try {
-          const r = await POST('/api/v1/wishes/quote', { wish_id: w.wish_id,
-            jpy_taxed: jpyIn.value ? Number(jpyIn.value) : null, quote_twd: twdIn.value ? Number(twdIn.value) : null });
-          toast(`已報價 ${nt(r.quote_twd)}`); ctx.reload();
+          const body = { wish_id: w.wish_id,
+            jpy_taxed: jpyIn.value ? Number(jpyIn.value) : null, quote_twd: twdIn.value ? Number(twdIn.value) : null };
+          const send = async () => {
+            const r = await POST('/api/v1/wishes/quote', body);
+            const a = r.auto || {};
+            toast(`已報價 ${nt(r.quote_twd)}` + (a.auto_buy ? `，自動幫 ${a.auto_buy} 人保留` : '') + (a.auto_reject ? `，${a.auto_reject} 人超過預算略過` : ''));
+            ctx.reload();
+          };
+          // v1.8：有人設了預算，先試算這個價會自動成立幾筆，讓店家確認再送。
+          if (w.budget && w.budget.count) {
+            const qs = new URLSearchParams({ wish_id: w.wish_id, ...(body.quote_twd ? { quote_twd: body.quote_twd } : {}), ...(body.jpy_taxed ? { jpy_taxed: body.jpy_taxed } : {}) });
+            const pv = await GET('/api/v1/wishes/budget-preview?' + qs);
+            if (pv.auto_buy || pv.auto_reject) {
+              modal(`報價 ${nt(pv.quote_twd)}：會自動處理`, h('div', {},
+                h('div', { class: 'banner info' }, '照客人自己設的預算，系統會各自決定（客人付款前都可以取消）：'),
+                h('div', { class: 'small' }, `🛍️ 自動放進購物車：${pv.auto_buy} 人`),
+                h('div', { class: 'small' }, `🙅 超過預算略過：${pv.auto_reject} 人`),
+                h('div', { class: 'small' }, `💬 在中間、會問他：${pv.pending} 人`),
+                pv.already_bought ? h('div', { class: 'tiny muted' }, `${pv.already_bought} 人之前已經自動保留過，這次不會再成立第二筆。`) : null),
+              [{ label: '確定報價', primary: true, onClick: async (close) => { close(); await send(); } }]);
+              return;
+            }
+          }
+          await send();
         } catch (e) { fail(e); } } }, '報價'),
       h('button', { class: 'btn sm', onClick: async () => {
         try { await POST('/api/v1/wishes/mark', { wish_id: w.wish_id, status: '現場缺貨' }); toast('已標記現場缺貨'); ctx.reload(); }
@@ -88,7 +109,11 @@ export async function render(root, ctx) {
         w.ref_url ? h('div', {}, h('a', { href: w.ref_url, target: '_blank', rel: 'noopener', class: 'tiny' }, '商品連結 ↗')) : null,
         w.note ? h('div', { class: 'tiny muted' }, w.note) : null),
       h('td', {}, h('span', { class: 'tag' + (w.votes > 0 ? ' blue' : '') }, `🙋 ${w.votes + 1} 人`),
-        w.votes > 0 ? h('div', { class: 'tiny muted' }, `許願的人＋${w.votes} 人按 +1`) : null),
+        w.votes > 0 ? h('div', { class: 'tiny muted' }, `許願的人＋${w.votes} 人按 +1`) : null,
+        w.budget && w.budget.count ? h('div', { class: 'tiny', style: 'margin-top:4px', title: '客人自己設的預算（看不到是誰）' },
+          `💰 ${w.budget.count} 人設了預算`,
+          w.budget.auto_buy_max.length ? h('div', { class: 'tiny muted' }, `自動買上限：${w.budget.auto_buy_max.map(nt).join('、')}`) : null,
+          w.budget.reject_above.length ? h('div', { class: 'tiny muted' }, `超過就不要：${w.budget.reject_above.map(nt).join('、')}`) : null) : null),
       h('td', { class: 'tiny muted' }, dt(w.wished_at)),
       h('td', {},
         h('span', { class: 'tag' + (w.wish_status === '已報價' ? ' blue' : w.wish_status === '待處理' ? ' amber' : '') }, w.wish_status),

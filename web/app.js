@@ -120,6 +120,8 @@ const ROUTES = [
     sub: '客人申請併單或先寄，確認運費後產生出貨單。' },
   { path: 'statements', title: '付款與發票備註', cap: 'payment.reconcile', mod: () => import('./views/statements.js'),
     sub: '每月結算對帳單、核對客人匯款。' },
+  { path: 'costs', title: '營運成本表', cap: 'order.read.cost', mod: () => import('./views/costs.js'),
+    sub: '小幫手請款核准後自動記成本；日幣、韓幣、台幣分開加總。' },
   { path: 'orders', title: '訂單管理', cap: 'order.read', mod: () => import('./views/orders.js'),
     sub: '商品、客人與每一步進度，都有對照紀錄。' },
   { path: 'packing', title: '看圖理貨與出貨', cap: 'shipment.write', mod: () => import('./views/packing.js'),

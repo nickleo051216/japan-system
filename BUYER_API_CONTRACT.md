@@ -1,4 +1,4 @@
-# 買家 API 合約（Buyer API Contract）v1.7
+# 買家 API 合約（Buyer API Contract）v1.8
 
 LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後端之間的**唯一邊界**。
 前台照這份呼叫，後端照這份實作。兩邊任何一邊要改，先改這份文件。
@@ -34,7 +34,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
 ---
 
-## 2. 端點一覽（34 個）
+## 2. 端點一覽（44 個）
 
 | # | 方法 | 路徑 | 用途 | 備註 |
 |---|---|---|---|---|
@@ -79,6 +79,13 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 | 34 | GET | `/inbox/list` | 站內通知中心（v1.6，跟 LINE 通知同一份） | notification_outbox |
 | 35 | GET | `/inbox/unread-count` | 未讀則數（v1.6） | notification_outbox |
 | 36 | POST | `/inbox/read` | 標成看過（v1.6） | notification_outbox |
+| 37 | POST | `/wishes/budget` | 設／改／清我的許願預算（v1.8） | wish_budgets |
+| 38 | GET | `/wishes/decisions` | 我的預算自動處理紀錄（v1.8） | wish_decisions |
+| 39 | POST | `/wishes/decide` | 報價在預算中間：要／不要（v1.8） | wish_decisions, cart_items |
+| 40 | POST | `/wishes/auto-cancel` | 取消預算內自動保留（付款前）（v1.8） | wish_decisions, cart_items |
+| 41 | POST | `/statements/early` | 提前結帳：現在就開一張對帳單（v1.8） | statements, orders |
+| 42 | GET | `/me/checkout-prefs` | 我的結帳偏好（v1.8） | members.checkout_prefs |
+| 43 | POST | `/me/checkout-prefs` | 改結帳偏好（v1.8） | members.checkout_prefs |
 
 所有端點**只回傳該 `line_user_id` 自己的資料**，不能透過參數查別人的。
 
@@ -263,6 +270,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 - 台灣端運費：由店主在後台「店家與收款設定」填（`settings.ship_fee_cvs` / `ship_fee_home`），未填時暫定超商 70、宅配 120（金額 `[待確認]`，業主決定）
 - 滿額免運：商品小計（不含運費）≥ `settings.ship_free_cvs` / `ship_free_home` 時運費為 0（v1.3）。還沒定價的品項以 0 計；之後店家報價補上價錢，運費會照同一規則重算
 - 取貨地址從會員資料帶入（前台不傳地址，避免竄改）
+- v1.8：`pickup`、`invoice`、`note` 沒帶時，用客人的結帳偏好（第 42 項）補。`invoice` 多收 `donate_code`（捐贈碼）、`company`（統編的公司抬頭），訂單的 `invoice` 文字會寫成「捐贈發票 168001」「統編 12345678 好好股份有限公司」。
 - 成立：`status=待確認`、`payment_status=待付款`、品項 `item_status=待採買`、購物車品項移出
 - **同一 Idempotency-Key 重送只成立一張**
 
@@ -327,6 +335,8 @@ InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, 
   | `shipped` 出貨、`ship_request` 出貨申請 | `orders` |
   | `wish_broadcast` 許願開喊單 | `live` |
   | `bought` 小幫手買到了 | 加進訂單 → `orders`；放進購物車 → `cart` |
+  | `wish_auto` 許願預算自動處理（v1.8） | 自動保留 → `cart`；略過／在中間 → `wish` |
+  | `payment_reminder` 逾期付款提醒（v1.8） | `stmt` |
 - 資料來源就是 LINE 通知佇列：LINE 沒送達也看得到
 
 ### 35. `GET /inbox/unread-count`
@@ -334,6 +344,45 @@ InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, 
 
 ### 36. `POST /inbox/read`
 請求 `{ notif_ids:[…最多 200] }` 或 `{ all:true }` → 回 `{ marked, unread }`。只會改到自己的通知；都沒帶 → `400 BAD_REQUEST`。
+
+### 37～40. 許願預算（v1.8，022）
+客人許願或按 +1 時可以設兩個數字（都選填、至少一個；都要 > 0；`auto_buy_max` ≤ `reject_above`，否則 `400 BAD_BUDGET`）：
+
+| 欄位 | 意思 |
+|---|---|
+| `auto_buy_max` | 報價 **≤** 這個數 → 自動幫我買（放進購物車、已確認、數量 1） |
+| `reject_above` | 報價 **>** 這個數 → 自動略過（不買、不再問） |
+| 中間的 | 照舊「待回覆」：許願的人收到一般的「報價好了」；按 +1 的人收到「你按 +1 的許願有報價了，這次在中間」 |
+
+- **在哪裡帶**：`POST /wishes/create`、`POST /wishes/plus`（`on:true` 時）都多收這兩個欄位；之後改用 `POST /wishes/budget { wish_id, auto_buy_max, reject_above }`（兩個都送 `null` = 清掉；要先是許願的人或按過 +1，否則 `409 NOT_VOTED`）。取消 +1 會一起清掉預算。
+- **回傳**：`/wishes/list`、`/wishes/board`（我許的或我按過 +1 的那幾則）、`/wishes/create`、`/wishes/budget` 多兩個欄位：
+  - `my_budget`：`{ auto_buy_max, reject_above, rule_text, updated_at }` 或 `null`。**`rule_text` 請直接顯示**，例如「報價 ≤ NT$800 自動幫你買；超過 NT$1,000 自動略過；中間的會問你」。
+  - `my_decision`：我最新一次的自動決定，`null` 或 `{ decision_id, decision:"auto_buy|auto_reject|pending", decision_zh, status:"open|accepted|declined|cancelled", status_zh, quote_twd, authorization_max, reject_above, cart_id, can_cancel, can_decide, created_at, decided_at }`
+- **預算是私人的**：只有本人看得到。店家只看得到「幾個人設了、數字的分布」，看不到是誰。
+- **店家報價時**：對許願的人和每位按 +1 的人各自判斷。報價當下的預算存成快照（`authorization_max`），之後改預算不影響這一次。同一個人對同一則許願只會**自動成立一次**，店家重新報價不會再成立第二筆。每一個自動決定都發 LINE＋站內通知（種類 `wish_auto`）。
+- `GET /wishes/decisions`：我的自動處理紀錄（新的在前，最多 50 筆），每筆 `{ wish_id, item_name, picture, role:"owner|voter", ...my_decision 的欄位 }`。
+- `POST /wishes/decide { wish_id, accept: true|false }`：`can_decide` 為 true 時才能按。`true` 放進購物車（數量 1、報價金額），回 `{ wish_id, my_decision, cart_item }`；沒有在等決定的 → `409 NOTHING_TO_DECIDE`。
+- `POST /wishes/auto-cancel { wish_id }`：`can_cancel` 為 true 時才能按（付款前都可以取消）。購物車那一項拿掉；許願的人取消後，許願回到「已報價」。已經結帳 → `409 ALREADY_ORDERED`；沒有自動保留 → `409 NOTHING_TO_CANCEL`。客人直接從購物車移除也可以。
+
+### 41. `POST /statements/early`（v1.8 提前結帳）
+不用等月結：把自己「已報價以上、還沒進對帳單、還沒付」的訂單現在就開成一張對帳單，回 Statement（跟 `/statements/list` 同形狀）。沒有可以結的 → `409 NOTHING_TO_BILL`。開出來一樣會收到「對帳單通知」。超過付款期限（預設 2 天）還沒付，會自動提醒一次（`payment_reminder`）。
+
+### 42～43. `GET`／`POST /me/checkout-prefs`（v1.8 結帳偏好）
+```json
+{ "payway": "bank|atm|credit", "payway_zh": "匯款",
+  "pickup": { "type": "cvs", "brand": "7-11", "store_id": "…", "store_name": "…", "addr": "…", "from_default": true, "text": "超商取貨 7-11 …" },
+  "invoice": { "type": "carrier", "carrier": "/ABC1234" },
+  "note": "送禮請勿附價錢",
+  "integration_status": "not_connected", "integration_note": "電子發票還沒有串接，店家會照你的設定另外開立", "updated_at": "…" }
+```
+- POST 只改有帶的欄位，帶 `null` 是清掉那一項。
+- `invoice` 三種，切換類型時沒用到的欄位會清掉：
+  - `{ type:"carrier", carrier }`：`/` 開頭加 7 碼，否則 `BAD_CARRIER`
+  - `{ type:"donate", donate_code }`：3～7 位數字，否則 `BAD_DONATE_CODE`
+  - `{ type:"tax", tax_id, company }`：8 位數字（`BAD_TAX_ID`），公司抬頭必填（`BAD_COMPANY`）
+- `pickup` 跟出貨申請（第 30 項）**同一套格式**。門市和地址寫回會員資料（`cvs_*`／`home_addr`）。只帶 `{ type }` 就用會員現有的。錯誤碼同第 30 項（`BAD_PICKUP`、`PICKUP_INCOMPLETE`）。
+- `payway` 不對 → `BAD_PAYWAY`。`integration_status` 目前固定是 `"not_connected"`，請照實顯示。
+- 結帳（第 18 項）沒帶 `pickup`／`invoice`／`note` 時用這裡的預設。店家在訂單明細、出貨單上看得到這份偏好。
 
 ### 22. `POST /orders/received`
 請求 `{ order_id }`；僅「已出貨」可改為「已送達」，否則 `409 ILLEGAL_TRANSITION`（由 DB trigger 擋）
@@ -347,8 +396,11 @@ InboxItem：`{ notif_id, kind, title, text, body, path, order_id, statement_id, 
 - `unbilled` = 已報價以上、尚未歸入對帳單的訂單
 
 ### 25. `POST /statements/report-transfer`
-請求 `{ statement_id, last5 }`；5 碼數字 → 否則 `BAD_LAST5`；已核對 → `409 ALREADY_PAID`
+請求 `{ statement_id, last5, screenshot? }`；5 碼數字 → 否則 `BAD_LAST5`；已核對 → `409 ALREADY_PAID`
 - 改為「待官方確認」，由後端排程比對入帳
+- v1.8：`screenshot` 選填，匯款截圖 data URL（JPG／PNG／WebP，3 MB 內；格式不對 → `BAD_IMAGE`）。截圖只有店家看得到。
+  Statement 多 `has_transfer_proof`（有沒有附截圖）、`transfer_reported_at`。
+- v1.8：店家照網銀輸入入帳，系統用「末五碼＋金額」自動配對。配到就變「已核對」並通知客人「已確認收到您的付款」；配不到由店家確認。前台不用多做事，重新抓 `/statements/list` 就好。
 
 ### 26. `POST /statements/pay-init`
 請求 `{ statement_id, payway: "credit|atm", invoice: { type, carrier, tax_id } }`（LINE Pay 不在綠界內，第二波另外串接，第一波不送）
@@ -381,6 +433,15 @@ BASE=https://<部署網址>/api/v1 node scripts/buyer-contract.test.js
 **47/47 通過 = 前台可直接接上。**
 
 ---
+
+## 4.8 v1.8 變更（2026-11-26，周小姐示範站的 4 個功能；022）
+
+| # | 變更 | 端點 |
+|---|---|---|
+| 1 | 許願預算：許願／+1 時可以設 `auto_buy_max`、`reject_above`；店家報價時各自自動保留／略過／問你；`my_budget`、`my_decision`；通知 `wish_auto` | 13、14、27、28、37～40 |
+| 2 | 匯款自動對帳：提前結帳 `/statements/early`；回報匯款可附 `screenshot`；店家輸入銀行入帳自動配對；逾期提醒 `payment_reminder`（每張一次） | 24、25、41 |
+| 3 | 營運成本表：只在後台（店主），前台不用改 | — |
+| 4 | 結帳偏好：`/me/checkout-prefs`（付款方式、取貨、發票、特殊備註；`integration_status:"not_connected"`）；結帳沒帶的欄位用偏好補；發票多 `donate_code`、`company` | 18、42、43 |
 
 ## 4.9 v1.7 變更（2026-11-25，前端「需後端配合」2 項）
 

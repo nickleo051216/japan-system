@@ -25,6 +25,7 @@ const { get, post, ok } = require('../lib/http');
 const { now, uid } = require('../lib/ids');
 const { bpost, err, num } = require('./buyer');
 const { boardRows, recordExpense } = require('./procurement');
+const opCosts = require('../lib/costs');
 
 const ROLE_ZH = { helper: '日本小幫手', packer: '包貨人員' };
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // 沒有 0/O、1/I/L，念給對方聽不會搞混
@@ -337,6 +338,8 @@ post('/api/v1/helper-claims/decide', async ({ actor, body }) => {
       }
     }
   });
+  // v1.8：請款單跟營運成本表連動（核准＝未付成本、已付款＝已付、退回＝移除）。交易外面做，022 還沒跑也不擋審核。
+  await opCosts.syncClaim(c.claim_id);
   await audit.record({ actor: actor.line_user_id, action: 'helper.claim_decide', target: c.claim_id,
     detail: { action, from: c.status, to, total_twd: num(c.total_twd), helper: c.line_user_id, note, costs }, result: 'ok' });
   return ok(await claimShape(await db.one(

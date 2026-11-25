@@ -93,4 +93,4 @@ async function wishOutOfStock(w) {
     payload: { wish_id: w.wish_id, path: 'wish', text } });
 }
 
-module.exports = { orderQuoted, wishQuoted, transferVerified, orderOutOfStock, wishOutOfStock, statementText, link };
+module.exports = { orderQuoted, wishQuoted, transferVerified, orderOutOfStock, wishOutOfStock, statementText, link, mdOf: mdIso };

@@ -79,6 +79,13 @@ export async function render(root, ctx) {
         ? h('td', {}, Number(i.unit_price_twd) > 0 ? nt(i.unit_price_twd * i.qty) : h('span', { class: 'tag red' }, '未定價'))
         : null)))));
 
+    // v1.8：客人存的結帳偏好（付款方式、取貨、發票、特殊備註，例如「送禮請勿附價錢」）
+    if (o.customer_prefs) {
+      const p = o.customer_prefs;
+      body.append(h('div', { class: 'banner info', style: 'margin-top:12px' },
+        h('b', {}, '客人的結帳偏好：'), p.summary || '—',
+        p.invoice ? h('div', { class: 'tiny muted' }, '電子發票還沒串接，請照這個設定另外開立') : null));
+    }
     if (!o.coverage.complete && o.coverage.total) {
       body.append(h('div', { class: 'banner warn', style: 'margin-top:12px' }, `尚有品項未採購完成：${o.coverage.missing.join('、')}`));
     }
