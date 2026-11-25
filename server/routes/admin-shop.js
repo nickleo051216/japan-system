@@ -448,6 +448,69 @@ post('/api/v1/wishes/mark', async ({ actor, body }) => {
   return ok(marked);
 });
 
+/**
+ * 許願與＋1 排行（2026-11-25 照周小姐影片 2；018）。
+ * 依「想要的人數」（許願的人＋按 +1 的人）排，可以搜尋品名、品牌、客人，照尋找進度篩。
+ *   ?q=  搜尋　?progress=finding|quoted|out|later|ordered|broadcast|all（預設 all，不含已下單）
+ */
+const PROGRESS = {
+  finding: "w.wish_status = '待處理' AND w.broadcast_send_id IS NULL",
+  quoted: "w.wish_status = '已報價' AND w.broadcast_send_id IS NULL",
+  out: "w.wish_status = '現場缺貨'",
+  later: "w.wish_status = '保留下團'",
+  ordered: "w.wish_status = '已下單'",
+  broadcast: 'w.broadcast_send_id IS NOT NULL',
+  all: "w.wish_status <> '已下單'",
+};
+const PROGRESS_ZH = (w) => (w.broadcast_send_id ? '已開喊單' : { 待處理: '尋找中', 已報價: '已報價', 現場缺貨: '現場缺貨', 保留下團: '保留下團', 已下單: '已下單' }[w.wish_status] || w.wish_status);
+
+get('/api/v1/wishes/ranking', async ({ actor, query }) => {
+  auth.requireCap(actor, 'order.read');
+  const filter = PROGRESS[query.progress] || PROGRESS.all;
+  const q = String(query.q || '').trim().slice(0, 40);
+  const like = '%' + q.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
+  const rows = await db.all(
+    `SELECT w.*, m.nickname, m.member_no,
+            (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes
+       FROM wishlist w JOIN members m ON m.line_user_id = w.line_user_id
+      WHERE ${filter}
+        ${q ? 'AND (w.item_name ILIKE ? OR w.brand ILIKE ? OR w.item_name_ja ILIKE ? OR m.nickname ILIKE ? OR m.member_no ILIKE ?)' : ''}
+      ORDER BY votes DESC, w.wished_at LIMIT 200`, ...(q ? [like, like, like, like, like] : []));
+  const shaped = rows.map((w, i) => ({
+    rank: i + 1, wish_id: w.wish_id, item_name: w.item_name, brand: w.brand || null, picture: w.picture || null,
+    nickname: w.nickname, member_no: w.member_no || null, quantity: w.quantity, note: w.note || '',
+    wants: Number(w.votes) + 1, votes: Number(w.votes), wall_status: w.wall_status,
+    wish_status: w.wish_status, progress: PROGRESS_ZH(w), quote_twd: num(w.quote_twd),
+    progress_note: w.progress_note || null, progress_at: w.progress_at || null,
+    broadcast_send_id: w.broadcast_send_id || null, wished_at: w.wished_at,
+  }));
+  return ok(auth.redact(actor, await storage.resolve(shaped, 'picture')));
+});
+
+/**
+ * 更新尋找進度：一句話給客人看（progress_note），可以順便改狀態（尋找中／現場缺貨／保留下團）。
+ * 改成現場缺貨照樣會 LINE 通知許願的人（跟 /wishes/mark 同一套）。
+ */
+post('/api/v1/wishes/progress', async ({ actor, body }) => {
+  auth.requireCap(actor, 'order.write');
+  const w = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', String(body.wish_id ?? ''));
+  if (!w) throw err('NOT_FOUND', '找不到這個許願', 404);
+  const note = body.note === undefined || body.note === null ? null : String(body.note).trim().slice(0, 120);
+  const status = body.status ? String(body.status) : null;
+  if (status && !WISH_MARKS.includes(status)) throw err('BAD_STATUS', `狀態只能是：${WISH_MARKS.join('、')}`);
+  if (status && w.wish_status === '已下單') throw err('NOT_EDITABLE', '客人已經下單了', 409);
+  if (!note && !status) throw err('BAD_REQUEST', '請寫一句進度，或選一個狀態');
+  await db.run(
+    `UPDATE wishlist SET progress_note = coalesce(?, progress_note), progress_at = now(),
+            wish_status = coalesce(?, wish_status) WHERE wish_id = ?`, note || null, status, w.wish_id);
+  await audit.record({ actor: actor.line_user_id, action: 'wish.progress', target: w.wish_id,
+    detail: { note, status, from: w.wish_status }, result: 'ok' });
+  const fresh = await db.one('SELECT * FROM wishlist WHERE wish_id = ?', w.wish_id);
+  if (status === '現場缺貨' && w.wish_status !== '現場缺貨') await customerNotify.wishOutOfStock(fresh);
+  return ok({ wish_id: fresh.wish_id, wish_status: fresh.wish_status, progress: PROGRESS_ZH(fresh),
+    progress_note: fresh.progress_note, progress_at: fresh.progress_at });
+});
+
 // ---- 訂單報價 -------------------------------------------------------------
 
 /**

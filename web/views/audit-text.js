@@ -110,6 +110,9 @@ const SAY = {
   'helper.claim_decide': (t, d) => [`${{ approve: '核准', reject: '退回', paid: '付清' }[d.action] || '處理'}小幫手請款單 ${t}`,
     `${ntd(d.total_twd)}${d.note ? `・${d.note}` : ''}${d.costs ? `・記了 ${d.costs} 筆成本` : ''}`],
 
+  'wish.progress': (t, d) => [`更新許願「${t}」的尋找進度`, [d.status ? `狀態改成「${d.status === '待處理' ? '尋找中' : d.status}」` : '', d.note || ''].filter(Boolean).join('・')],
+  'listings.publish': (t, d) => [`多張照片一次上架 ${d.count} 件商品`, t],
+
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, d && d.auto ? `每月自動結算（${d.date}）` : '手動按「結算」'],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
 

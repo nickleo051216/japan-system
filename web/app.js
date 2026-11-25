@@ -114,6 +114,8 @@ const ROUTES = [
     sub: '看照片、對款式、確認數量，一單一單帶回家。' },
   { path: 'wishes', title: '許願報價與回覆', cap: 'order.read', mod: () => import('./views/wishes.js'),
     sub: '找到可採購商品、先報價，再確認客人的購買意願。' },
+  { path: 'wish-rank', title: '許願與＋1 排行', cap: 'order.read', mod: () => import('./views/wish-rank.js'),
+    sub: '大家最想要的，排在最前面。' },
   { path: 'ship-requests', title: '拆併單出貨', cap: 'order.read', mod: () => import('./views/ship-requests.js'),
     sub: '客人申請併單或先寄，確認運費後產生出貨單。' },
   { path: 'statements', title: '付款與發票備註', cap: 'payment.reconcile', mod: () => import('./views/statements.js'),

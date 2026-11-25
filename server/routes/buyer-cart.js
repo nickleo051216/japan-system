@@ -298,6 +298,8 @@ const wishShape = (w) => ({
   wall_status: w.wall_status || 'private',
   votes: Number(w.votes || 0),
   broadcast_send_id: w.broadcast_send_id || null,
+  // v1.6：店家寫的尋找進度（018），例如「大阪店問過了，下週補貨」；沒寫是 null
+  progress_note: w.progress_note || null, progress_at: w.progress_at || null,
 });
 /** 照片是私有 bucket 的參照，回給畫面前換成 15 分鐘的簽名網址。 */
 const wishesOut = async (rows) => storage.resolve(rows.map(wishShape), 'picture');
@@ -398,8 +400,7 @@ const BOARD_SORTS = {
 bget('/api/v1/wishes/board', async ({ me, query }) => {
   const order = BOARD_SORTS[query.sort] || BOARD_SORTS.hot;
   const rows = await db.all(
-    `SELECT w.wish_id, w.item_name, w.item_name_ja, w.brand, w.ref_url, w.picture, w.wish_status, w.quote_twd,
-            w.wall_at, w.broadcast_send_id, (w.line_user_id = ?) AS mine,
+    `SELECT w.*, (w.line_user_id = ?) AS mine,
             (SELECT count(*) FROM wish_votes v WHERE v.wish_id = w.wish_id) AS votes,
             EXISTS (SELECT 1 FROM wish_votes v WHERE v.wish_id = w.wish_id AND v.line_user_id = ?) AS voted,
             b.price_twd AS bc_price, b.remaining AS bc_remaining, b.deadline_at AS bc_deadline
@@ -420,6 +421,7 @@ bget('/api/v1/wishes/board', async ({ me, query }) => {
       ? { send_id: r.broadcast_send_id, price_twd: num(r.bc_price), remaining: r.bc_remaining, deadline_at: r.bc_deadline }
       : null,
     wall_at: r.wall_at,
+    progress_note: r.progress_note || null, progress_at: r.progress_at || null,   // v1.6（018）
   }));
   return ok(await storage.resolve(shaped, 'picture'));
 });

@@ -408,3 +408,15 @@ details.listing[open] > summary h2::before { content: '▾ '; }
   .ld-row { grid-template-columns: 72px minmax(0, 1fr); }
   .ld-row img { width: 72px; height: 72px; }
 }
+
+/* ---- 許願與＋1 排行 ---- */
+.wr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.wr-card { background: #fff; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.wr-photo { position: relative; aspect-ratio: 4 / 3; background: #f8f1e2; display: grid; place-items: center; }
+.wr-photo img { width: 100%; height: 100%; object-fit: cover; }
+.wr-rank { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,.92); border-radius: 99px; padding: 2px 9px; font-size: 12px; font-weight: 800; }
+.wr-body { padding: 12px 14px 14px; display: grid; gap: 6px; }
+.wr-wants { color: var(--brick); font-size: 14px; }
+.wr-name { font-weight: 750; overflow-wrap: anywhere; }
+.wr-note { font-size: 13px; background: #fffaf0; border: 1px dashed var(--line); border-radius: 10px; padding: 6px 9px; overflow-wrap: anywhere; }
+.wr-body .btn { justify-self: start; }

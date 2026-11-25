@@ -981,6 +981,29 @@ const login = async (id) =>
     check('客人首頁看得到剛刊登的喊單', bcs.every((b) => home.broadcast.some((x) => x.send_id === b.send_id)));
     }
 
+    {
+    section('許願與＋1 排行（018）：依想要人數排、搜尋、篩選、更新尋找進度');
+    const rk = async (qs = '') => (await api('GET', '/api/v1/wishes/ranking' + qs, { token: helper })).json.data;
+    const all = await rk();
+    check('依想要人數由多到少排，名次從 1 開始', all.length > 0 && all[0].rank === 1 && all.every((w, i) => i === 0 || all[i - 1].wants >= w.wants), all.map((w) => w.wants));
+    check('預設不含已下單的', all.every((w) => w.wish_status !== '已下單'));
+    const top = all.find((w) => !w.broadcast_send_id) || all[0];
+    const found = await rk('?q=' + encodeURIComponent(top.item_name.slice(0, 3)));
+    check('搜尋品名找得到', found.some((w) => w.wish_id === top.wish_id), found.map((w) => w.item_name));
+    check('搜尋客人暱稱也找得到', (await rk('?q=' + encodeURIComponent(top.nickname))).some((w) => w.wish_id === top.wish_id));
+    const pg = await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, note: '大阪店問過了，下週補貨' } });
+    check('更新尋找進度（一句話）', pg.status === 200 && pg.json.data.progress_note === '大阪店問過了，下週補貨' && !!pg.json.data.progress_at, pg.json);
+    const mineList = (await api('GET', '/api/v1/wishes/list', { token: buyer })).json.data;
+    const mineHit = mineList.find((w) => w.wish_id === top.wish_id);
+    check('客人「我的許願」看得到尋找進度（如果是他的）', !mineHit || mineHit.progress_note === '大阪店問過了，下週補貨', mineHit);
+    check('沒寫進度也沒選狀態 → BAD_REQUEST', (await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id } })).json.error?.code === 'BAD_REQUEST');
+    check('包貨人員不能改進度 → 403', (await api('POST', '/api/v1/wishes/progress', { token: packer, body: { wish_id: top.wish_id, note: 'x' } })).status === 403);
+    const later = await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, status: '保留下團' } });
+    check('順便改狀態 → 保留下團，進度那句話還在', later.json.data?.progress === '保留下團' && later.json.data.progress_note === '大阪店問過了，下週補貨', later.json);
+    check('篩「保留下團」看得到它', (await rk('?progress=later')).some((w) => w.wish_id === top.wish_id));
+    await api('POST', '/api/v1/wishes/progress', { token: helper, body: { wish_id: top.wish_id, status: '待處理' } });
+    }
+
     section('後台 — 訂單報價（0 元品項不能漏）');
     const nx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '藥妝店限定面膜', qty: 2 } })).json.data;
     check('沒填日幣的文字品項價格為 null', nx.price_twd === null);
