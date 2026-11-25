@@ -234,7 +234,7 @@ export async function render(root, ctx) {
  * 把手機拍的照片縮成長邊 1200px 的 JPEG（data URL）。原圖動輒 3–5 MB，
  * 直接上傳會撞到伺服器一次 4.5 MB 的上限，客人那邊也載得慢。
  */
-function compressImage(file, maxSide = 1200, quality = 0.85) {
+export function compressImage(file, maxSide = 1200, quality = 0.85) {
   return new Promise((resolve, reject) => {
     if (!/^image\//.test(file.type || 'image/')) { reject(new Error('請選照片檔')); return; }
     const url = URL.createObjectURL(file);

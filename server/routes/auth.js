@@ -166,9 +166,15 @@ post('/api/v1/auth/line', async ({ body }) => {
     // 訊息不附 LINE userId：那串 33 碼不該出現在任何人看得到的畫面上。
     throw err('NOT_STAFF', '請先用這個 LINE 帳號打開一次買家頁面，再請店家把你加入。', 403);
   }
+  // v1.6 ⑤：帶了店主給的邀請碼，就先把這位客人變成員工再登入。
+  const inviteCode = String((body && body.invite_code) || '').trim();
+  if (member.role === 'buyer' && inviteCode) {
+    const { redeemInvite } = require('./helper');
+    Object.assign(member, await redeemInvite(member, inviteCode));
+  }
   if (member.role === 'buyer') {
     console.warn(`[auth] 客人嘗試以 LINE 登入後台：${member.member_no || sub}`);
-    throw err('NOT_STAFF', `這個 LINE 帳號沒有後台權限。請把你的會員編號 ${member.member_no} 告訴店家。`, 403);
+    throw err('NOT_STAFF', `這個 LINE 帳號沒有後台權限。有邀請碼的話請在下面輸入；沒有的話請把你的會員編號 ${member.member_no} 告訴店家。`, 403);
   }
   if (member.status === '停用') throw err('FORBIDDEN', '帳號已停用，請聯絡店主', 403);
   await audit.record({ actor: member.line_user_id, action: 'auth.login', detail: { via: 'line' }, result: 'ok' });

@@ -101,6 +101,15 @@ const SAY = {
   'ship_request.reject': (t, d) => ['沒有核准出貨申請', `原因：${d.note || '—'}`],
   'ship_group.ship': (t, d) => [`整箱出貨 ${t}`, `訂單 ${(d.order_ids || []).join('、')}${d.tracking_no ? `，物流單號 ${d.tracking_no}` : ''}`],
 
+  'staff.invite_create': (t, d) => [`開了一組邀請碼（${d.role === 'packer' ? '包貨人員' : '日本小幫手'}）`, `可以 ${d.max_uses} 個人用、${d.hours} 小時內有效`],
+  'staff.invite_revoke': () => ['作廢一組邀請碼', ''],
+  'staff.invite_join': (t, d) => (d.role
+    ? [`用邀請碼加入成為${d.role === 'packer' ? '包貨人員' : '日本小幫手'}`, '']
+    : ['輸入邀請碼沒有成功', { INVITE_INVALID: '碼不對', INVITE_EXPIRED: '過期了', INVITE_REVOKED: '已作廢', INVITE_USED_UP: '名額用完' }[d.reason] || '']),
+  'helper.claim_create': (t, d) => [`送出請款單 ${t}（${d.receipts} 張收據）`, `${yen(d.total_jpy)} ≈ ${ntd(d.total_twd)}`],
+  'helper.claim_decide': (t, d) => [`${{ approve: '核准', reject: '退回', paid: '付清' }[d.action] || '處理'}小幫手請款單 ${t}`,
+    `${ntd(d.total_twd)}${d.note ? `・${d.note}` : ''}${d.costs ? `・記了 ${d.costs} 筆成本` : ''}`],
+
   'statements.generate': (t, d) => [`產生對帳單 ${d.created} 張`, d && d.auto ? `每月自動結算（${d.date}）` : '手動按「結算」'],
   'statement.reconcile': (t, d) => [`核對對帳單 ${t} 的收款 ${ntd(d.amount)}`, d.diff ? `與應收金額差 ${ntd(d.diff)}` : '金額相符'],
 

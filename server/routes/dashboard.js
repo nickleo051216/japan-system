@@ -85,6 +85,13 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     const sr = Number((await db.one("SELECT count(*) AS n FROM ship_requests WHERE status = 'pending'")).n);
     if (sr) todo.push({ urgency: 2, kind: 'ship_request', title: `${sr} 筆出貨申請等你審核`, body: '客人申請併單或拆單', link: '#/ship-requests' });
   } catch { /* 014 還沒跑 */ }
+  // 小幫手請款（015）：店主才看得到。
+  if (auth.can(actor, 'payment.reconcile')) {
+    try {
+      const hc = await db.one("SELECT count(*) AS n, COALESCE(sum(total_twd),0) AS twd FROM helper_claims WHERE status = 'pending'");
+      if (Number(hc.n)) todo.push({ urgency: 2, kind: 'helper_claim', title: `${hc.n} 張小幫手請款單等你審核`, body: `合計 ${ntw(hc.twd)}`, link: '#/helper?tab=' + encodeURIComponent('請款審核') });
+    } catch { /* 015 還沒跑 */ }
+  }
   todo.sort((a, b) => a.urgency - b.urgency);
 
   // 訂單狀態數字格：點了直接跳到訂單管理的同一個篩選，所以數字跟清單要一致（都是這一團）。

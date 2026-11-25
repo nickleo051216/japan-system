@@ -51,6 +51,8 @@ function boot() {
   require('./routes/admin-shop');
   // 出貨申請（併單／拆單）與出貨單：客人申請、店主審核。
   require('./routes/ship-requests');
+  // 小幫手工作台：邀請碼、我的採買清單、批次收據請款。
+  require('./routes/helper');
   // 後台設定：價目表、成員與權限。
   require('./routes/admin-config');
   // 綠界：付款結果回調、後台金流設定。

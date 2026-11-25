@@ -1699,6 +1699,132 @@ const login = async (id) =>
       check('密碼正確也換不到 token（入口已關）', offLogin.error?.code === 'PASSWORD_LOGIN_DISABLED', offLogin);
     } finally { off.kill(); }
 
+    {
+    section('小幫手工作台（v1.6 ⑤）：邀請碼加入');
+    // 買家 LIFF 憑證要長得像 JWT（三段），假 token 的顯示名稱帶兩個點剛好湊成三段（header 只能放 ASCII）。
+    const LIFF = (id) => (m, u, o) => api(m, u, { token: `mock-idtoken:${id}:f.${id}.x`, ...o });
+    const inv = await api('POST', '/api/v1/staff-invites/create', { token: owner, body: { role: 'helper', max_uses: 2, hours: 24, note: '大阪小幫手' } });
+    const code = inv.json.data && inv.json.data.code;
+    check('店主開邀請碼：8 碼（沒有 0/O/1/I/L）、可用 2 次、24 小時', inv.status === 200 && /^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/.test(code)
+      && inv.json.data.max_uses === 2 && inv.json.data.state === 'active' && inv.json.data.code_hint === code.slice(-2), inv.json);
+    const invList = (await api('GET', '/api/v1/staff-invites/list', { token: owner })).json.data;
+    check('邀請碼列表只看得到末兩碼，看不到原文', invList.some((i) => i.invite_id === inv.json.data.invite_id) && !JSON.stringify(invList).includes(code.replace('-', '')) && !JSON.stringify(invList).includes(code));
+    check('小幫手不能開邀請碼 → 403', (await api('POST', '/api/v1/staff-invites/create', { token: helper, body: { role: 'helper' } })).status === 403);
+    check('邀請碼不能邀請店主 → BAD_ROLE', (await api('POST', '/api/v1/staff-invites/create', { token: owner, body: { role: 'owner' } })).json.error?.code === 'BAD_ROLE');
+
+    const J1 = LIFF('U_invite01'); await J1('GET', '/api/v1/me/profile');
+    const bad = await J1('POST', '/api/v1/staff/join', { body: { code: 'ABCD-EFGH' } });
+    check('輸錯邀請碼 → INVITE_INVALID', bad.status === 404 && bad.json.error.code === 'INVITE_INVALID', bad.json);
+    const join = await J1('POST', '/api/v1/staff/join', { body: { code: code.toLowerCase().replace('-', ' ') } });
+    check('客人在前台輸入邀請碼（大小寫、空格都可以）→ 變成日本小幫手', join.status === 200 && join.json.data.role === 'helper' && join.json.data.role_zh === '日本小幫手', join.json);
+    const j1Line = await api('POST', '/api/v1/auth/line', { body: { id_token: 'mock-idtoken:U_invite01' } });
+    check('加入後用 LINE 登入後台 → 拿到小幫手權限', j1Line.status === 200 && j1Line.json.data.member.role === 'helper'
+      && j1Line.json.data.capabilities.includes('procurement.write') && !j1Line.json.data.capabilities.includes('settings.write'), j1Line.json);
+    const again = await J1('POST', '/api/v1/staff/join', { body: { code } });
+    check('已經是員工再輸入 → ALREADY_STAFF', again.status === 409 && again.json.error.code === 'ALREADY_STAFF', again.json);
+    const J2 = LIFF('U_invite02'); await J2('GET', '/api/v1/me/profile');
+    const noCode = await api('POST', '/api/v1/auth/line', { body: { id_token: 'mock-idtoken:U_invite02' } });
+    check('沒有邀請碼的客人登入後台 → 403，訊息提醒可以輸入邀請碼', noCode.status === 403 && /邀請碼/.test(noCode.json.error.message), noCode.json);
+    const viaLogin = await api('POST', '/api/v1/auth/line', { body: { id_token: 'mock-idtoken:U_invite02', invite_code: code } });
+    check('後台 LINE 登入時帶邀請碼 → 直接變成員工並登入', viaLogin.status === 200 && viaLogin.json.data.member.role === 'helper', viaLogin.json);
+    const J3 = LIFF('U_invite03'); await J3('GET', '/api/v1/me/profile');
+    const usedUp = await J3('POST', '/api/v1/staff/join', { body: { code } });
+    check('名額用完（2 次）→ INVITE_USED_UP，第三個人還是客人', usedUp.status === 409 && usedUp.json.error.code === 'INVITE_USED_UP'
+      && (await J3('GET', '/api/v1/me/profile')).json.data.role === 'buyer', usedUp.json);
+    const inv2 = (await api('POST', '/api/v1/staff-invites/create', { token: owner, body: { role: 'packer' } })).json.data;
+    await api('POST', '/api/v1/staff-invites/revoke', { token: owner, body: { invite_id: inv2.invite_id } });
+    const rev = await J3('POST', '/api/v1/staff/join', { body: { code: inv2.code } });
+    check('作廢的邀請碼 → INVITE_REVOKED', rev.status === 409 && rev.json.error.code === 'INVITE_REVOKED', rev.json);
+    const inv3 = (await api('POST', '/api/v1/staff-invites/create', { token: owner, body: { role: 'packer', hours: 1 } })).json.data;
+    {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      await c.query("UPDATE staff_invites SET expires_at = now() - interval '1 minute' WHERE invite_id = $1", [inv3.invite_id]);
+      await c.end();
+    }
+    const exp = await J3('POST', '/api/v1/staff/join', { body: { code: inv3.code } });
+    check('過期的邀請碼 → INVITE_EXPIRED', exp.status === 409 && exp.json.error.code === 'INVITE_EXPIRED', exp.json);
+    const inv4 = (await api('POST', '/api/v1/staff-invites/create', { token: owner, body: { role: 'packer' } })).json.data;
+    for (let i = 0; i < 8; i++) await J3('POST', '/api/v1/staff/join', { body: { code: 'WRNG-' + String(2000 + i).replace(/0/g, 'A').replace(/1/g, 'B') } });
+    const locked = await J3('POST', '/api/v1/staff/join', { body: { code: inv4.code } });
+    check('一小時內輸錯 10 次 → 先擋下（TOO_MANY_ATTEMPTS），正確的碼也要等', locked.status === 429 && locked.json.error.code === 'TOO_MANY_ATTEMPTS', locked.json);
+    const after = (await api('GET', '/api/v1/staff-invites/list', { token: owner })).json.data.find((i) => i.invite_id === inv.json.data.invite_id);
+    check('店主看得到誰用了這組邀請碼', after.used_count === 2 && after.state === 'used_up' && after.used_by.length === 2, after);
+    const ia = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data;
+    check('稽核：開碼、加入（成功與被擋）、作廢都有紀錄', ['staff.invite_create', 'staff.invite_revoke'].every((a) => ia.some((l) => l.action === a))
+      && ia.some((l) => l.action === 'staff.invite_join' && l.result === 'ok') && ia.some((l) => l.action === 'staff.invite_join' && l.result === 'blocked'));
+
+    section('小幫手工作台（v1.6 ⑤）：我的採買清單、批次拍收據請款');
+    const H = (m, u, o) => api(m, u, { token: helper, ...o });
+    // 這時目前團別可能已經是後面測試開的新團（沒有採購項目），直接找一項小幫手 1 認領的、或還沒人認領的。
+    let pick;
+    {
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: databaseUrl }); await c.connect();
+      pick = (await c.query(`SELECT proc_id, batch, claimed_by, state FROM procurements
+        WHERE claimed_by = 'U_helper1' OR (claimed_by IS NULL AND state = 'open') ORDER BY (claimed_by IS NULL), proc_id LIMIT 1`)).rows[0];
+      await c.end();
+    }
+    if (!pick.claimed_by) await H('POST', '/api/v1/procurement/claim', { body: { proc_id: pick.proc_id } });
+    const mineRow = pick;
+    const ml = (await H('GET', `/api/v1/helper/my-list?batch=${encodeURIComponent(pick.batch)}`)).json.data;
+    check('我的採買清單只列我認領的', ml.rows.length >= 1 && ml.rows.every((r) => r.claimed_by_me) && ml.rows.some((r) => r.proc_id === mineRow.proc_id)
+      && typeof ml.summary.open_to_claim === 'number' && 'need_receipt' in ml.rows[0], ml.summary);
+    check('我的採買清單不給小幫手看成本毛利', ml.rows.every((r) => r.margin_pct === undefined || r.margin_pct === null), ml.rows[0]);
+    check('包貨人員沒有採買清單 → 403', (await api('GET', '/api/v1/helper/my-list', { token: packer })).status === 403);
+    const jpg = 'data:image/jpeg;base64,' + Buffer.from('fake-receipt-jpeg').toString('base64');
+    const up1 = (await H('POST', '/api/v1/helper/receipts/upload', { body: { data: jpg } })).json.data;
+    const up2 = (await H('POST', '/api/v1/helper/receipts/upload', { body: { data: jpg } })).json.data;
+    check('收據一張一張上傳，存在私有空間（路徑不含 LINE ID），回簽名網址', !!up1.receipt_id && up1.image_url.startsWith(STORAGE_MOCK_URL)
+      && storageMock.objects.has(`receipt/${up1.receipt_id}.jpg`) && ![...storageMock.objects.keys()].some((k) => k.startsWith('receipt/') && k.includes('U_helper')), up1);
+    check('不是圖片 → BAD_IMAGE', (await H('POST', '/api/v1/helper/receipts/upload', { body: { data: 'nope' } })).json.error?.code === 'BAD_IMAGE');
+    const expBefore = (await api('GET', `/api/v1/procurement/expenses?proc_id=${mineRow.proc_id}`, { token: owner })).json.data.length;
+    const fx = Number((await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data.fx_rate);
+    const cl = await H('POST', '/api/v1/helper/claims/create', { body: { note: '11/25 大阪', receipts: [
+      { receipt_id: up1.receipt_id, amount_jpy: 1200, items: [{ proc_id: mineRow.proc_id, unit_cost_jpy: 1100, qty: 1 }], note: '藥妝店' },
+      { receipt_id: up2.receipt_id, amount_jpy: 800 }] } });
+    const c1 = cl.json.data;
+    check('兩張收據一起送成一張請款單：待審核、合計 ¥2,000、照當下匯率換台幣', cl.status === 200 && c1.status === 'pending' && c1.total_jpy === 2000
+      && c1.total_twd === Math.round(2000 * fx) && c1.receipts.length === 2 && c1.receipts[0].items[0].proc_id === mineRow.proc_id
+      && c1.receipts[0].image_url.startsWith(STORAGE_MOCK_URL), cl.json);
+    const reuse = await H('POST', '/api/v1/helper/claims/create', { body: { receipts: [{ receipt_id: up1.receipt_id, amount_jpy: 100 }] } });
+    check('同一張收據不能請兩次 → RECEIPT_USED', reuse.status === 409 && reuse.json.error.code === 'RECEIPT_USED', reuse.json);
+    const steal = await api('POST', '/api/v1/helper/claims/create', { token: helper2, body: { receipts: [{ receipt_id: up2.receipt_id, amount_jpy: 100 }] } });
+    check('別人的收據拿不到 → RECEIPT_NOT_FOUND', steal.status === 404 && steal.json.error.code === 'RECEIPT_NOT_FOUND', steal.json);
+    const up3 = (await api('POST', '/api/v1/helper/receipts/upload', { token: helper2, body: { data: jpg } })).json.data;
+    const notMine = await api('POST', '/api/v1/helper/claims/create', { token: helper2, body: { receipts: [{ receipt_id: up3.receipt_id, amount_jpy: 500, items: [{ proc_id: mineRow.proc_id, unit_cost_jpy: 500 }] }] } });
+    check('收據不能記到別人認領的品項 → NOT_CLAIMER', notMine.status === 409 && notMine.json.error.code === 'NOT_CLAIMER', notMine.json);
+    check('金額沒填 → BAD_AMOUNT', (await api('POST', '/api/v1/helper/claims/create', { token: helper2, body: { receipts: [{ receipt_id: up3.receipt_id }] } })).json.error?.code === 'BAD_AMOUNT');
+    check('送出時還不記成本（核准才記）', (await api('GET', `/api/v1/procurement/expenses?proc_id=${mineRow.proc_id}`, { token: owner })).json.data.length === expBefore);
+    const myClaims = (await H('GET', '/api/v1/helper/claims')).json.data;
+    check('小幫手看得到自己的請款單', myClaims.some((c) => c.claim_id === c1.claim_id && c.status_zh === '待審核'));
+    check('小幫手不能自己核准 → 403', (await H('POST', '/api/v1/helper-claims/decide', { body: { claim_id: c1.claim_id, action: 'approve' } })).status === 403);
+    const homeO = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+    const homeH = (await H('GET', '/api/v1/dashboard/summary')).json.data;
+    check('店主首頁出現「小幫手請款單等你審核」，小幫手的首頁不會', homeO.todo.some((t) => t.kind === 'helper_claim') && !homeH.todo.some((t) => t.kind === 'helper_claim'), homeO.todo);
+    const adminC = (await api('GET', '/api/v1/helper-claims/admin-list?status=pending', { token: owner })).json.data;
+    check('店主的請款列表看得到是誰請的、每張收據照片', adminC.some((c) => c.claim_id === c1.claim_id && c.nickname && c.receipts.length === 2));
+    const rjNo = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'reject' } });
+    check('退回要寫原因 → REASON_REQUIRED', rjNo.status === 400 && rjNo.json.error.code === 'REASON_REQUIRED', rjNo.json);
+    const ap = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'approve', note: '收到' } });
+    const expAfter = (await api('GET', `/api/v1/procurement/expenses?proc_id=${mineRow.proc_id}`, { token: owner })).json.data;
+    check('店主核准 → 已核准，收據上的品項單價記成成本（經手人是小幫手）', ap.status === 200 && ap.json.data.status === 'approved'
+      && expAfter.length === expBefore + 1 && expAfter.some((e) => Number(e.unit_cost_jpy) === 1100 && e.created_by === 'U_helper1'), [ap.json, expAfter.slice(0, 2)]);
+    check('核准過的不能再核准 → ILLEGAL_STATE', (await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'approve' } })).json.error?.code === 'ILLEGAL_STATE');
+    const pd = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c1.claim_id, action: 'paid' } });
+    check('付錢給小幫手後按「已付款」', pd.status === 200 && pd.json.data.status === 'paid' && !!pd.json.data.paid_at
+      && (await api('GET', `/api/v1/procurement/expenses?proc_id=${mineRow.proc_id}`, { token: owner })).json.data.length === expBefore + 1, pd.json);
+    const up4 = (await H('POST', '/api/v1/helper/receipts/upload', { body: { data: jpg } })).json.data;
+    const c2 = (await H('POST', '/api/v1/helper/claims/create', { body: { receipts: [{ receipt_id: up4.receipt_id, amount_jpy: 99999 }] } })).json.data;
+    const rj = await api('POST', '/api/v1/helper-claims/decide', { token: owner, body: { claim_id: c2.claim_id, action: 'reject', note: '金額多打一個 9' } });
+    check('店主退回 → 收據放回去，小幫手改好金額可以重新送', rj.json.data?.status === 'rejected'
+      && (await H('POST', '/api/v1/helper/claims/create', { body: { receipts: [{ receipt_id: up4.receipt_id, amount_jpy: 9999 }] } })).json.data?.total_jpy === 9999, rj.json);
+    const ml2 = (await H('GET', `/api/v1/helper/my-list?batch=${encodeURIComponent(pick.batch)}`)).json.data;
+    check('採買清單上方顯示還沒拿到錢的請款單', ml2.summary.unpaid_claims === 1, ml2.summary);
+    const ha = (await api('GET', '/api/v1/audit/list?limit=300', { token: owner })).json.data;
+    check('稽核：送出請款、核准、退回、已付款都有紀錄', ha.filter((l) => l.action === 'helper.claim_decide').length >= 3 && ha.some((l) => l.action === 'helper.claim_create'));
+    }
+
     // 「還沒開團」只會發生在全新的資料庫（示範資料一定有團），所以另開一個空的資料庫測。
     section('還沒開團：開喊單順便開團（全新資料庫）');
     const FRESH_PORT = PORT + 8;
