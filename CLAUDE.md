@@ -9,7 +9,7 @@
 
 ## 不能碰的
 - repo 是公開的：不要 commit 金鑰、連線字串或 token。交接檔裡只寫變數名稱。
-- `supabase/migrations/001`～`016` 已經在正式庫執行過，不要修改。`017` 起在 PR #43 等 Nick 執行；要改 schema 就新增下一號。
+- `supabase/migrations/001`～`016` 已經在正式庫執行過，不要修改。`017`～`020` 也已經執行過（2026-11-25）。要改 schema 就新增下一號（`021` 起）。
 - 程式碼裡不要建表或改表。
 - 綠界官方的 ECPay-API-Skill（`~/.claude/skills/ecpay`）是 All Rights Reserved：可以參考它寫程式，但不要把它的檔案或內容 commit 進 repo。
 
