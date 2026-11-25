@@ -82,6 +82,8 @@ module.exports = {
   // 通知佇列：n8n 取件時要帶的共用金鑰，以及後端排隊後戳 n8n 的網址。
   // 兩者都沒設也不影響出貨 —— 通知會留在佇列裡等人來拿。
   notifyToken: (process.env.NOTIFY_SHARED_SECRET || '').trim(),
+  // Vercel Cron 打排程路由時帶 Authorization: Bearer <CRON_SECRET>（Vercel 自動附上）。沒設就只認 X-Notify-Token。
+  cronSecret: (process.env.CRON_SECRET || '').trim(),
   notifyHookUrl: (process.env.NOTIFY_HOOK_URL || '').trim(),
   // Supabase Storage：客人照片的私有存放處。service key 只在伺服器端。
   supabaseUrl: (process.env.SUPABASE_URL || '').trim(),

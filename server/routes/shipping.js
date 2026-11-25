@@ -166,6 +166,7 @@ async function labelAudit(rows) {
   }
   names.set('n8n', '系統自動');
   names.set('ecpay', '綠界（自動）');
+  names.set('cron', '系統自動（排程）');
   const nameOf = (id) => (id ? names.get(id) || null : null);
   return rows.map((r) => ({
     ...r,

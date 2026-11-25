@@ -16,7 +16,8 @@ const price = require('../lib/price');
 const notify = require('../lib/notify');
 const { currentBatch } = require('../lib/batch');
 const { STATUS, transition } = require('../lib/state');
-const { get, post, ok } = require('../lib/http');
+const { get, post, raw, ok, send, fail } = require('../lib/http');
+const statementDays = require('../lib/statement-days');
 const { now, uid, nextOrderId } = require('../lib/ids');
 const shipfee = require('../lib/shipfee');
 const drops = require('../lib/drops');
@@ -472,8 +473,12 @@ get('/api/v1/statements/admin-list', async ({ actor, query }) => {
  * 剛好撞上店主手動按）也不會重複開單：交易一開始先拿同一把 advisory lock，
  * 第二個人會等第一個做完，再看到的就是已經結算過的訂單。
  */
-post('/api/v1/statements/generate', async ({ actor, body, req }) => {
-  const by = requireBilling(actor, req);
+/**
+ * 結算：把還沒進對帳單、已報價以上的訂單，依客人各開一張對帳單，並排 LINE 通知。
+ * 店主手動按「結算」和每月自動結算（/cron/statements）共用這一段。
+ * 整段一筆交易＋advisory lock：手動和排程同時跑也不會把同一張訂單結兩次。
+ */
+async function generateStatements(by, lineUserId = null) {
   const deadlineDays = parseInt(await db.setting('payment_deadline_days', '2'), 10) || 2;
   const created = await db.tx(async () => {
     await db.one("SELECT pg_advisory_xact_lock(hashtext('statements.generate')) AS locked");
@@ -483,7 +488,7 @@ post('/api/v1/statements/generate', async ({ actor, body, req }) => {
           AND status IN ('已報價','已到貨','已出貨','已送達')
           AND (?::text IS NULL OR line_user_id = ?)
         ORDER BY line_user_id, order_id FOR UPDATE`,
-      body.line_user_id || null, body.line_user_id || null);
+      lineUserId, lineUserId);
     const byUser = new Map();
     for (const o of orders) {
       if (!byUser.has(o.line_user_id)) byUser.set(o.line_user_id, []);
@@ -511,9 +516,58 @@ post('/api/v1/statements/generate', async ({ actor, body, req }) => {
     return out;
   });
   if (created.length) notify.poke();
+  return created;
+}
+
+post('/api/v1/statements/generate', async ({ actor, body, req }) => {
+  const by = requireBilling(actor, req);
+  const created = await generateStatements(by, body.line_user_id || null);
   await audit.record({ actor: by, action: 'statements.generate', detail: { created: created.length }, result: 'ok' });
   return ok({ created });
 }, { idempotent: false });
+
+/**
+ * 每月自動結算（2026-11-25）。Vercel Cron 每天台灣時間 23 點多打一次（vercel.json），
+ * 這裡判斷今天是不是結算日（店家設定「對帳單結算日」，預設 15,月底），是才結算。
+ *   - 同一天只結算一次（settings.statements_auto_last 記住日期），重送不會重複開單。
+ *   - 店主可以在「店家與收款設定」把「自動結算」關掉（留一手：最後決定權在店主）。
+ *   - 身分：Vercel Cron 帶 Authorization: Bearer <CRON_SECRET>；n8n 或手動補跑可以帶 X-Notify-Token。
+ */
+function requireCron(req) {
+  const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const secret = config.cronSecret;
+  if (secret && given) {
+    const a = Buffer.from(secret); const b = Buffer.from(given);
+    if (a.length === b.length && require('node:crypto').timingSafeEqual(a, b)) return 'cron';
+  }
+  notify.requireMachine(req);
+  return 'n8n';
+}
+
+async function runAutoStatements(req) {
+  const by = requireCron(req);
+  const today = statementDays.taipeiToday();
+  const [days, autoMode, last] = await Promise.all([
+    db.setting('statement_days', ''), db.setting('statement_auto', ''), db.setting('statements_auto_last', '')]);
+  const base = { date: today.ymd, statement_days: days || statementDays.DEFAULT };
+  if (autoMode === 'off') return { ...base, ran: false, reason: '店主關掉了自動結算' };
+  if (!statementDays.isDue(days)) return { ...base, ran: false, reason: '今天不是結算日', next: statementDays.nextDue(days) };
+  if (last === today.ymd) return { ...base, ran: false, reason: '今天已經結算過了' };
+  const created = await generateStatements(by);
+  await db.putSetting('statements_auto_last', today.ymd);
+  await audit.record({ actor: 'cron', action: 'statements.generate',
+    detail: { created: created.length, auto: true, date: today.ymd }, result: 'ok' });
+  return { ...base, ran: true, created: created.length };
+}
+
+raw('GET', '/api/v1/cron/statements', async ({ req, res }) => {
+  try {
+    send(res, 200, ok(await runAutoStatements(req)));
+  } catch (e) {
+    if (!e.status) console.error('[cron] 自動結算失敗：', e.message);
+    send(res, e.status || 500, fail(e.code || 'INTERNAL', e.status ? e.message : '自動結算失敗，稍後會再試'));
+  }
+});
 
 /**
  * 核帳：確認對帳單的錢真的進來了。對帳單與底下每一張訂單一起標成已核對。

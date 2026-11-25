@@ -76,6 +76,7 @@ const envFor = (databaseUrl) => ({
   // 綠界的金鑰改存資料庫（Vault），由測試在後台「金流設定」填。這裡只給回調網址。
   ECPAY_RETURN_URL: 'https://smoke.example/api/v1/ecpay/return',
   NOTIFY_SHARED_SECRET: 'smoke-notify-secret',
+  CRON_SECRET: 'smoke-cron-secret',
   // NOTIFY_HOOK_URL 刻意不設：驗證「沒接 n8n 也照常出貨」
   FX_JPY_TWD: '0.215',
 });
@@ -924,6 +925,47 @@ const login = async (id) =>
     check('核帳 → 對帳單已核對', rec.payment_status === '已核對', rec);
     check('底下的訂單一起變成已付款',
       (await B('GET', `/api/v1/orders/detail?order_id=${qo.order_id}`)).json.data.paid === true);
+
+    {
+    section('對帳單自動結算（每月 15 日、月底；Vercel Cron 每天打一次）');
+    const sd = require(path.join(ROOT, 'server', 'lib', 'statement-days'));
+    const at = (iso) => new Date(iso);
+    check('台灣 11/15 晚上是結算日（預設 15,月底）', sd.isDue('', at('2026-11-15T15:50:00Z')));
+    check('台灣 11/30 是月底 → 結算日', sd.isDue('15,月底', at('2026-11-30T15:50:00Z')));
+    check('台灣 2/28（平年最後一天）也算月底', sd.isDue('15,月底', at('2027-02-28T15:50:00Z')));
+    check('台灣 11/16 不是結算日', !sd.isDue('15,月底', at('2026-11-16T03:00:00Z')));
+    check('UTC 11/15 16:30 已經是台灣 11/16 → 不結算（用台灣日期）', !sd.isDue('15,月底', at('2026-11-15T16:30:00Z')));
+    check('下次結算日：11/16 之後是 11/30', sd.nextDue('15,月底', at('2026-11-16T03:00:00Z')) === '2026-11-30');
+    const cron = (headers = {}) => fetch(BASE + '/api/v1/cron/statements', { headers }).then(async (r) => ({ status: r.status, json: await r.json() }));
+    check('排程路由沒帶金鑰 → 401', (await cron()).status === 401);
+    check('金鑰錯 → 401', (await cron({ 'X-Notify-Token': 'nope' })).status === 401);
+    check('Vercel Cron 帶 Authorization: Bearer CRON_SECRET 也能打', (await cron({ Authorization: 'Bearer smoke-cron-secret' })).status === 200);
+    check('Bearer 錯的 CRON_SECRET → 401', (await cron({ Authorization: 'Bearer wrong' })).status === 401);
+    const SET = (body) => api('POST', '/api/v1/settings/shop', { token: owner, body });
+    check('結算日可以填「月底」', (await SET({ statement_days: '月底, 15' })).json.data?.values.statement_days === '15,月底');
+    check('結算日填 31 → BAD_SETTING（請用「月底」）', (await SET({ statement_days: '31' })).json.error?.code === 'BAD_SETTING');
+    const today = sd.taipeiToday();
+    const todayTok = today.d <= 28 ? String(today.d) : today.d === today.last ? '月底' : null;
+    const notToday = today.d === 1 ? '2' : '1';
+    await SET({ statement_days: notToday });
+    const skip = (await cron({ 'X-Notify-Token': 'smoke-notify-secret' })).json.data;
+    check('今天不是結算日 → 不結算，並告訴你下次是哪天', skip.ran === false && /不是結算日/.test(skip.reason) && !!skip.next, skip);
+    check('客人首頁看得到下次結算日', (await B('GET', '/api/v1/home/summary')).json.data.shop.next_statement_date === skip.next);
+    if (todayTok) {
+      await SET({ statement_days: todayTok, statement_auto: 'off' });
+      const off = (await cron({ 'X-Notify-Token': 'smoke-notify-secret' })).json.data;
+      check('店主關掉自動結算 → 不結算', off.ran === false && /關掉/.test(off.reason), off);
+      check('關掉之後首頁不顯示下次結算日', (await B('GET', '/api/v1/home/summary')).json.data.shop.next_statement_date === null);
+      await SET({ statement_auto: '' });
+      const run = (await cron({ 'X-Notify-Token': 'smoke-notify-secret' })).json.data;
+      check('今天是結算日 → 自動結算', run.ran === true && Number.isInteger(run.created), run);
+      const again = (await cron({ 'X-Notify-Token': 'smoke-notify-secret' })).json.data;
+      check('同一天再打一次 → 不重複結算', again.ran === false && /已經結算過/.test(again.reason), again);
+      const autoLog = (await api('GET', '/api/v1/audit/list?limit=20', { token: owner })).json.data.find((l) => l.action === 'statements.generate' && l.detail.auto);
+      check('稽核記一筆「每月自動結算」，經手人是系統自動（排程）', autoLog?.actor_label === '系統自動（排程）', autoLog);
+    }
+    await SET({ statement_days: '15,月底', statement_auto: '' });
+    }
 
     section('付清對帳單 → 自動恢復喊單資格');
     await api('POST', '/api/v1/settings/shop', { token: owner, body: { shout_drop_limit: '' } });

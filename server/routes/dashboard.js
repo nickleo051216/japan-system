@@ -190,7 +190,10 @@ const SHOP_FIELDS = [
   { key: 'payment_deadline_days', label: '付款期限（天）',   type: 'int',    lo: 1, hi: 30, required: true,
     hint: '客人收到對帳單後幾天內要完成付款' },
   { key: 'statement_days',        label: '對帳單結算日',     type: 'days',   required: true,
-    hint: '每月的哪幾天結算，逗號分隔，例：1,16' },
+    hint: '每月的哪幾天自動結算，逗號分隔，可以寫「月底」。例：15,月底（預設）' },
+  { key: 'statement_auto',        label: '自動結算',         type: 'choice',
+    options: [['', '開（結算日晚上 11 點自動產生對帳單並通知客人）'], ['off', '關（只能手動按「結算」）']],
+    hint: '關掉之後，對帳單要到「對帳單」頁手動結算' },
   { key: 'bulky_add_min',         label: '大型品加價下限',   type: 'int',    lo: 0, hi: 9999,
     hint: '盒裝或大型物品的加價區間（台幣）' },
   { key: 'bulky_add_max',         label: '大型品加價上限',   type: 'int',    lo: 0, hi: 9999,
@@ -236,11 +239,12 @@ function shopValue(field, raw) {
     return String(n);
   }
   if (field.type === 'days') {
-    const days = [...new Set(v.split(/[,，\s]+/).filter(Boolean).map(Number))];
-    if (!days.length || days.some((d) => !Number.isInteger(d) || d < 1 || d > 28)) {
-      throw err('BAD_SETTING', `${field.label}請填 1–28 之間的日期，逗號分隔（例：1,16）`);
+    const toks = [...new Set(v.split(/[,，\s]+/).filter(Boolean))];
+    const nums = toks.filter((t) => t !== '月底').map(Number);
+    if (!toks.length || nums.some((d) => !Number.isInteger(d) || d < 1 || d > 28)) {
+      throw err('BAD_SETTING', `${field.label}請填 1–28 之間的日期或「月底」，逗號分隔（例：15,月底）`);
     }
-    return days.sort((a, b) => a - b).join(',');
+    return [...nums.sort((a, b) => a - b), ...(toks.includes('月底') ? ['月底'] : [])].join(',');
   }
   if (field.max && v.length > field.max) throw err('BAD_SETTING', `${field.label}最多 ${field.max} 個字`);
   return v;

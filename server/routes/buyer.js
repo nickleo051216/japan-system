@@ -16,6 +16,7 @@
  *    程式端不做「讀→算→寫」，否則兩個人同時喊最後一個就會超賣。
  */
 const db = require('../lib/db');
+const statementDays = require('../lib/statement-days');
 const price = require('../lib/price');
 const shipfee = require('../lib/shipfee');
 const storage = require('../lib/storage');
@@ -161,7 +162,9 @@ bget('/api/v1/home/summary', async ({ me }) => {
       bank_ready: !!(s.bank_name && s.bank_code && s.bank_account),
       payment_deadline_days: int(s.payment_deadline_days),
       bulky_add_min: int(s.bulky_add_min), bulky_add_max: int(s.bulky_add_max),
-      statement_days: s.statement_days || '',
+      statement_days: s.statement_days || statementDays.DEFAULT,
+      // 下一個結算日（台灣日期 YYYY-MM-DD），前台顯示「下次結算」用。v1.6
+      next_statement_date: s.statement_auto === 'off' ? null : statementDays.nextDue(s.statement_days),
       // 前台結帳頁顯示的運費；跟結帳實際收的同一個來源（lib/shipfee）。
       ship_fee: shipfee.fromSettings(s),
       // 滿額免運門檻（看單張訂單的商品小計）；null = 這種取貨方式沒有免運。
