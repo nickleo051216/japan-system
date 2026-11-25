@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session } from '../app.js';
+import { GET, POST, h, nt, dt, statusTag, toast, fail, modal, session, downloadCsv } from '../app.js';
 import { openCreateOrder } from './order-create.js';
 
 const STATUSES = ['待確認', '已報價', '已到貨', '已出貨', '已送達', '缺貨', '已取消'];
@@ -230,4 +230,19 @@ export async function render(root, ctx) {
   }
 
   await load();
+}
+
+/** 頁首「↗ 匯出備份」：目前全部訂單（不分團）存成 CSV。看不到金額的角色就不匯出金額。 */
+export async function exportBackup() {
+  const rows = await GET('/api/v1/orders/list');
+  const price = session.can('order.read.price');
+  const cols = [
+    { label: '訂單編號', key: 'order_id' }, { label: '團別', key: 'batch' }, { label: '客人', key: 'nickname' },
+    { label: '狀態', key: 'status' }, { label: '付款', get: (o) => (o.paid ? '已付' : '未付') },
+    ...(price ? [{ label: '金額', key: 'total_twd' }, { label: '運費', key: 'ship_fee_twd' }] : []),
+    { label: '品項', get: (o) => (o.items || []).map((i) => `${i.name_zh || i.name}×${i.qty}${i.size ? `(${i.size})` : ''}`).join('、') },
+    { label: '取貨', key: 'pickup' }, { label: '建立時間', key: 'created_at' },
+  ];
+  downloadCsv(`heeehababy-orders-${new Date().toISOString().slice(0, 10)}.csv`, cols, rows);
+  toast(`已匯出 ${rows.length} 張訂單`);
 }

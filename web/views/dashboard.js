@@ -1,67 +1,90 @@
-import { GET, POST, h, nt, dt, pct, toast, fail, session } from '../app.js';
+import { GET, POST, h, nt, dt, pct, toast, fail, session, flower } from '../app.js';
 
 /**
- * 首頁（大按鈕版，2026-11-19 周小姐的回饋）。
+ * 營運總覽（2026-11-25 照周小姐影片 2）。
  *
- * 由上到下：本團摘要卡 → 6 個快捷操作 → 訂單狀態數字格 → 今天要處理。
- * 驗收：手機打開 3 秒內找到「開喊單」，按 2 下就能拍商品照
- * （首頁「開喊單」→ 喊單頁最上面的「📷 拍商品照」）。
- * 金流設定、成員與權限這類店主才用的頁面不放首頁，在底部「更多」裡。
- * 營收、毛利這些數字留在最下面「營運數字」，給店主看。
+ * 由上到下：歡迎卡（快捷按鈕）→ 小幫手批次請款卡（店主）→ 自動結算燈號（店主）→
+ * 彩色數字格 → 優先確認 / ACTION REQUIRED → 今天要處理 → 營運數字（店主）。
+ * 每一格、每一個 chip 都可以點，跳到已經篩選好的清單。
+ * 驗收（11/19 沿用）：手機打開 3 秒內找到「開喊單」—— 歡迎卡第一顆黃色按鈕就是。
  */
 export async function render(root, ctx) {
   const d = await GET('/api/v1/dashboard/summary' + (ctx.query.batch ? `?batch=${encodeURIComponent(ctx.query.batch)}` : ''));
+  const ov = d.overview || { tiles: {}, action: {} };
   const home = h('div', { class: 'home' });
   root.append(home);
 
-  // ---- 本團摘要卡 ----
+  // ---- 歡迎卡 ----
   const b = d.batch_info;
-  const fact = (k, v) => h('span', {}, k, ' ', h('b', {}, v));
-  home.append(h('div', { class: 'trip' },
-    h('div', { class: 'trip-label' }, b ? `本團　${b.batch}` : '本團'),
-    h('div', { class: 'name' }, b ? (b.name || b.batch) : '還沒開團'),
-    b
-      ? h('div', { class: 'facts' },
-        b.close_at ? fact('截單', dt(b.close_at)) : null,
-        fact('開放中喊單', `${d.open_broadcasts} 張`),
-        fact('有效訂單', `${d.order_count} 張`),
-        session.can('order.read.price') ? fact('未收款', nt(d.unpaid_twd)) : null)
-      : h('div', { class: 'facts' }, '直接按「開喊單」，系統會順便開一團。')));
+  const quick = [
+    session.can('broadcast') ? h('a', { class: 'btn primary', href: '#/shop?new=1' }, '📷 開喊單（拍商品照）') : null,
+    session.can('settings.write') ? h('a', { class: 'btn sm', href: '#/members' }, '產生小幫手邀請碼') : null,
+    session.can('procurement.read') ? h('a', { class: 'btn sm', href: '#/board' }, '小幫手連線模式 ↗') : null,
+    d.buyer_url ? h('a', { class: 'btn sm', href: d.buyer_url, target: '_blank', rel: 'noopener' }, '開啟客人頁 ↗') : null,
+  ].filter(Boolean);
+  home.append(h('div', { class: 'welcome' },
+    h('div', { class: 'w-text' },
+      h('div', { class: 'eyebrow' }, 'HEEEHABABY / BACK OFFICE'),
+      h('div', { class: 'w-title' }, '今天，也把可愛好好送到。'),
+      h('div', { class: 'small muted' }, b
+        ? `本團 ${b.name || b.batch}${b.close_at ? `・${dt(b.close_at)} 截單` : ''}・開放中喊單 ${d.open_broadcasts} 張`
+        : '還沒開團：直接按「開喊單」，系統會順便開一團。'),
+      quick.length ? h('div', { class: 'row', style: 'margin-top:12px;gap:8px' }, ...quick) : null),
+    h('div', { class: 'w-art', 'aria-hidden': 'true' }, flower(54))));
 
-  // ---- 快捷操作 ----
-  const QUICK = [
-    { href: '#/shop?new=1', cap: 'broadcast', ico: '📷', name: '開喊單', sub: '可直接拍商品照', main: true },
-    { href: '#/wishes', cap: 'order.read', ico: '♡', tone: 'q-peach', name: '許願報價',
-      sub: d.wishes_to_quote ? `${d.wishes_to_quote} 則等報價` : '客人想要的東西' },
-    { href: '#/statements', cap: 'payment.reconcile', ico: '💰', tone: 'q-green', name: '對帳單', sub: '核對收款' },
-    { href: '#/packing', cap: 'shipment.write', ico: '📦', tone: 'q-lilac', name: '看圖理貨', sub: '對照片裝箱' },
-    { href: '#/expense', cap: 'procurement.write', ico: '🧾', tone: 'q-yellow', name: '拍收據記帳', sub: '記下買了多少錢' },
-    { href: '#/settings', cap: 'order.read', ico: '⚙', tone: 'q-soft', name: '開團・價目表', sub: '匯率、價目表、團別' },
-  ].filter((q) => session.can(q.cap));
-  if (QUICK.length) {
-    home.append(h('div', { class: 'section-title' }, '快捷操作'));
-    home.append(h('div', { class: 'quick' }, ...QUICK.map((q) =>
-      h('a', { href: q.href, class: q.main ? 'main' : '' },
-        h('span', { class: 'q-ico ' + (q.tone || ''), 'aria-hidden': 'true' }, q.ico),
-        h('span', {}, h('span', { class: 'q-name' }, q.name), h('span', { class: 'q-sub' }, q.sub))))));
+  // ---- 小幫手批次請款（店主）----
+  if (ov.helper_claims) {
+    const c = ov.helper_claims;
+    home.append(h('a', { class: 'claim-card', href: '#/helper?tab=' + encodeURIComponent('請款審核') },
+      h('div', {}, h('div', { class: 'cc-title' }, '小幫手批次請款'),
+        h('div', { class: 'tiny muted' }, `待核對 ${c.pending} 批・待付款 ${c.to_pay} 批`)),
+      h('span', { class: 'btn primary sm' }, '核對請款 →')));
   }
 
-  // ---- 訂單狀態 ----
-  // 點了跳到「訂單管理」的同一個篩選，數字跟清單一樣只算這一團。
-  const c = d.status_counts || {};
-  const inBatch = d.batch ? `&batch=${encodeURIComponent(d.batch)}` : '';
-  const STATUS = [
-    { k: '待收款', n: c.unpaid, q: 'unpaid=1', hot: true },
-    { k: '待採購', n: c.to_buy, q: 'status=' + encodeURIComponent('待確認,已報價') },
-    { k: '已到貨待出貨', n: c.to_ship, q: 'status=' + encodeURIComponent('已到貨'), hot: true },
-    { k: '運送中', n: c.shipping, q: 'status=' + encodeURIComponent('已出貨') },
-    { k: '已完成', n: c.done, q: 'status=' + encodeURIComponent('已送達') },
-    { k: '缺貨・取消', n: c.failed, q: 'status=' + encodeURIComponent('缺貨,已取消') },
-  ];
-  home.append(h('div', { class: 'section-title' }, '訂單狀態'));
-  home.append(h('div', { class: 'statuses' }, ...STATUS.map((x) =>
-    h('a', { href: `#/orders?${x.q}${inBatch}`, class: (x.n ? (x.hot ? 'hot' : '') : 'zero') },
-      h('div', { class: 'n' }, String(x.n || 0)), h('div', { class: 'k' }, x.k)))));
+  // ---- 自動結算燈號（店主）----
+  const a = d.auto_statement;
+  if (a) {
+    const dot = { green: '🟢', red: '🔴', grey: '⚪' }[a.light];
+    const md = (ymd) => (ymd ? `${Number(ymd.slice(5, 7))}/${Number(ymd.slice(8, 10))}` : '—');
+    home.append(h('a', { class: 'auto-light ' + a.light, href: '#/statements' },
+      h('span', {}, `${dot} 自動結算`), h('span', { class: 'tiny' }, a.light === 'red' ? a.say : (a.next_date ? `下次結算 ${md(a.next_date)}` : a.say)),
+      h('span', { class: 'arrow', 'aria-hidden': 'true' }, '›')));
+  }
+
+  // ---- 彩色數字格 ----
+  const t = ov.tiles || {};
+  const TILES = [
+    { k: '待採買喊單', x: t.to_buy, tone: 'yellow', sub: '照片、備註與採購線', cap: 'order.read' },
+    { k: '許願池人氣', x: t.wish_votes, tone: 'blue', sub: '查看大家的 ＋1', cap: 'order.read' },
+    { k: '待核對出貨', x: t.to_ship, tone: 'green', sub: '照片、拆單與出貨', cap: 'order.read' },
+    { k: '付款與發票資料', x: t.payment_info, tone: 'purple', sub: '客人回報匯款，等你核對', cap: 'payment.reconcile' },
+    { k: '進行中訂單', x: t.active_orders, sub: '這一團還沒送達的單', cap: 'order.read' },
+    { k: '待收款金額', x: { n: nt(d.unpaid_twd), link: '#/orders?unpaid=1' + (d.batch ? `&batch=${encodeURIComponent(d.batch)}` : '') }, sub: '這一團還沒付款', cap: 'order.read.price', money: true },
+    { k: '七日內預計到貨', x: t.arriving_7d, sub: '運送中＋即將回台', cap: 'order.read' },
+    { k: '待處理問題', x: t.open_issues, sub: '缺貨、部分買到、通知失敗', cap: 'order.read' },
+  ].filter((x) => x.x && session.can(x.cap));
+  home.append(h('div', { class: 'tiles' }, ...TILES.map((x) =>
+    h('a', { href: x.x.link, class: 'tile ' + (x.tone || 'plain') + (!x.money && !Number(x.x.n) ? ' zero' : '') },
+      h('div', { class: 'tk' }, x.k),
+      h('div', { class: 'tn' + (x.money ? ' money' : '') }, String(x.x.n ?? 0)),
+      h('div', { class: 'ts' }, x.sub, ' →')))));
+
+  // ---- 優先確認 / ACTION REQUIRED ----
+  const ac = ov.action || {};
+  const CHIPS = [
+    { k: '待確認', x: ac.pending }, { k: '逾期付款', x: ac.overdue, cap: 'payment.reconcile' },
+    { k: '即將到貨', x: ac.arriving }, { k: '缺貨與延遲', x: ac.delayed },
+  ].filter((c) => c.x && (!c.cap || session.can(c.cap)));
+  const anyAction = CHIPS.some((c) => Number(c.x.n));
+  home.append(h('div', { class: 'card action' },
+    h('div', { class: 'card-head' }, h('h2', {}, '優先確認 ', h('span', { class: 'eyebrow' }, '/ ACTION REQUIRED')),
+      h('div', { class: 'spacer' }), h('a', { class: 'tiny', href: '#/orders' }, '所有訂單 →')),
+    h('div', { class: 'card-body' },
+      h('div', { class: 'chips' }, ...CHIPS.map((c) =>
+        h('a', { class: 'chip' + (Number(c.x.n) ? ' hot' : ''), href: c.x.link }, `${c.k} `, h('b', {}, String(c.x.n))))),
+      anyAction ? null : h('div', { class: 'empty-soft' }, flower(28),
+        h('div', {}, h('b', {}, '目前沒有需要優先確認的訂單'),
+          h('div', { class: 'tiny muted' }, '新訂單進來、付款逾期或貨快到了，會出現在這裡。'))))));
 
   // ---- 今天要處理 ----
   home.append(h('div', { class: 'section-title' }, '今天要處理'));
@@ -72,16 +95,16 @@ export async function render(root, ctx) {
     uncosted: ['成本', ''], wall: ['許願牆', 'peach'], wish: ['許願', 'peach'], notify_failed: ['通知', 'red'],
     ship_request: ['出貨申請', 'blue'], helper_claim: ['請款', 'amber'], auto_statement: ['結算', 'red'],
   };
-  for (const t of d.todo) {
-    const [label, tone] = KIND[t.kind] || ['待辦', ''];
+  for (const item of d.todo) {
+    const [label, tone] = KIND[item.kind] || ['待辦', ''];
     list.append(h('div', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' },
-      h('a', { class: 'todo-item', href: t.link, style: 'flex:1' },
+      h('a', { class: 'todo-item', href: item.link, style: 'flex:1' },
         h('span', { class: 'tag ' + tone }, label),
-        h('div', { class: 't' }, h('div', {}, t.title), t.body ? h('div', { class: 'tiny muted' }, t.body) : null),
+        h('div', { class: 't' }, h('div', {}, item.title), item.body ? h('div', { class: 'tiny muted' }, item.body) : null),
         h('span', { class: 'arrow', 'aria-hidden': 'true' }, '›')),
-      t.notif_id ? h('button', {
+      item.notif_id ? h('button', {
         class: 'btn ghost sm', title: '標示已讀',
-        onClick: async () => { try { await POST('/api/v1/notifications/read', { notif_id: t.notif_id }); toast('已標示處理過'); ctx.reload(); } catch (e) { fail(e); } },
+        onClick: async () => { try { await POST('/api/v1/notifications/read', { notif_id: item.notif_id }); toast('已標示處理過'); ctx.reload(); } catch (e) { fail(e); } },
       }, '已讀') : null));
   }
   home.append(list);

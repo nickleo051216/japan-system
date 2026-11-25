@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, dt, toast, fail } from '../app.js';
+import { GET, POST, h, nt, dt, toast, fail, downloadCsv } from '../app.js';
 
 /**
  * 對帳單。「結算」把已報價以上、還沒付清的訂單依客人歸成對帳單，並排入 LINE 通知。
@@ -81,4 +81,15 @@ function autoCard(a) {
     h('div', { class: 'tiny muted', style: 'margin-top:4px' },
       c ? `上次檢查 ${dt(c.at)}` : '還沒有檢查紀錄',
       a.last_ran_date ? `・上次真的結算 ${md(a.last_ran_date)}` : '', `・結算日 ${a.statement_days}`));
+}
+
+/** 頁首「↗ 匯出備份」：全部對帳單存成 CSV。 */
+export async function exportBackup() {
+  const rows = await GET('/api/v1/statements/admin-list');
+  downloadCsv(`heeehababy-statements-${new Date().toISOString().slice(0, 10)}.csv`, [
+    { label: '對帳單', key: 'statement_id' }, { label: '客人', key: 'nickname' }, { label: '訂單數', key: 'order_count' },
+    { label: '金額', key: 'total_amount' }, { label: '狀態', key: 'payment_status' }, { label: '回報末五碼', key: 'last_five_matched' },
+    { label: '開單', key: 'created_at' }, { label: '付清', key: 'paid_at' },
+  ], rows);
+  toast(`已匯出 ${rows.length} 張對帳單`);
 }

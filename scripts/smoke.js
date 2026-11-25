@@ -872,6 +872,20 @@ const login = async (id) =>
     check('小幫手也看得到首頁（但看不到營收）',
       (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.status_counts !== undefined);
 
+    section('營運總覽（2026-11-25 照影片 2）：彩色數字格、優先確認，點了跳到篩選好的清單');
+    const ov = dash.overview;
+    check('數字格 7 格都有數字和連結', ov && ['to_buy', 'wish_votes', 'to_ship', 'payment_info', 'active_orders', 'arriving_7d', 'open_issues']
+      .every((k) => Number.isInteger(ov.tiles[k]?.n) && /^#\//.test(ov.tiles[k].link)), ov && ov.tiles);
+    check('優先確認 4 個 chip：待確認、逾期付款、即將到貨、缺貨與延遲', ['pending', 'overdue', 'arriving', 'delayed']
+      .every((k) => Number.isInteger(ov.action[k]?.n) && /^#\//.test(ov.action[k].link)), ov && ov.action);
+    const pendAll = (await api('GET', '/api/v1/orders/list?status=' + encodeURIComponent('待確認'), { token: owner })).json.data;
+    check('「待確認」chip 的數字跟點進去的清單一樣（不分團）', pendAll.length === ov.action.pending.n, [pendAll.length, ov.action.pending.n]);
+    const activeList = await listOf('status=' + encodeURIComponent('待確認,已報價,已到貨,已出貨'));
+    check('「進行中訂單」的數字跟點進去的清單一樣（這一團）', activeList.length === ov.tiles.active_orders.n, [activeList.length, ov.tiles.active_orders.n]);
+    check('首頁附客人頁網址（開啟客人頁 ↗）', /^https:\/\/liff\.line\.me\//.test(dash.buyer_url), dash.buyer_url);
+    const ovHelper = (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.overview;
+    check('小幫手看得到數字格，但看不到小幫手請款的待核對數（那是店主的）', !!ovHelper && ovHelper.helper_claims === null);
+
     section('客人首頁的團卡開關（show_trip_card）');
     const tripOf = async () => (await B('GET', '/api/v1/home/summary')).json.data.shop.show_trip_card;
     check('沒設定 → null（前台照有沒有開團自動決定）', (await tripOf()) === null);
