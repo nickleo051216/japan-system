@@ -1,4 +1,4 @@
-import { GET, POST, h, nt, jpy, dt, toast, fail, session } from '../app.js';
+import { GET, POST, h, nt, jpy, dt, toast, fail, session, modal } from '../app.js';
 
 /**
  * 開團與喊單。客人首頁顯示的團別與喊單就是從這裡來的 ——
@@ -106,7 +106,8 @@ export async function render(root, ctx) {
   const batchField = info.batch ? null : h('label', { class: 'field', style: 'min-width:240px' },
     h('span', {}, '這一趟叫什麼？（還沒開團，會一起開）'), b.batchName);
   const batchBanner = info.batch
-    ? h('div', { class: 'small muted', style: 'margin-bottom:10px' }, `會開在目前這一團：${info.batch.name || info.batch.batch}（${info.batch.batch}）`)
+    ? h('div', { class: 'small muted row', style: 'margin-bottom:10px;gap:8px' }, `會開在目前這一團：${info.batch.name || info.batch.batch}（${info.batch.batch}）`,
+      session.can('settings.write') ? h('button', { class: 'btn sm ghost', type: 'button', onClick: () => editBatchDialog(info.batch, ctx) }, '改團名／截單時間') : null)
     : h('div', { class: 'banner warn' }, '還沒開團。喊單要放在某一趟採買底下，請在下面填「這一趟叫什麼」，按「開喊單」時系統會一起開團。'
         + (canBatch ? '也可以先到上面「開團」自己填團號。' : ''));
 
@@ -261,6 +262,35 @@ export function compressImage(file, maxSide = 1200, quality = 0.85) {
  * 每張上傳後交給 AI（n8n 拍照辨識）讀品名和照片上的台幣售價；讀不到就請店主填。
  * 改過的欄位離開時就存回後端（之後才到的 AI 結果不會蓋掉）。最下面「一起刊登 N 件商品」一次開 N 張喊單。
  */
+/**
+ * 改團名／截單時間（2026-11-26：團名不小心填成「0」也改得回來）。團號不能改。
+ */
+function editBatchDialog(batch, ctx) {
+  const local = (iso) => {
+    if (!iso) return '';
+    const d = new Date(new Date(iso).getTime() + 8 * 3600e3);
+    return d.toISOString().slice(0, 16);
+  };
+  const name = h('input', { type: 'text', maxlength: '40', value: batch.name || '', placeholder: '例：11/20 大阪採買' });
+  const close = h('input', { type: 'datetime-local', value: local(batch.close_at) });
+  const errBox = h('div', { class: 'tiny', role: 'alert', style: 'color:var(--red)' });
+  modal(`改團名（${batch.batch}）`, h('div', {},
+    h('label', { class: 'field' }, h('span', {}, '這一趟叫什麼'), name),
+    h('label', { class: 'field' }, h('span', {}, '截單時間（選填，空白＝不設）'), close),
+    h('div', { class: 'tiny muted' }, '團號不能改：喊單、訂單、對帳單都掛在團號底下。'),
+    errBox), [{
+    label: '儲存', primary: true,
+    onClick: async (closeModal) => {
+      errBox.textContent = '';
+      try {
+        await POST('/api/v1/settings/batch/update', { batch: batch.batch, name: name.value.trim(),
+          close_at: close.value ? new Date(close.value + ':00+08:00').toISOString() : null });
+        closeModal(); toast('已更新團名'); ctx.reload();
+      } catch (e) { errBox.textContent = e.message; }
+    },
+  }]);
+}
+
 async function listingCard(ctx, info, batchNameInput) {
   let drafts = [];
   try { drafts = await GET('/api/v1/listings/drafts'); } catch { /* 017 還沒跑 */ return h('span'); }

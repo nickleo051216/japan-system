@@ -92,6 +92,8 @@ const SAY = {
     d.status === 'matched' ? `自動配對到 ${d.statement_id}` : `沒有自動配對，待人工確認（可能的帳單 ${d.candidates} 張）`],
   'bank_credit.ignore': (t, d) => ['把一筆銀行入帳標成不處理', d.note || ''],
   'statements.remind': (t, d) => [`發逾期付款提醒 ${d.reminded} 則`, ''],
+  'cart.quote': (t, d) => [`替客人的拍照下單報價：${d.name}`, `${ntd(d.price_twd)}` + (d.from_price ? `（原本 ${ntd(d.from_price)}）` : '')],
+  'batch.update': (t, d) => [`修改團 ${t}`, [d.to && d.to.name ? `團名「${d.from && d.from.name}」→「${d.to.name}」` : null, d.to && 'close_at' in d.to ? '改了截單時間' : null].filter(Boolean).join('；')],
   'statements.early': (t, d) => [`客人提前結帳，開出對帳單 ${t}`, `${d.order_count} 張訂單，合計 ${ntd(d.total_amount)}`],
   'cost.create': (t, d) => [`記一筆成本：${d.category}`, `${d.currency} ${d.amount}`],
   'cost.update': () => ['修改一筆成本', ''],

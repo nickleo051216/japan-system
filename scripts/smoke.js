@@ -1686,6 +1686,69 @@ const login = async (id) =>
     check('帶 null 清掉', cl.payway === null && cl.invoice === null && cl.note === null && cl.pickup === null, cl);
     }
 
+    {
+    section('2026-11-26 後台「客人購物車」：看得到客人還沒結帳的東西、替拍照下單報價');
+    const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+    const pending = async () => (await api('POST', '/api/v1/notify/pending', { ...MK, body: { limit: 100 } })).json.data.notifications;
+    const pl = (n) => (typeof n.payload === 'string' ? JSON.parse(n.payload) : n.payload);
+    await pending();
+    const ph = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_cartsadm_202611261300001.jpg', orig_name: 'IMG_0001.jpeg', data: 'x' } })).json.data;
+    const tx = (await B('POST', '/api/v1/cart/add-text', { body: { name: '購物車清單 文字下單', qty: 1, jpy_taxed: 1000 } })).json.data;
+    check('客人看不到後台的購物車清單 → 403', (await B('GET', '/api/v1/carts/admin-list')).status === 403);
+    const lst = (await api('GET', '/api/v1/carts/admin-list', { token: helper })).json.data;
+    const mine = lst.items.filter((i) => i.member_no && i.nickname);
+    const row = lst.items.find((i) => i.cart_id === ph.cart_id);
+    check('小幫手看得到客人還沒結帳的品項（暱稱、會員編號、來源、AI 狀態）', row && row.source_zh === '拍照下單' && row.ocr_status === 'failed'
+      && row.needs_quote === true && row.name === '拍照下單' && lst.items.some((i) => i.cart_id === tx.cart_id) && mine.length > 0, row);
+    check('「等你報價」排在最上面', lst.items[0].needs_quote === true && lst.needs_quote >= 1, lst.items.slice(0, 2).map((i) => i.needs_quote));
+    const onlyPh = (await api('GET', '/api/v1/carts/admin-list?only=photo', { token: owner })).json.data;
+    check('只看拍照下單', onlyPh.items.length > 0 && onlyPh.items.every((i) => i.source === 'image'), onlyPh.items.length);
+    const pk = (await api('GET', '/api/v1/carts/admin-list', { token: packer })).json.data;
+    check('包貨的人看得到清單但看不到價格', pk.items.length > 0 && pk.items.every((i) => !('price_twd' in i)), pk.items[0]);
+    const home = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+    check('後台首頁「今天要處理」出現「N 件拍照下單等你報價」', home.todo.some((t) => t.kind === 'cart_quote' && /拍照下單等你報價/.test(t.title) && t.link === '#/carts?only=photo'), home.todo.map((t) => t.kind));
+    const notPhoto = await api('POST', '/api/v1/carts/quote', { token: owner, body: { cart_id: tx.cart_id, name: 'x', price_twd: 100 } });
+    check('只有拍照下單能在這裡報價 → NOT_PHOTO', notPhoto.status === 409 && notPhoto.json.error.code === 'NOT_PHOTO', notPhoto.json);
+    const noName = await api('POST', '/api/v1/carts/quote', { token: owner, body: { cart_id: ph.cart_id, price_twd: 100 } });
+    check('沒填品名 → BAD_NAME', noName.status === 400 && noName.json.error.code === 'BAD_NAME', noName.json);
+    check('客人不能自己用這支報價 → 403', (await B('POST', '/api/v1/carts/quote', { body: { cart_id: ph.cart_id, name: 'x', price_twd: 1 } })).status === 403);
+    const qt = await api('POST', '/api/v1/carts/quote', { token: helper, body: { cart_id: ph.cart_id, name: 'Pigeon 奶瓶 240ml', jpy_taxed: 1000 } });
+    check('替拍照下單報價（填日幣照價目表換算）→ 客人那邊有品名、價格，狀態待客人確認', qt.status === 200 && qt.json.data.name === 'Pigeon 奶瓶 240ml'
+      && qt.json.data.price_twd === 400 && qt.json.data.status === 'pending' && qt.json.data.ai_confidence === 'high' && qt.json.data.notified === true, qt.json);
+    const nq = (await pending()).filter((n) => n.kind === 'quoted' && pl(n).cart_id === ph.cart_id);
+    check('LINE 通知客人「店家報價了」，點了去購物車', nq.length === 1 && /店家報價了/.test(pl(nq[0]).text) && pl(nq[0]).path === 'cart' && /\?path=cart/.test(pl(nq[0]).text), nq.map((n) => pl(n).text));
+    const late = await api('POST', '/api/v1/ocr/result', { ...MK, body: { cart_id: ph.cart_id, name: 'AI 亂猜的', jpy_taxed: 5000, ai_confidence: 'medium' } });
+    check('店家報價後，晚到的 AI 結果不會蓋掉', late.json.data.applied === false && (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === ph.cart_id).name === 'Pigeon 奶瓶 240ml', late.json);
+    const re = (await api('POST', '/api/v1/carts/quote', { token: owner, body: { cart_id: ph.cart_id, name: 'Pigeon 奶瓶 240ml', price_twd: 380 } })).json.data;
+    check('改價不重複通知', re.price_twd === 380 && re.notified === false && !(await pending()).some((n) => n.kind === 'quoted' && pl(n).cart_id === ph.cart_id), re);
+    const audits = (await api('GET', '/api/v1/audit/list?limit=50', { token: owner })).json.data;
+    check('稽核記下報價', audits.some((l) => l.action === 'cart.quote' && l.target === ph.cart_id));
+    await B('POST', '/api/v1/cart/remove', { body: { cart_id: ph.cart_id } });
+    await B('POST', '/api/v1/cart/remove', { body: { cart_id: tx.cart_id } });
+    }
+
+    {
+    section('2026-11-26 改團名、截單時間（團名填成「0」也改得回來）');
+    const info0 = (await api('GET', '/api/v1/broadcast/form-info', { token: owner })).json.data;
+    const bt = info0.batch && info0.batch.batch;
+    check('（前置）目前有一團', !!bt, info0);
+    check('小幫手不能改團名 → 403', (await api('POST', '/api/v1/settings/batch/update', { token: helper, body: { batch: bt, name: 'x' } })).status === 403);
+    const blank = await api('POST', '/api/v1/settings/batch/update', { token: owner, body: { batch: bt, name: '  ' } });
+    check('團名不能空白 → BAD_NAME', blank.status === 400 && blank.json.error.code === 'BAD_NAME', blank.json);
+    const nf = await api('POST', '/api/v1/settings/batch/update', { token: owner, body: { batch: 'T-NOPE', name: 'x' } });
+    check('團號不存在 → 404', nf.status === 404, nf.json);
+    const oldName = info0.batch.name;
+    const up = await api('POST', '/api/v1/settings/batch/update', { token: owner, body: { batch: bt, name: '11/20 大阪採買', close_at: '2026-11-30T12:00:00+08:00' } });
+    const info1 = (await api('GET', '/api/v1/broadcast/form-info', { token: owner })).json.data;
+    check('店主改團名＋截單時間 → 開喊單畫面看到新團名', up.status === 200 && info1.batch.name === '11/20 大阪採買'
+      && new Date(info1.batch.close_at).toISOString() === '2026-11-30T04:00:00.000Z' && info1.batch.batch === bt, [up.json, info1.batch]);
+    const clr = (await api('POST', '/api/v1/settings/batch/update', { token: owner, body: { batch: bt, close_at: null } })).json.data;
+    check('截單時間可以清掉（空白＝不設）', clr.close_at === null && clr.name === '11/20 大阪採買', clr);
+    const al = (await api('GET', '/api/v1/audit/list?limit=30', { token: owner })).json.data;
+    check('稽核記下「團名從什麼改成什麼」', al.some((l) => l.action === 'batch.update' && l.target === bt));
+    await api('POST', '/api/v1/settings/batch/update', { token: owner, body: { batch: bt, name: oldName } });
+    }
+
     section('拍照辨識迴路（Storage ＋ 領工作 ＋ 回寫）');
     const jpgUrl = 'data:image/jpeg;base64,' + Buffer.from('fake-jpeg-bytes').toString('base64');
     const shot = (await B('POST', '/api/v1/cart/add-image',

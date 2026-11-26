@@ -69,6 +69,8 @@ function boot() {
   require('./routes/bank-credits');
   require('./routes/costs');
   require('./routes/checkout-prefs');
+  // 2026-11-26：後台看得到客人還沒結帳的購物車、替拍照下單報價。
+  require('./routes/carts-admin');
   booted = true;
   return true;
 }
