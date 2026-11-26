@@ -17,6 +17,7 @@ const { READABLE_SQL, PHOTO_PLACEHOLDER } = require('../lib/wish');
 const audit = require('../lib/audit');
 const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
 const budget = require('../lib/wish-budget');
+const ocrHealth = require('../lib/ocr-health');
 
 // 合約 v1.2 #4：末八碼放寬為 [0-9a-z]，原本只收十六進位會把示範帳號擋掉。
 const IMAGE_NAME = /^ocr_temp_[0-9a-z]{8}_\d{15}\.(jpg|png|webp|heic)$/i;
@@ -691,8 +692,49 @@ async function wishResult(body) {
     wish: await oneWish(wishId) };
 }
 
+/**
+ * n8n 辨識失敗也回寫（2026-11-26）：{ cart_id | wish_id | listing_id, failed: true, reason }。
+ * 以前失敗是默默跳過，照片要等 10 分鐘租約過了才重試，店家也不知道為什麼。
+ * 現在：記下原因（後台首頁的「AI 辨識」燈號看得到）、馬上放回佇列下一分鐘再試；
+ * 試滿 5 次就算辨識結束，請客人自己填（客人那邊顯示「沒辨識出來」，不會一直等）。
+ */
+async function ocrFailed(body) {
+  const reason = String(body.reason || '').slice(0, 300) || null;
+  if (body.wish_id !== undefined && body.wish_id !== null) {
+    const id = String(body.wish_id);
+    await ocrHealth.record(false, { reason, kind: 'wish' });
+    try {
+      await db.run(`UPDATE wish_ocr SET claimed_at = NULL, done_at = CASE WHEN attempts >= ? THEN now() ELSE done_at END WHERE wish_id = ? AND done_at IS NULL`,
+        OCR_MAX_ATTEMPTS, id);
+    } catch (e) { if (e.code !== '42P01') throw e; }
+    return { wish_id: id, applied: false, failed: true };
+  }
+  if (body.listing_id !== undefined && body.listing_id !== null) {
+    const id = String(body.listing_id);
+    await ocrHealth.record(false, { reason, kind: 'listing' });
+    await db.run(`UPDATE listing_drafts SET ocr_claimed_at = NULL, ocr_done_at = CASE WHEN ocr_attempts >= ? THEN now() ELSE ocr_done_at END
+                   WHERE draft_id = ? AND ocr_done_at IS NULL`, OCR_MAX_ATTEMPTS, id);
+    return { listing_id: id, applied: false, failed: true };
+  }
+  const cartId = String(body.cart_id ?? '');
+  const row = await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId);
+  if (!row) throw err('CART_NOT_FOUND', '找不到這個品項', 404);
+  await ocrHealth.record(false, { reason, kind: 'cart' });
+  const done = Number(row.ocr_attempts) >= OCR_MAX_ATTEMPTS;
+  await db.run(
+    `UPDATE cart_items SET ocr_claimed_at = NULL, note = CASE WHEN ? THEN ? ELSE note END
+      WHERE cart_id = ? AND ai_confidence = 'low' AND price_twd IS NULL`,
+    done, '照片沒辨識出來，請自行填寫品名和價格（或等店家報價）', cartId);
+  return { cart_id: cartId, applied: false, failed: true, done,
+    cart_item: await shapeOne(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)) };
+}
+
 post('/api/v1/ocr/result', async ({ body, req }) => {
   notify.requireMachine(req);
+  if (body.failed === true) return ok(await ocrFailed(body));
+  if (body.wish_id !== undefined || body.listing_id !== undefined || body.cart_id !== undefined) {
+    await ocrHealth.record(true, { model: body.model || null, kind: body.wish_id ? 'wish' : body.listing_id ? 'listing' : 'cart' });
+  }
   if (body.wish_id !== undefined && body.wish_id !== null) return ok(await wishResult(body));
   if (body.listing_id !== undefined && body.listing_id !== null) return ok(await require('./listings').listingResult(body));
   const cartId = String(body.cart_id ?? '');

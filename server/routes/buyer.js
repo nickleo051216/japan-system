@@ -41,6 +41,36 @@ const int = (v) => (v === null || v === undefined || v === '' ? null : parseInt(
 // 否則 AI 認不出來的圖會讓前台永遠停在「辨識中」。
 const OCR_MAX_ATTEMPTS = 5;
 
+// 拍照下單上傳超過這麼久還沒結果，就不再讓客人等（2026-11-26：周小姐實測卡了好幾小時）。
+const OCR_TIMEOUT_MS = 15 * 60 * 1000;
+const OCR_PENDING_NOTE = 'AI 辨識中，完成後自動更新';   // buyer-cart.js 上傳時寫的備註
+
+/**
+ * 拍照下單的辨識狀態，前台直接照這個顯示（2026-11-26 新增，不用自己拼判斷式）：
+ *   none     不是拍照下單
+ *   pending  AI 辨識中（通常 1～2 分鐘）
+ *   done     辨識完了（品名／價格是 AI 自動填的，客人可以直接改）
+ *   failed   沒辨識出來（AI 失敗、照片沒存到、或超過 15 分鐘）→ 請客人自己填，或等店家報價
+ */
+function ocrState(r) {
+  if (r.source !== 'image') return 'none';
+  if (r.price_twd !== null || r.ai_confidence !== 'low') return 'done';
+  if (Number(r.ocr_attempts) >= OCR_MAX_ATTEMPTS) return 'failed';
+  if (!r.image_url) return 'failed';
+  if (Date.now() - new Date(r.created_at).getTime() > OCR_TIMEOUT_MS) return 'failed';
+  return 'pending';
+}
+const OCR_MESSAGE = {
+  pending: 'AI 辨識中，通常 1～2 分鐘',
+  failed: '照片沒辨識出來，請自己填品名和價格，或等店家報價',
+};
+function ocrMessage(r, st) {
+  if (st === 'pending' || st === 'failed') return OCR_MESSAGE[st];
+  if (st === 'done' && r.price_twd === null) return '價格沒認出來，請自己填，或等店家報價';
+  if (st === 'done' && r.ai_confidence !== 'high') return 'AI 自動填的，有錯請直接改';
+  return null;
+}
+
 const cartShape = (r) => ({
   cart_id: r.cart_id, source: r.source, ref: r.ref,
   name: r.name, name_ja: r.name_ja || '',
@@ -50,9 +80,13 @@ const cartShape = (r) => ({
   size: r.size || null,   // v1.6：喊單選的尺寸
   created_at: r.created_at,
   // 合約 v1.2 #2：前台每 4 秒輪詢等辨識結果，這個旗標讓它不必自己拼湊判斷式。
-  // 非拍照來源一律 true —— 沒有什麼好等的。
-  ocr_done: r.source !== 'image' || r.price_twd !== null || r.ai_confidence !== 'low'
-    || Number(r.ocr_attempts) >= OCR_MAX_ATTEMPTS,
+  // 非拍照來源一律 true —— 沒有什麼好等的。2026-11-26 起超過 15 分鐘也算結束（ocr_status = failed）。
+  ocr_done: ocrState(r) !== 'pending',
+  // 上傳時備註寫的是「AI 辨識中…」；辨識沒回來那段字會一直留著（周小姐 11/26 實測卡好幾小時的原因）。
+  // 已經不是辨識中了，就把那段換成現在的狀態說明。
+  ...(r.source === 'image' && r.note === OCR_PENDING_NOTE && ocrState(r) !== 'pending' ? { note: ocrMessage(r, ocrState(r)) || '' } : {}),
+  ocr_status: ocrState(r),
+  ocr_message: ocrMessage(r, ocrState(r)),
 });
 
 const memberShape = (m) => ({

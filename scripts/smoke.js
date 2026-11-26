@@ -426,7 +426,8 @@ const login = async (id) =>
       { body: { file_name: 'ocr_temp_2993299f_202609221430123.jpg', data: 'x' } })).json.data;
     check('拍照下單 → pending、低信心、待報價',
       im.status === 'pending' && im.ai_confidence === 'low' && im.price_twd === null);
-    check('拍照品項標記為辨識未完成', im.ocr_done === false);
+    check('2026-11-26 沒有存到照片的拍照品項 → 直接標成「沒辨識出來」，請客人自己填（不讓客人空等）',
+      im.ocr_done === true && im.ocr_status === 'failed' && /沒辨識出來/.test(im.ocr_message), im);
     check('n8n 沒帶金鑰寫不回辨識結果',
       (await api('POST', '/api/v1/ocr/result', { body: { cart_id: im.cart_id, jpy_taxed: 1000 } })).status === 401);
     const ocrBack = await api('POST', '/api/v1/ocr/result', {
@@ -1733,6 +1734,50 @@ const login = async (id) =>
     const gaveUp = (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === blurry.cart_id);
     check('AI 認不出來也算辨識結束：前台不會永遠停在「辨識中」，並請客人自己填',
       gaveUp.ocr_done === true && gaveUp.price_twd === null && /自行填寫/.test(gaveUp.note), gaveUp);
+    {
+      // 2026-11-26：周小姐實測「拍照下單一直顯示辨識中」—— n8n 叫 AI 失敗時以前是默默跳過。
+      const MK = { headers: { 'X-Notify-Token': 'smoke-notify-secret' } };
+      const sql = async (q, args = []) => {
+        const { Client } = require('pg');
+        const c = new Client({ connectionString: databaseUrl }); await c.connect();
+        try { return (await c.query(q, args)).rows; } finally { await c.end(); }
+      };
+      const cartOf = async (id) => (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === id);
+      const f1 = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_failai00_202611261200001.jpg', data: jpgUrl } })).json.data;
+      check('剛上傳 → ocr_status = pending，附一句「AI 辨識中」', f1.ocr_status === 'pending' && f1.ocr_done === false && /辨識中/.test(f1.ocr_message), f1);
+      const claim1 = (await api('POST', '/api/v1/ocr/pending', { ...MK, body: { limit: 20 } })).json.data;
+      check('（前置）n8n 領到這張', claim1.jobs.some((j) => j.cart_id === f1.cart_id), claim1.jobs.map((j) => j.cart_id));
+      const fb = await api('POST', '/api/v1/ocr/result', { ...MK, body: { cart_id: f1.cart_id, failed: true, reason: 'OpenRouter 回 402：額度不足' } });
+      check('n8n 回寫失敗（failed＋原因）→ 不會把品項改成「中等信心」、還在辨識中', fb.status === 200 && fb.json.data.failed === true
+        && fb.json.data.done === false && (await cartOf(f1.cart_id)).ocr_status === 'pending' && (await cartOf(f1.cart_id)).ai_confidence === 'low', fb.json);
+      const claim2 = (await api('POST', '/api/v1/ocr/pending', { ...MK, body: { limit: 20 } })).json.data;
+      check('失敗的照片馬上放回佇列（下一分鐘就能重試，不用等 10 分鐘租約）', claim2.jobs.some((j) => j.cart_id === f1.cart_id && j.ocr_attempts === 2), claim2.jobs);
+      const dash = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+      check('後台首頁「AI 拍照辨識」看得到失敗次數和原因', dash.ai_ocr && dash.ai_ocr.fail_today >= 1 && /額度不足/.test(dash.ai_ocr.last_reason), dash.ai_ocr);
+      check('小幫手首頁看不到 AI 辨識燈號（店主才有）', (await api('GET', '/api/v1/dashboard/summary', { token: helper })).json.data.ai_ocr === null);
+      await sql('UPDATE cart_items SET ocr_attempts = 5 WHERE cart_id = $1', [f1.cart_id]);
+      await api('POST', '/api/v1/ocr/result', { ...MK, body: { cart_id: f1.cart_id, failed: true, reason: '還是不行' } });
+      const f1done = await cartOf(f1.cart_id);
+      check('試滿 5 次還是失敗 → 「沒辨識出來，請自己填」，不再顯示辨識中', f1done.ocr_status === 'failed' && f1done.ocr_done === true
+        && !/辨識中/.test(f1done.note) && /沒辨識出來/.test(f1done.note), f1done);
+      // 保底：n8n 根本沒在跑（沒有任何回寫），超過 15 分鐘也不再讓客人等
+      const f2 = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_noworker_202611261200002.jpg', data: jpgUrl } })).json.data;
+      await sql("UPDATE cart_items SET created_at = now() - interval '20 minutes' WHERE cart_id = $1", [f2.cart_id]);
+      const f2late = await cartOf(f2.cart_id);
+      check('上傳超過 15 分鐘都沒有結果 → 自動算「沒辨識出來」，上傳時那句「AI 辨識中…」換成現在的說明', f2late.ocr_status === 'failed'
+        && f2late.ocr_done === true && !/辨識中/.test(f2late.note) && /沒辨識出來/.test(f2late.note), f2late);
+      const dash2 = (await api('GET', '/api/v1/dashboard/summary', { token: owner })).json.data;
+      check('有照片卡超過 15 分鐘 → 燈號變紅，「今天要處理」最上面提醒', dash2.ai_ocr.light === 'red' && dash2.ai_ocr.stuck >= 1
+        && dash2.todo.some((t) => t.kind === 'ai_ocr'), [dash2.ai_ocr, dash2.todo.filter((t) => t.kind === 'ai_ocr')]);
+      // 低信心也先填 AI 的猜測（客人看得到東西，要改再改）
+      const f3 = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_lowconf0_202611261200003.jpg', data: jpgUrl } })).json.data;
+      await api('POST', '/api/v1/ocr/pending', { ...MK, body: { limit: 20 } });
+      await api('POST', '/api/v1/ocr/result', { ...MK, body: { cart_id: f3.cart_id, name: '嬰兒奶瓶（品牌看不清楚）', jpy_taxed: 990, ai_confidence: 'low' } });
+      const f3done = await cartOf(f3.cart_id);
+      check('AI 信心低也先把猜到的品名、價格填好，提示「AI 自動填的，有錯請直接改」', f3done.name === '嬰兒奶瓶（品牌看不清楚）'
+        && f3done.price_twd !== null && f3done.ocr_status === 'done' && /有錯請直接改/.test(f3done.ocr_message), f3done);
+      await sql("UPDATE cart_items SET status = 'removed' WHERE cart_id = ANY($1::text[])", [[f1.cart_id, f2.cart_id, f3.cart_id]]);
+    }
     await B('POST', '/api/v1/cart/confirm', { body: { cart_ids: [shot.cart_id] } });
     const po = (await B('POST', '/api/v1/orders/checkout',
       { body: { cart_ids: [shot.cart_id], pickup: { type: 'cvs' }, invoice: { type: 'carrier' } } })).json.data;

@@ -352,8 +352,17 @@ function startHarness() {
     const b = await add('ocr_temp_n8ntest2_202609240900002.jpg');
     mock.claudeScript.push({ status: 404, body: { error: { code: 404, message: 'No endpoints found that can handle the requested parameters.' } } });
     out = await run(ocrWf, '每分鐘');
-    check('OpenRouter 回錯誤 → 不回寫，照片留在佇列等下一輪',
-      out['解析結果'][0].write === false && !out['回寫辨識結果'] && (await cartItem(b.cart_id)).ocr_done === false, out['解析結果']);
+    const failedBack = out['回寫辨識結果'] && out['回寫辨識結果'][0];
+    check('2026-11-26 OpenRouter 回錯誤 → 也回寫（failed＋原因），照片放回佇列、客人那邊還是「辨識中」',
+      out['解析結果'][0].failed === true && failedBack && failedBack.ok && failedBack.data.failed === true
+      && (await cartItem(b.cart_id)).ocr_status === 'pending', [out['解析結果'], failedBack]);
+    const dash = await api('GET', '/api/v1/dashboard/summary', { token: owner });
+    check('後台首頁的「AI 拍照辨識」燈號記下失敗原因（不再默默失敗）',
+      dash.data.ai_ocr && dash.data.ai_ocr.fail_today >= 1 && /404/.test(dash.data.ai_ocr.last_reason || ''), dash.data.ai_ocr);
+    mock.claudeScript.push(claudeSays({ name: 'Combi 學習杯', name_ja: null, jpy_taxed: 1500, confidence: 'high' }));
+    await run(ocrWf, '每分鐘');
+    const retried = await cartItem(b.cart_id);
+    check('失敗的照片下一分鐘馬上重試（不用等 10 分鐘租約），這次成功就填好', retried.ocr_status === 'done' && retried.name === 'Combi 學習杯', retried);
 
     const c = await add('ocr_temp_n8ntest3_202609240900003.jpg');
     mock.claudeScript.push(claudeSays({ name: '', name_ja: null, jpy_taxed: null, confidence: 'low' }));
@@ -437,7 +446,20 @@ function startHarness() {
     const refused = await runCode(parse, { json: { statusCode: 200,
       body: { choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: null, refusal: '不處理' } }] } },
     lineage: { 組請求: { cart_id: 'x' } } });
-    check('模型拒絕 → 不回寫', refused.write === false, refused);
+    check('模型拒絕 → 回寫 failed＋原因（後端記下來、放回佇列）', refused.write === true && refused.result.failed === true
+      && /拒絕/.test(refused.result.reason) && refused.result.cart_id === 'x', refused);
+    const chatty = await runCode(parse, { json: { statusCode: 200, body: { choices: [{ finish_reason: 'stop',
+      message: { content: '好的，以下是結果：{"name":"X","name_ja":null,"jpy_taxed":800,"confidence":"medium"} 希望有幫助' } }] } },
+    lineage: { 組請求: { cart_id: 'x' } } });
+    check('JSON 前後多講了話也抓得出來', chatty.write === true && !chatty.result.failed && chatty.result.jpy_taxed === 800, chatty);
+    const buildReq = ocrWf.nodes.find((n) => n.name === '組請求');
+    const cfgLineage = { 設定: { model: 'anthropic/claude-sonnet-5', fallback_models: 'google/gemini-2.5-flash,openai/gpt-4o-mini' } };
+    const first = await runCode(buildReq, { json: { kind: 'cart', cart_id: 'x', image_url: 'https://x/y.jpg', ocr_attempts: 1 }, lineage: cfgLineage });
+    const third = await runCode(buildReq, { json: { kind: 'cart', cart_id: 'x', image_url: 'https://x/y.jpg', ocr_attempts: 3 }, lineage: cfgLineage });
+    const fourth = await runCode(buildReq, { json: { kind: 'cart', cart_id: 'x', image_url: 'https://x/y.jpg', ocr_attempts: 4 }, lineage: cfgLineage });
+    check('第 1 次用主模型；重試第 3、4 次輪流換備用模型', first.request.model === 'anthropic/claude-sonnet-5'
+      && third.request.model === 'google/gemini-2.5-flash' && fourth.request.model === 'openai/gpt-4o-mini', [first.model, third.model, fourth.model]);
+    check('提示詞要求「看不清楚也要給最可能的品名」，不回空字串', /name 一定要填/.test(first.request.messages[0].content));
     const fenced = await runCode(parse, { json: { statusCode: 200, body: { choices: [{ finish_reason: 'stop',
       message: { content: '```json\n{"name":"X","name_ja":null,"jpy_taxed":500,"confidence":"high"}\n```' } }] } },
     lineage: { 組請求: { cart_id: 'x' } } });
