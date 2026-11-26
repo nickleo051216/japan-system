@@ -94,6 +94,14 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
       if (autoStatement.light === 'red') todo.push({ urgency: 0, kind: 'auto_statement', title: '自動結算沒有正常執行', body: autoStatement.say, link: '#/statements' });
     } catch (e) { console.warn('[dashboard] 讀不到自動結算狀態：', e.message); }
   }
+  // AI 辨識的燈號（2026-11-26）：n8n 叫 OpenRouter 失敗、或有拍照下單卡超過 15 分鐘，就放進「今天要處理」。
+  let aiOcr = null;
+  if (auth.can(actor, 'payment.reconcile')) {
+    try {
+      aiOcr = await require('../lib/ocr-health').status();
+      if (aiOcr.light === 'red') todo.push({ urgency: 0, kind: 'ai_ocr', title: 'AI 拍照辨識不太順', body: aiOcr.say, link: '#/dashboard' });
+    } catch (e) { console.warn('[dashboard] 讀不到 AI 辨識狀態：', e.message); }
+  }
   // 小幫手請款（015）：店主才看得到。
   if (auth.can(actor, 'payment.reconcile')) {
     try {
@@ -146,6 +154,8 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
     todo,
     // 自動結算燈號（店主才有；其他角色是 null）
     auto_statement: autoStatement,
+    // AI 拍照辨識燈號（店主才有）
+    ai_ocr: aiOcr,
     overview,
     // 「開啟客人頁 ↗」：買家 LIFF 網址（不是機密，本來就印在 LINE 訊息裡）
     buyer_url: config.buyerLiffUrl,

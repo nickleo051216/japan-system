@@ -51,6 +51,15 @@ export async function render(root, ctx) {
       h('span', { class: 'arrow', 'aria-hidden': 'true' }, '›')));
   }
 
+  // ---- AI 拍照辨識燈號（店主）----
+  const o = d.ai_ocr;
+  if (o) {
+    const dot = { green: '🟢', red: '🔴', grey: '⚪' }[o.light];
+    home.append(h('div', { class: 'auto-light ' + o.light, title: o.last_reason ? `最近一次失敗：${o.last_reason}` : '' },
+      h('span', {}, `${dot} AI 拍照辨識`), h('span', { class: 'tiny' }, o.say),
+      o.light === 'red' && o.last_reason ? h('span', { class: 'tiny muted' }, `原因：${o.last_reason}`) : null));
+  }
+
   // ---- 彩色數字格 ----
   const t = ov.tiles || {};
   const TILES = [
@@ -93,7 +102,7 @@ export async function render(root, ctx) {
   const KIND = {
     out_of_stock: ['缺貨', 'red'], partial: ['部分', 'amber'], unpaid: ['待收款', 'amber'], to_ship: ['待出貨', 'blue'],
     uncosted: ['成本', ''], wall: ['許願牆', 'peach'], wish: ['許願', 'peach'], notify_failed: ['通知', 'red'],
-    ship_request: ['出貨申請', 'blue'], helper_claim: ['請款', 'amber'], auto_statement: ['結算', 'red'],
+    ship_request: ['出貨申請', 'blue'], helper_claim: ['請款', 'amber'], auto_statement: ['結算', 'red'], ai_ocr: ['AI 辨識', 'red'],
   };
   for (const item of d.todo) {
     const [label, tone] = KIND[item.kind] || ['待辦', ''];

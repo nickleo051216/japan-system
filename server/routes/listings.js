@@ -193,7 +193,8 @@ async function listingResult(body) {
   const d = await db.one('SELECT * FROM listing_drafts WHERE draft_id = ?', id);
   if (!d) throw err('NOT_FOUND', '找不到這張上架照片', 404);
   const confidence = ['high', 'medium', 'low'].includes(body.ai_confidence) ? body.ai_confidence : 'low';
-  const name = confidence === 'low' ? '' : String(body.name ?? '').trim().slice(0, 60);
+  // 2026-11-26：信心低也先把 AI 的猜測填進去（店主發布前一定會看過、可以改），總比空白好。
+  const name = String(body.name ?? '').trim().slice(0, 60);
   let twd = Number.isFinite(Number(body.price_twd)) && Number(body.price_twd) > 0 ? Math.round(Number(body.price_twd)) : null;
   const jpy = Number.isFinite(Number(body.jpy_taxed)) && Number(body.jpy_taxed) > 0 ? Number(body.jpy_taxed) : null;
   if (twd === null && jpy !== null) twd = await price.twdOf(jpy);
