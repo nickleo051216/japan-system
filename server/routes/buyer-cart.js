@@ -15,7 +15,7 @@ const drops = require('../lib/drops');
 const { now, uid } = require('../lib/ids');
 const { READABLE_SQL, PHOTO_PLACEHOLDER } = require('../lib/wish');
 const audit = require('../lib/audit');
-const { OCR_MAX_ATTEMPTS, cartShape, bget, bpost, err, num } = require('./buyer');
+const { OCR_MAX_ATTEMPTS, PHOTO_ORDER_NAME, cartShape, bget, bpost, err, num } = require('./buyer');
 const budget = require('../lib/wish-budget');
 const ocrHealth = require('../lib/ocr-health');
 
@@ -105,7 +105,8 @@ bpost('/api/v1/cart/add-image', async ({ me, body }) => {
     `INSERT INTO cart_items (cart_id, line_user_id, source, ref, name, jpy_taxed, price_twd, qty,
                              ai_confidence, status, file_name, image_url, note, created_at)
      VALUES (?,?,'image',?,?,NULL,NULL,?,'low','pending',?,?,?,?)`,
-    cartId, me.line_user_id, fileName, String(body.orig_name || '辨識中的品項'),
+    // 品名先寫「拍照下單」：前台以前帶的 orig_name 是相機檔名（IMG_6740.jpeg），給客人和店家看都沒意義（11/26 前端回報）。
+    cartId, me.line_user_id, fileName, PHOTO_ORDER_NAME,
     qtyOf(body.qty), fileName, imageUrl, 'AI 辨識中，完成後自動更新', now());
   return ok(await shapeOne(await db.one('SELECT * FROM cart_items WHERE cart_id = ?', cartId)));
 });

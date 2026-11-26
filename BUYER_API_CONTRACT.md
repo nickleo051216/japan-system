@@ -198,6 +198,7 @@ LIFF 買家前台（獨立 repo `japan-front-end-system`）與 japan-system 後�
 
   - 上傳時 `note` 是「AI 辨識中，完成後自動更新」。不是辨識中了，後端回傳的 `note` 會換成上面那句，**前台不要自己寫死「辨識中」**。
   - AI 信心低也會先把猜到的品名填進 `name`（例如「嬰兒奶瓶（品牌看不清楚）」），客人要改再改。
+  - 辨識完成前 `name` 一律是「拍照下單」（不再存相機檔名 `orig_name`；舊資料顯示時也會換掉）。
   - 輪詢照舊：`ocr_done == true`（＝`ocr_status` 不是 `pending`）就停。
 
 ### 7. `POST /cart/confirm`

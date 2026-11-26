@@ -1743,7 +1743,8 @@ const login = async (id) =>
         try { return (await c.query(q, args)).rows; } finally { await c.end(); }
       };
       const cartOf = async (id) => (await B('GET', '/api/v1/cart/list')).json.data.find((c) => c.cart_id === id);
-      const f1 = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_failai00_202611261200001.jpg', data: jpgUrl } })).json.data;
+      const f1 = (await B('POST', '/api/v1/cart/add-image', { body: { file_name: 'ocr_temp_failai00_202611261200001.jpg', orig_name: 'IMG_6740.jpeg', data: jpgUrl } })).json.data;
+      check('辨識完成前品名是「拍照下單」，不是相機檔名 IMG_6740.jpeg', f1.name === '拍照下單', f1.name);
       check('剛上傳 → ocr_status = pending，附一句「AI 辨識中」', f1.ocr_status === 'pending' && f1.ocr_done === false && /辨識中/.test(f1.ocr_message), f1);
       const claim1 = (await api('POST', '/api/v1/ocr/pending', { ...MK, body: { limit: 20 } })).json.data;
       check('（前置）n8n 領到這張', claim1.jobs.some((j) => j.cart_id === f1.cart_id), claim1.jobs.map((j) => j.cart_id));

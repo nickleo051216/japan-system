@@ -44,6 +44,9 @@ const OCR_MAX_ATTEMPTS = 5;
 // 拍照下單上傳超過這麼久還沒結果，就不再讓客人等（2026-11-26：周小姐實測卡了好幾小時）。
 const OCR_TIMEOUT_MS = 15 * 60 * 1000;
 const OCR_PENDING_NOTE = 'AI 辨識中，完成後自動更新';   // buyer-cart.js 上傳時寫的備註
+const PHOTO_ORDER_NAME = '拍照下單';                      // 辨識完成前的品名
+// 以前存的是相機檔名（IMG_6740.jpeg）或「辨識中的品項」：顯示時一律換成「拍照下單」。
+const looksLikeFile = (name) => !name || name === '辨識中的品項' || /\.(jpe?g|png|webp|heic|heif)$/i.test(String(name));
 
 /**
  * 拍照下單的辨識狀態，前台直接照這個顯示（2026-11-26 新增，不用自己拼判斷式）：
@@ -73,7 +76,7 @@ function ocrMessage(r, st) {
 
 const cartShape = (r) => ({
   cart_id: r.cart_id, source: r.source, ref: r.ref,
-  name: r.name, name_ja: r.name_ja || '',
+  name: r.source === 'image' && looksLikeFile(r.name) ? PHOTO_ORDER_NAME : r.name, name_ja: r.name_ja || '',
   jpy_taxed: num(r.jpy_taxed), price_twd: num(r.price_twd), qty: r.qty,
   ai_confidence: r.ai_confidence, status: r.status,
   note: r.note || '', file_name: r.file_name || null, image_url: r.image_url || null,
@@ -250,4 +253,4 @@ bget('/api/v1/home/summary', async ({ me }) => {
   });
 });
 
-module.exports = { OCR_MAX_ATTEMPTS, cartShape, orderShape, memberShape, statementShape, bget, bpost, err, num, int };
+module.exports = { OCR_MAX_ATTEMPTS, PHOTO_ORDER_NAME, cartShape, orderShape, memberShape, statementShape, bget, bpost, err, num, int };
