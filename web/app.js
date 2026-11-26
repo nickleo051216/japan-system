@@ -112,6 +112,8 @@ const ROUTES = [
     sub: '採買完一批一起拍收據請款，送給代購主核對。' },
   { path: 'board', title: '連線採買清單', cap: 'procurement.read', mod: () => import('./views/board.js'),
     sub: '看照片、對款式、確認數量，一單一單帶回家。' },
+  { path: 'carts', title: '客人購物車', cap: 'order.read', mod: () => import('./views/carts.js'),
+    sub: '客人還沒結帳的拍照下單、＋1。AI 沒認出來的拍照下單可以直接在這裡報價。' },
   { path: 'wishes', title: '許願報價與回覆', cap: 'order.read', mod: () => import('./views/wishes.js'),
     sub: '找到可採購商品、先報價，再確認客人的購買意願。' },
   { path: 'wish-rank', title: '許願與＋1 排行', cap: 'order.read', mod: () => import('./views/wish-rank.js'),

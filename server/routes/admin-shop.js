@@ -65,6 +65,31 @@ post('/api/v1/settings/batch/create', async ({ actor, body }) => {
   return ok(await db.one('SELECT * FROM batches WHERE batch = ?', batch));
 });
 
+/**
+ * 改團名、截止時間（2026-11-26：周小姐開團時「這一趟叫什麼」填了「0」，後台一直顯示「0（T-261113）」，
+ * 以前沒有地方可以改）。團號不能改（喊單、訂單、對帳都掛在團號上）。只有店主。
+ */
+post('/api/v1/settings/batch/update', async ({ actor, body }) => {
+  auth.requireCap(actor, 'settings.write');
+  const b = await db.one('SELECT * FROM batches WHERE batch = ?', String(body.batch ?? ''));
+  if (!b) throw err('BATCH_NOT_FOUND', '找不到這個團號', 404);
+  const sets = {};
+  if (body.name !== undefined) {
+    const name = String(body.name ?? '').trim();
+    if (!name) throw err('BAD_NAME', '團名不能空白，例：11/20 大阪採買');
+    if (name.length > 40) throw err('BAD_NAME', '團名最多 40 個字');
+    sets.name = name;
+  }
+  if (body.close_at !== undefined) sets.close_at = isoOrNull(body.close_at, '截單');
+  const keys = Object.keys(sets);
+  if (!keys.length) throw err('BAD_REQUEST', '請帶要改的 name 或 close_at');
+  await db.run(`UPDATE batches SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE batch = ?`,   // 欄名寫死
+    ...keys.map((k) => sets[k]), b.batch);
+  await audit.record({ actor: actor.line_user_id, action: 'batch.update', target: b.batch,
+    detail: { from: { name: b.name, close_at: b.close_at }, to: sets }, result: 'ok' });
+  return ok(await db.one('SELECT * FROM batches WHERE batch = ?', b.batch));
+});
+
 // ---- 喊單 -----------------------------------------------------------------
 
 const broadcastShape = (b) => ({
@@ -114,7 +139,7 @@ get('/api/v1/broadcast/admin-list', async ({ actor, query }) => {
 get('/api/v1/broadcast/form-info', async ({ actor }) => {
   auth.requireCap(actor, 'broadcast');
   const [batch, table] = await Promise.all([
-    currentBatch().then((b) => (b ? db.one('SELECT batch, name FROM batches WHERE batch = ?', b) : null)),
+    currentBatch().then((b) => (b ? db.one('SELECT batch, name, close_at FROM batches WHERE batch = ?', b) : null)),
     price.table(),
   ]);
   return ok({ batch: batch || null, price_max_jpy: table.length ? table[table.length - 1].jpy_taxed_max : null });

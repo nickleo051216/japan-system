@@ -102,7 +102,7 @@ export async function render(root, ctx) {
   const KIND = {
     out_of_stock: ['缺貨', 'red'], partial: ['部分', 'amber'], unpaid: ['待收款', 'amber'], to_ship: ['待出貨', 'blue'],
     uncosted: ['成本', ''], wall: ['許願牆', 'peach'], wish: ['許願', 'peach'], notify_failed: ['通知', 'red'],
-    ship_request: ['出貨申請', 'blue'], helper_claim: ['請款', 'amber'], auto_statement: ['結算', 'red'], ai_ocr: ['AI 辨識', 'red'],
+    ship_request: ['出貨申請', 'blue'], helper_claim: ['請款', 'amber'], auto_statement: ['結算', 'red'], ai_ocr: ['AI 辨識', 'red'], cart_quote: ['拍照下單', 'amber'],
   };
   for (const item of d.todo) {
     const [label, tone] = KIND[item.kind] || ['待辦', ''];

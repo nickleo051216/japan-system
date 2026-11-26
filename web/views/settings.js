@@ -48,7 +48,18 @@ export async function render(root) {
           try { const r = await POST('/api/v1/settings/batch', { batch: batchSel.value }); toast(`已切換至 ${r.current_batch}`); }
           catch (e) { fail(e); }
         },
-      }, '切換') : null))));
+      }, '切換') : null,
+      // 2026-11-26：團名填錯（例如「0」）可以在這裡改。團號不能改。
+      canWrite ? h('button', {
+        class: 'btn ghost',
+        onClick: async () => {
+          const b = batches.batches.find((x) => x.batch === batchSel.value);
+          const name = window.prompt(`團號 ${b.batch} 的新團名（例：11/20 大阪採買）`, b.name || '');
+          if (name === null) return;
+          try { await POST('/api/v1/settings/batch/update', { batch: b.batch, name }); toast('已更新團名'); location.reload(); }
+          catch (e) { fail(e); }
+        },
+      }, '改團名') : null))));
 
   const products = await GET('/api/v1/products/list');
   root.append(h('div', { class: 'card' },

@@ -94,6 +94,15 @@ get('/api/v1/dashboard/summary', async ({ actor, query }) => {
       if (autoStatement.light === 'red') todo.push({ urgency: 0, kind: 'auto_statement', title: '自動結算沒有正常執行', body: autoStatement.say, link: '#/statements' });
     } catch (e) { console.warn('[dashboard] 讀不到自動結算狀態：', e.message); }
   }
+  // 拍照下單等報價（2026-11-26）：AI 沒認出價格、或沒辨識出來的，放進「今天要處理」讓店家報價。
+  try {
+    const pq = Number((await db.one(
+      `SELECT count(*) AS n FROM cart_items
+        WHERE source = 'image' AND status IN ('pending','confirmed') AND price_twd IS NULL
+          AND created_at > now() - interval '60 days'
+          AND (ocr_attempts >= 5 OR ai_confidence <> 'low' OR image_url IS NULL OR created_at < now() - interval '15 minutes')`)).n);
+    if (pq && auth.can(actor, 'order.write')) todo.push({ urgency: 2, kind: 'cart_quote', title: `${pq} 件拍照下單等你報價`, body: 'AI 沒認出價格，客人在購物車等', link: '#/carts?only=photo' });
+  } catch (e) { console.warn('[dashboard] 讀不到拍照下單：', e.message); }
   // AI 辨識的燈號（2026-11-26）：n8n 叫 OpenRouter 失敗、或有拍照下單卡超過 15 分鐘，就放進「今天要處理」。
   let aiOcr = null;
   if (auth.can(actor, 'payment.reconcile')) {
